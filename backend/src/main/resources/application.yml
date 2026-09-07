@@ -1,0 +1,37 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: auth-backend
+
+  # ---- H2 内存库（演示用，重启后数据清空）----
+  datasource:
+    url: jdbc:h2:mem:authdb;DB_CLOSE_DELAY=-1;MODE=MySQL
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop   # 开发演示：每次启动按实体重建表；切 MySQL 后改为 update
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: false
+
+  h2:
+    console:
+      enabled: true           # http://localhost:8080/h2-console
+      path: /h2-console
+
+# ---- JWT 配置 ----
+jwt:
+jwt:
+  # 签名密钥通过环境变量注入
+  secret: ${JWT_SECRET:DSH-Program-JWT-Secret-Key-2024-ChangeMe-0123456789}
+  expiration: 86400000
+
+logging:
+  level:
+    com.example.auth: info

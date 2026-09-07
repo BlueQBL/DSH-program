@@ -1,0 +1,453 @@
+/* ============================================================
+   GATE · 设计令牌与全局样式
+   主题：暗色「门禁 / 终端」—— 午夜蓝黑底 + 琥珀色通行灯
+   ============================================================ */
+
+:root {
+  /* —— 本工程语义色 —— */
+  --gate-bg0: #080d1a;
+  --gate-bg1: #0d1526;
+  --gate-line: rgba(148, 163, 184, 0.16);
+  --gate-line-strong: rgba(148, 163, 184, 0.32);
+  --gate-text: #e9eef8;
+  --gate-muted: #93a5c3;
+  --gate-faint: #5d6f8f;
+  --gate-accent: #e5ab4e; /* 琥珀色通行灯 */
+  --gate-accent-soft: #f2c377;
+  --gate-accent-ink: #261a05;
+  --gate-ok: #57d9a3;
+  --gate-danger: #f87171;
+
+  --gate-font: 'Inter', 'HarmonyOS Sans SC', 'MiSans', 'PingFang SC',
+    'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+  --gate-mono: 'JetBrains Mono', 'Cascadia Code', 'SFMono-Regular', Consolas,
+    'Courier New', monospace;
+}
+
+/* —— Element Plus 暗色变量覆写：把组件体系拉进本主题 —— */
+html.dark {
+  --el-color-primary: #e5ab4e;
+  --el-color-primary-dark-2: #b07f22;
+  --el-color-primary-light-3: color-mix(in srgb, #e5ab4e 55%, #ffffff);
+  --el-color-primary-light-5: color-mix(in srgb, #e5ab4e 34%, #ffffff);
+  --el-color-primary-light-7: color-mix(in srgb, #e5ab4e 20%, #ffffff);
+  --el-color-primary-light-8: color-mix(in srgb, #e5ab4e 14%, #ffffff);
+  --el-color-primary-light-9: color-mix(in srgb, #e5ab4e 8%, #ffffff);
+
+  --el-bg-color: #0f1a2e;
+  --el-bg-color-page: #0a0f1e;
+  --el-bg-color-overlay: #111c31;
+  --el-fill-color-blank: #0b1424;
+
+  --el-border-color: #2a3852;
+  --el-border-color-light: #253349;
+  --el-border-color-lighter: #1d2a40;
+  --el-border-color-extra-light: #182338;
+  --el-border-color-dark: #34455f;
+  --el-border-color-hover: #3d5075;
+
+  --el-text-color-primary: #e9eef8;
+  --el-text-color-regular: #c6d2e2;
+  --el-text-color-secondary: #93a5c3;
+  --el-text-color-placeholder: #5d6f8f;
+
+  --el-mask-color: rgba(5, 9, 18, 0.72);
+
+  /* 输入框 */
+  --el-input-bg-color: #0b1424;
+  --el-input-border-color: #232f47;
+  --el-input-hover-border-color: #3d5075;
+  --el-input-focus-border-color: var(--el-color-primary);
+  --el-input-text-color: var(--el-text-color-primary);
+  --el-input-placeholder-color: #54658a;
+
+  --el-border-radius-base: 10px;
+}
+
+/* 主按钮：琥珀底 + 深色文字，高对比且区别于默认白字按钮 */
+html.dark .el-button--primary {
+  --el-button-text-color: var(--gate-accent-ink);
+  --el-button-hover-text-color: var(--gate-accent-ink);
+  --el-button-active-text-color: var(--gate-accent-ink);
+  --el-button-border-color: var(--el-color-primary);
+  --el-button-hover-border-color: var(--el-color-primary-light-5);
+  --el-button-hover-bg-color: var(--el-color-primary-light-5);
+  font-weight: 600;
+  letter-spacing: 0.14em;
+}
+
+/* —— 基础重置 —— */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-height: 100vh;
+  margin: 0;
+}
+
+body {
+  font-family: var(--gate-font);
+  color: var(--gate-text);
+  background-color: var(--gate-bg0);
+  /* 极淡的蓝色图纸网格 + 两团氛围光 */
+  background-image:
+    radial-gradient(1100px 700px at 88% -12%, rgba(229, 171, 78, 0.09), transparent 62%),
+    radial-gradient(900px 620px at -8% 112%, rgba(122, 162, 247, 0.08), transparent 60%),
+    linear-gradient(rgba(148, 163, 184, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.03) 1px, transparent 1px);
+  background-size: auto, auto, 44px 44px, 44px 44px;
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--gate-accent) 30%, transparent);
+}
+
+a {
+  color: var(--gate-accent);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--gate-accent-soft);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* 键盘焦点始终可见（无障碍底线） */
+:focus-visible {
+  outline: 2px solid var(--gate-accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001s !important;
+  }
+}
+
+/* ============================================================
+   认证页布局（AuthShell 使用；页面级通用类放全局便于跨组件使用）
+   ============================================================ */
+
+.auth-page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 顶栏 */
+.auth-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 22px clamp(20px, 5vw, 56px);
+}
+
+.brand {
+  font-family: var(--gate-mono);
+  font-size: 15px;
+  letter-spacing: 0.06em;
+  color: var(--gate-text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.brand-caret {
+  color: var(--gate-accent);
+  font-weight: 700;
+}
+
+.status-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--gate-mono);
+  font-size: 12px;
+  color: var(--gate-muted);
+  border: 1px solid var(--gate-line);
+  border-radius: 999px;
+  padding: 6px 14px;
+  background: rgba(15, 26, 46, 0.5);
+}
+
+.status-pill .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--gate-ok);
+  box-shadow: 0 0 0 0 rgba(87, 217, 163, 0.5);
+  animation: gate-ping 2.4s ease-out infinite;
+}
+
+@keyframes gate-ping {
+  70% {
+    box-shadow: 0 0 0 7px rgba(87, 217, 163, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(87, 217, 163, 0);
+  }
+}
+
+/* 双栏主体 */
+.auth-shell {
+  flex: 1;
+  width: min(1080px, 100% - clamp(0px, 8vw, 96px));
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: 1fr 440px;
+  align-items: center;
+  gap: clamp(32px, 6vw, 80px);
+  padding: 32px 0 48px;
+}
+
+/* —— 左侧品牌区 —— */
+.auth-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  animation: gate-rise 0.55s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+.auth-eyebrow {
+  margin: 0 0 18px;
+  font-family: var(--gate-mono);
+  font-size: 12px;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: var(--gate-accent);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.auth-eyebrow::before {
+  content: '';
+  width: 26px;
+  height: 1px;
+  background: var(--gate-accent);
+  opacity: 0.7;
+}
+
+.auth-title {
+  margin: 0 0 14px;
+  font-size: clamp(34px, 4.6vw, 48px);
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  color: var(--gate-text);
+}
+
+.auth-tagline {
+  margin: 0 0 36px;
+  font-size: 15.5px;
+  line-height: 1.85;
+  color: var(--gate-muted);
+  max-width: 420px;
+}
+
+.auth-terminal {
+  width: min(430px, 100%);
+  background: rgba(9, 14, 27, 0.78);
+  border: 1px solid var(--gate-line);
+  border-radius: 14px;
+  padding: 16px 18px 18px;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.32);
+}
+
+.term-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 10px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--gate-line);
+  font-family: var(--gate-mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  color: var(--gate-faint);
+}
+
+.term-head span:last-child {
+  color: var(--gate-accent);
+}
+
+.auth-terminal p {
+  margin: 0;
+  font-family: var(--gate-mono);
+  font-size: 13px;
+  line-height: 1.9;
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+.auth-terminal p.cmd {
+  color: #cfe0f6;
+}
+
+.auth-terminal p .p {
+  color: var(--gate-accent);
+  margin-right: 8px;
+  font-weight: 700;
+}
+
+.auth-terminal p.out {
+  color: #6fa88f;
+}
+
+.auth-terminal p.out::before {
+  content: '› ';
+  color: #4a7a66;
+}
+
+/* —— 右侧表单区 —— */
+.auth-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  animation: gate-rise 0.55s cubic-bezier(0.2, 0.7, 0.2, 1) 0.08s both;
+}
+
+.gate-card {
+  position: relative;
+  background: linear-gradient(180deg, rgba(26, 39, 66, 0.9), rgba(14, 22, 41, 0.94));
+  border: 1px solid var(--gate-line);
+  border-radius: 18px;
+  padding: 34px 34px 30px;
+  box-shadow: 0 30px 70px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(8px);
+}
+
+/* 卡片顶部一道琥珀色“通行灯”细线 */
+.gate-card::before {
+  content: '';
+  position: absolute;
+  top: -1px;
+  left: 28px;
+  right: 28px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--gate-accent), transparent);
+  opacity: 0.75;
+}
+
+.gate-card .el-form-item {
+  margin-bottom: 20px;
+}
+
+.gate-card .el-form-item__label {
+  height: auto;
+  line-height: 1;
+  padding: 0 0 8px;
+  font-size: 13px;
+  color: var(--gate-muted);
+}
+
+.gate-card .el-input__wrapper {
+  border-radius: 10px;
+  box-shadow: 0 0 0 1px var(--el-input-border-color) inset;
+  transition: box-shadow 0.18s ease;
+}
+
+.gate-card .el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 1px var(--el-color-primary) inset,
+    0 0 0 4px color-mix(in srgb, var(--el-color-primary) 16%, transparent);
+}
+
+.gate-card .el-input__inner {
+  height: 30px;
+  font-size: 15px;
+}
+
+.gate-submit {
+  width: 100%;
+  height: 46px;
+  margin-top: 6px;
+  border-radius: 12px;
+  font-size: 15px;
+}
+
+.gate-enter-hint {
+  margin: 16px 0 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--gate-faint);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.gate-enter-hint kbd,
+.kbd {
+  font-family: var(--gate-mono);
+  font-size: 11px;
+  color: var(--gate-text);
+  background: rgba(148, 163, 184, 0.1);
+  border: 1px solid var(--gate-line-strong);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+
+.auth-extra {
+  text-align: center;
+  font-size: 14px;
+  color: var(--gate-muted);
+}
+
+.auth-extra a {
+  font-weight: 600;
+}
+
+.auth-foot {
+  text-align: center;
+  padding: 16px 0 26px;
+  font-family: var(--gate-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--gate-faint);
+}
+
+@keyframes gate-rise {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 窄屏：品牌区上移、卡片占满 */
+@media (max-width: 900px) {
+  .auth-shell {
+    grid-template-columns: 1fr;
+    gap: 34px;
+    align-items: start;
+  }
+
+  .auth-title {
+    font-size: 32px;
+  }
+
+  .auth-terminal {
+    display: none;
+  }
+
+  .auth-panel {
+    width: min(440px, 100%);
+    margin: 0 auto;
+  }
+}

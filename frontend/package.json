@@ -1,0 +1,24 @@
+{
+  "name": "auth-frontend",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "登录/注册前端 —— Vue 3 + Vite + Element Plus + Pinia",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.1",
+    "axios": "^1.7.2",
+    "element-plus": "^2.7.5",
+    "pinia": "^2.1.7",
+    "vue": "^3.4.27",
+    "vue-router": "^4.3.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.4",
+    "vite": "^5.2.11"
+  }
+}
