@@ -1,0 +1,29 @@
+{
+  "name": "image-compressor",
+  "version": "1.0.0",
+  "description": "图片压缩工具 - 支持 JPG / PNG / WebP 等格式的批量压缩、质量调节、前后对比与打包下载（Express + Sharp）",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "smoke": "node scripts/smoke-test.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "image",
+    "compressor",
+    "sharp",
+    "compress",
+    "图片压缩"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "express": "^4.19.2",
+    "multer": "^2.0.2",
+    "sharp": "^0.33.4"
+  }
+}

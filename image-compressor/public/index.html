@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="description" content="免费、本机的图片压缩工具：拖入 JPG / PNG / WebP / AVIF 图片，调节压缩质量，逐张对比原图并批量打包下载。" />
+  <title>图片压缩 · 轻量瘦身你的图片</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <a class="skip-link" href="#dropzone">跳到上传区域</a>
+
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="/" aria-label="图片压缩工具首页">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 40 40" width="40" height="40">
+            <rect x="4" y="4" width="32" height="32" rx="10" fill="#0d9f6b"/>
+            <path d="M12 21.5h16M20 13.5v16" stroke="#fff" stroke-width="3.4" stroke-linecap="round"/>
+          </svg>
+        </span>
+        <span class="brand-text">
+          <strong>图片压缩</strong>
+          <small>本机处理 · 快速瘦身</small>
+        </span>
+      </a>
+      <p class="privacy-note">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M5 11V8a7 7 0 0 1 14 0v3m-14 0h14v9a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-9z"/></svg>
+        图片只在本机短暂处理，1 小时后自动清除
+      </p>
+    </div>
+  </header>
+
+  <main class="app" id="app">
+    <!-- 上传区 -->
+    <section class="hero" id="dropzone" tabindex="0" role="button"
+             aria-label="上传图片区域，可拖放或点击选择图片">
+      <input id="file-input" type="file" accept=".jpg,.jpeg,.png,.webp,.avif,.gif,.bmp,.tif,.tiff,image/*" multiple hidden />
+
+      <div class="dz-visual" aria-hidden="true">
+        <svg class="dz-mark" viewBox="0 0 96 96" width="96" height="96">
+          <g fill="none" stroke="#0d9f6b" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+            <!-- 下压箭头：上移指示 -->
+            <path d="M48 18v42M32 46l16 14 16-14"/>
+            <path d="M20 72c0-9 6-15 14-15 0-12 10-20 21-15 8-11 24-7 25 7 9 0 15 6 15 15 0 8-6 14-14 14H20z"/>
+          </g>
+        </svg>
+        <span class="dz-pulse" aria-hidden="true"></span>
+      </div>
+
+      <h1 class="dz-title">把图片拖到这里，即刻变轻</h1>
+      <p class="dz-sub">支持 <b>JPG</b> · <b>PNG</b> · <b>WebP</b> · <b>AVIF</b> · GIF/单帧，单张最大 60MB，一次最多 20 张</p>
+
+      <div class="dz-actions">
+        <button type="button" class="btn btn-primary" id="pick-btn">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/></svg>
+          选择图片
+        </button>
+        <span class="dz-hint">或直接粘贴（Ctrl / ⌘ + V）</span>
+      </div>
+
+      <!-- 上传进度（选择后出现） -->
+      <div class="progress-box" id="progress-box" hidden>
+        <div class="progress-meta">
+          <span id="progress-label">正在上传并压缩…</span>
+          <span id="progress-pct" class="num">0%</span>
+        </div>
+        <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+      </div>
+    </section>
+
+    <!-- 质量设置 -->
+    <section class="quality card" aria-label="压缩质量设置">
+      <div class="quality-head">
+        <span class="eyebrow">压缩强度</span>
+        <output class="quality-value num" id="quality-value">70%</output>
+      </div>
+      <div class="quality-body">
+        <input type="range" id="quality-range" class="quality-range" min="1" max="100" step="1" value="70" aria-label="压缩质量百分比" />
+        <div class="quality-labels" aria-hidden="true">
+          <span>1%</span><span class="preset-label">低 · 文件最小</span><span>100% · 原画质</span>
+        </div>
+        <div class="presets" role="group" aria-label="快捷质量档位">
+          <button type="button" class="preset" data-quality="85">高画质 <em>85%</em></button>
+          <button type="button" class="preset is-active" data-quality="70">均衡 <em>70%</em></button>
+          <button type="button" class="preset" data-quality="40">小体积 <em>40%</em></button>
+        </div>
+      </div>
+      <p class="quality-tip">PNG 低于 90% 时采用智能调色板压缩；JPEG / WebP / AVIF 直接按百分比调节画质。</p>
+    </section>
+
+    <!-- 会话摘要 + 批量操作 -->
+    <section class="summary" id="summary" hidden>
+      <div class="summary-stats">
+        <div class="summary-stat">
+          <span class="stat-label">文件数</span>
+          <span class="stat-value num" id="sum-count">0</span>
+        </div>
+        <div class="summary-stat">
+          <span class="stat-label">原始体积</span>
+          <span class="stat-value num" id="sum-original">0 B</span>
+        </div>
+        <div class="summary-stat stat-accent">
+          <span class="stat-label">压缩后</span>
+          <span class="stat-value num" id="sum-compressed">0 B</span>
+        </div>
+        <div class="summary-stat stat-save">
+          <span class="stat-label">共节省</span>
+          <span class="stat-value num" id="sum-saved">0%</span>
+        </div>
+      </div>
+      <div class="summary-actions">
+        <button type="button" class="btn btn-ghost" id="btn-recompress" title="按当前质量重新压缩全部图片">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M20 11A8 8 0 1 0 18.4 15M20 5v6h-6"/></svg>
+          按此质量重压全部
+        </button>
+        <button type="button" class="btn btn-primary" id="btn-zip">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M21 8v13H3V8M1 3h22v5H1zM10 12h4M10 8h4M10 16h4"/></svg>
+          打包下载全部
+        </button>
+      </div>
+    </section>
+
+    <!-- 结果列表 -->
+    <section class="results" id="results" aria-live="polite">
+      <div class="empty-state" id="empty-state">
+        <div class="empty-steps" aria-hidden="true">
+          <span><b>1</b> 拖入或粘贴图片</span>
+          <span class="arrow">→</span>
+          <span><b>2</b> 拖动滑杆选择画质</span>
+          <span class="arrow">→</span>
+          <span><b>3</b> 左右拖动对比，下载结果</span>
+        </div>
+        <p class="empty-note">压缩完成后，每张图都能<span class="mark">按住左右拖动</span>查看原图与压缩后的差别，保证“瘦身不掉肉”。</p>
+      </div>
+      <div class="cards" id="cards"></div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status" aria-live="assertive"></div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>

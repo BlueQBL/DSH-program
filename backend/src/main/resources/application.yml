@@ -27,9 +27,8 @@ spring:
 
 # ---- JWT 配置 ----
 jwt:
-jwt:
   # 签名密钥通过环境变量注入
-  secret: ${JWT_SECRET:DSH-Program-JWT-Secret-Key-2024-ChangeMe-0123456789}
+  secret: DSH-Program-JWT-Secret-Key-2024-ChangeMe-0123456789
   expiration: 86400000
 
 logging:

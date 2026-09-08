@@ -417,6 +417,20 @@ http://localhost:5173
 
 **开始使用。**
 
+# 16. 其他项目
+
+仓库持续沉淀新项目，各自独立、便于单独运行：
+
+| 项目 | 目录 | 技术栈 | 快速开始 |
+| --- | --- | --- | --- |
+| JWT 认证示例 | `backend/` + `frontend/` | Spring Boot 3 + Vue 3 | 见上文 |
+| **图片压缩工具** | `image-compressor/` | Node.js + Express + Sharp（前端原生） | `cd image-compressor && npm install && npm start` → http://localhost:3210 |
+
+图片压缩工具实现了图片上传压缩、质量调节、前后对比、批量打包下载的完整前后端闭环，
+并内置端到端冒烟测试（`npm run smoke`），详见 [image-compressor/README.md](image-compressor/README.md)。
+
+后续新增项目会继续追加到本表。
+
 
 
 
