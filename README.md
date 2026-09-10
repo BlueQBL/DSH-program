@@ -425,11 +425,50 @@ http://localhost:5173
 | --- | --- | --- | --- |
 | JWT 认证示例 | `backend/` + `frontend/` | Spring Boot 3 + Vue 3 | 见上文 |
 | **图片压缩工具** | `image-compressor/` | Node.js + Express + Sharp（前端原生） | `cd image-compressor && npm install && npm start` → http://localhost:3210 |
+| **React Router 演示** | `react-frontend/` | React 18 + TypeScript + React Router 7 + Vite 7 | `cd react-frontend && npm install && npm run dev` → http://localhost:5174 |
 
 图片压缩工具实现了图片上传压缩、质量调节、前后对比、批量打包下载的完整前后端闭环，
 并内置端到端冒烟测试（`npm run smoke`），详见 [image-compressor/README.md](image-compressor/README.md)。
 
 后续新增项目会继续追加到本表。
+
+---
+
+# 17. react-frontend：React + TypeScript + React Router 演示
+
+`react-frontend/` 是一个最小而完整的 **React + TypeScript** 应用，主要用于演示 **React Router** 的基础能力：
+
+| 功能 | 说明 |
+| --- | --- |
+| 首页 `/` | 首页 Hero + 路由示意 + 页面卡片 |
+| 关于页 `/about` | 项目说明与技术栈（React / TypeScript / React Router / Vite） |
+| 导航栏 | `NavLink` 根据当前地址自动高亮「所在页」 |
+| 嵌套布局 `Layout` | `<Outlet/>` 承载页面，导航栏与页脚全局常驻 |
+| 404 兜底 `*` | 任何未声明地址优雅回退到「此路不通」页 |
+
+## 17.1 运行方式
+
+```shell
+cd react-frontend
+npm install
+npm run dev        # → http://localhost:5174
+npm run build      # tsc 类型检查 + Vite 生产构建
+```
+
+## 17.2 依赖版本升级记录（安全漏洞修复）
+
+> 记录日期：2026-09-10。由 `npm audit` 发现，修复后输出由 **4 vulnerabilities（3 moderate, 1 high）** 降至 **0 vulnerabilities**。
+
+| 包 | 修复前 | 升级后 | 修复内容 |
+| --- | --- | --- | --- |
+| `react-router-dom` | `^6.26.2` | `^7.18.3` | react-router「开放重定向」与 `deserializeErrors()` 构造器注入漏洞——修复仅存在于 v7，6.x 线无补丁 |
+| `vite` | `^5.4.8` | `^7.3.6` | esbuild 开发服务器请求漏洞——Vite 5 锁死 esbuild `0.21.5`，修复需 esbuild `≥0.25` |
+| `@vitejs/plugin-react` | `^4.3.1` | `^5.2.0` | 跟随并匹配 Vite 7 |
+| `react` / `react-dom` | `^18.3.1` | 保持 `^18.3.1` | 不变；React Router 7 兼容 React 18 |
+
+升级后实际落地版本：`esbuild@0.28.2`、`react-router@7.18.3`、`vite@7.3.6`、`@vitejs/plugin-react@5.2.0`。
+
+说明：本次升级涉及 Vite 5→7 与 React Router 6→7 两次大版本跳升。本项目只用稳定 API（`BrowserRouter` / `Routes` / `Route` / `NavLink` / `Outlet` / `Link`），在 v7 下无需改动代码；已通过 `npm run build` 与开发服务器运行时验证。
 
 
 

@@ -1,0 +1,426 @@
+/* ============ 设计令牌 ============ */
+:root {
+  --bg: #0e1626;          /* 深午夜蓝 —— 页面底色 */
+  --surface: #131e33;     /* 面板 / 卡片底色 */
+  --surface-2: #1a2740;   /* 轻微抬升的面板 */
+  --ink: #eaf1f8;         /* 正文主色 */
+  --muted: #8fa3bf;       /* 次要文字 */
+  --faint: #5f7390;       /* 更弱文字 */
+  --accent: #5ad1f5;      /* 天空蓝 —— 主强调 */
+  --waypoint: #8b7cf6;    /* 紫 —— 路径节点 */
+  --line: rgba(143, 163, 191, 0.16);
+
+  --font: "Avenir Next", "Segoe UI", "PingFang SC", "Microsoft YaHei",
+    system-ui, -apple-system, sans-serif;
+
+  --fs-hero: clamp(2.6rem, 6.5vw, 4.6rem);
+  --fs-title: clamp(1.7rem, 3.5vw, 2.3rem);
+  --fs-h2: 1.15rem;
+  --fs-body: 1rem;
+  --fs-small: 0.875rem;
+  --fs-caption: 0.72rem;
+
+  --radius: 14px;
+  --shadow: 0 18px 50px -20px rgba(0, 0, 0, 0.55);
+}
+
+/* ============ 基础 ============ */
+* {
+  box-sizing: border-box;
+}
+html {
+  -webkit-text-size-adjust: 100%;
+}
+body {
+  margin: 0;
+  background:
+    radial-gradient(1200px 600px at 15% -10%, rgba(139, 124, 246, 0.12), transparent 60%),
+    radial-gradient(900px 500px at 90% 0%, rgba(90, 209, 245, 0.1), transparent 55%),
+    var(--bg);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: var(--fs-body);
+  line-height: 1.65;
+  min-height: 100vh;
+}
+#root {
+  min-height: 100vh;
+}
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+code {
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+  font-size: 0.92em;
+  color: var(--accent);
+  background: rgba(90, 209, 245, 0.09);
+  padding: 0.08em 0.4em;
+  border-radius: 6px;
+}
+
+.shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+.container {
+  width: min(1080px, 100% - 2.5rem);
+  margin-inline: auto;
+}
+
+/* ============ 导航栏 ============ */
+.navbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: rgba(14, 22, 38, 0.86);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line);
+}
+.navbar-inner {
+  height: 68px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--ink);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.brand-mark {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid var(--waypoint);
+  position: relative;
+}
+.brand-mark::after {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  border-radius: 50%;
+  background: var(--waypoint);
+}
+.nav {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+.nav-link {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.5rem 0.8rem;
+  border-radius: 10px;
+  color: var(--muted);
+  transition: color 0.18s ease, background 0.18s ease;
+}
+.nav-link:hover {
+  color: var(--ink);
+}
+.nav-waypoint {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: transparent;
+  border: 1.5px solid var(--faint);
+  transition: background 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+}
+.nav-hint {
+  font-size: var(--fs-caption);
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.nav-link.is-active {
+  color: var(--ink);
+  background: rgba(90, 209, 245, 0.08);
+}
+.nav-link.is-active .nav-waypoint {
+  background: var(--accent);
+  border-color: var(--accent);
+  transform: scale(1.15);
+}
+.nav-link.is-active::before {
+  content: "";
+  position: absolute;
+  left: 0.8rem;
+  right: 0.8rem;
+  bottom: -7px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+/* ============ 主体 ============ */
+.main {
+  flex: 1;
+}
+.page {
+  padding: clamp(3rem, 8vw, 6rem) 0 4.5rem;
+}
+
+/* ============ 首页 Hero ============ */
+.hero {
+  max-width: 780px;
+}
+.eyebrow {
+  margin: 0 0 1rem;
+  font-size: var(--fs-caption);
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.hero-title {
+  margin: 0;
+  font-size: var(--fs-hero);
+  line-height: 1.06;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.hero-sub {
+  margin: 1.4rem 0 0;
+  max-width: 52ch;
+  color: var(--muted);
+  font-size: 1.08rem;
+}
+
+.routemap {
+  margin: 2.5rem 0 0;
+}
+.routemap svg {
+  width: 100%;
+  height: auto;
+  display: block;
+  filter: drop-shadow(var(--shadow));
+}
+.route-track {
+  animation: dash 26s linear infinite;
+}
+@keyframes dash {
+  to {
+    stroke-dashoffset: -200;
+  }
+}
+.route-node {
+  transition: transform 0.18s ease;
+}
+.routemap:hover .route-node {
+  transform: translateY(-2px);
+}
+.route-label {
+  fill: var(--ink);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  letter-spacing: 0.05em;
+}
+.route-caption {
+  fill: var(--faint);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+}
+
+/* ============ 卡片 ============ */
+.card-grid {
+  margin-top: 3rem;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  transition: transform 0.18s ease, border-color 0.18s ease;
+}
+.card:hover {
+  transform: translateY(-3px);
+  border-color: rgba(90, 209, 245, 0.35);
+}
+.card-path {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: var(--fs-small);
+}
+.card-node {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--waypoint);
+  flex: none;
+}
+.card-title {
+  margin: 0;
+  font-size: var(--fs-h2);
+}
+.card-body {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-small);
+  flex: 1;
+}
+.card-link {
+  font-size: var(--fs-small);
+  font-weight: 500;
+}
+
+/* ============ 关于页 ============ */
+.page-head {
+  max-width: 720px;
+  margin-bottom: 2.5rem;
+}
+.page-title {
+  margin: 0;
+  font-size: var(--fs-title);
+  letter-spacing: -0.015em;
+}
+.page-lead {
+  margin: 1rem 0 0;
+  color: var(--muted);
+  font-size: 1.06rem;
+}
+.about-body {
+  max-width: 660px;
+  color: var(--muted);
+  margin-bottom: 3rem;
+}
+.about-body p {
+  margin: 0 0 1rem;
+}
+.stack-list {
+  border-top: 1px solid var(--line);
+}
+.stack-row {
+  display: grid;
+  grid-template-columns: 3rem 10rem 1fr;
+  grid-template-areas: "idx name detail" "idx role detail";
+  align-items: center;
+  gap: 0.4rem 1rem;
+  padding: 1.2rem 0;
+  border-bottom: 1px solid var(--line);
+}
+.stack-index {
+  grid-area: idx;
+  color: var(--faint);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: var(--fs-small);
+}
+.stack-name {
+  grid-area: name;
+  font-weight: 600;
+}
+.stack-role {
+  grid-area: role;
+  font-size: var(--fs-caption);
+  color: var(--accent);
+}
+.stack-detail {
+  grid-area: detail;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-small);
+}
+
+/* ============ 404 ============ */
+.notfound {
+  text-align: center;
+  max-width: 560px;
+}
+.notfound-code {
+  margin: 0;
+  font-size: 4rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--waypoint);
+}
+.notfound-body {
+  color: var(--muted);
+}
+.btn {
+  display: inline-block;
+  margin-top: 1rem;
+  padding: 0.7rem 1.2rem;
+  background: var(--accent);
+  color: #0e1626;
+  font-weight: 600;
+  border-radius: 10px;
+  transition: transform 0.15s ease, filter 0.15s ease;
+}
+.btn:hover {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+
+/* ============ 页脚 ============ */
+.footer {
+  border-top: 1px solid var(--line);
+  padding: 1.4rem 0;
+}
+.footer-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  color: var(--faint);
+  font-size: var(--fs-small);
+}
+.footer-mark {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--waypoint);
+  flex: none;
+}
+.footer-tech {
+  color: var(--muted);
+}
+.footer-inner span:first-of-type {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* ============ 响应式 ============ */
+@media (max-width: 820px) {
+  .card-grid {
+    grid-template-columns: 1fr;
+  }
+  .stack-row {
+    grid-template-columns: 1fr;
+    grid-template-areas: "idx" "name" "role" "detail";
+    gap: 0.15rem;
+  }
+  .navbar-inner {
+    height: 60px;
+  }
+  .nav-hint {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .route-track {
+    animation: none;
+  }
+  * {
+    transition: none !important;
+  }
+}
