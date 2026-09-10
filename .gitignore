@@ -1,7 +1,7 @@
 # =========================
 # 后端构建产物
 # =========================
-backend/target/
+**/target/
 *.class
 *.jar
 !.mvn/wrapper/maven-wrapper.jar
@@ -15,11 +15,27 @@ backend/target/
 
 
 # =========================
+# Node.js / 前端依赖
+# =========================
+node_modules/
+
+
+# =========================
 # 前端构建产物
 # =========================
-frontend/node_modules/
-frontend/dist/
-frontend/.vite/
+dist/
+build/
+out/
+
+
+# =========================
+# 前端工具缓存
+# =========================
+.vite/
+.next/
+.nuxt/
+.cache/
+.turbo/
 
 
 # =========================
@@ -58,5 +74,8 @@ application-local.yaml
 *.log
 logs/
 
+
+# =========================
 # DSH 沙箱 Maven 配置
+# =========================
 maven-settings.xml
