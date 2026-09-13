@@ -1,0 +1,95 @@
+/* ============================================================
+   设计令牌
+   主题：北方村庄的一夜。
+   上方是冷色的天幕（月光、星空），下方是暖色的桌面（烛火、黄铜、木石）。
+   整页的明暗对比就是"夜与昼"这个游戏机制本身。
+   ============================================================ */
+
+:root {
+  color-scheme: dark;
+
+  /* —— 夜：天幕与底色，偏蓝的冷黑，不用纯黑 —— */
+  --night-1000: #03060a;
+  --night-900: #060b12;
+  --night-800: #0a121b;
+  --night-700: #101a25;
+  --night-600: #16222e;
+  --night-500: #20313f;
+  --night-400: #31485a;
+
+  /* —— 烛纸：界面文字，带黄调的暖白 —— */
+  --paper: #efe6d2;
+  --paper-2: #c2b59b;
+  --paper-3: #8a8170;
+  --paper-4: #5b564b;
+
+  /* —— 黄铜：灯火与可交互 —— */
+  --brass: #c9a227;
+  --brass-hi: #f2d979;
+  --brass-dim: #7d6a20;
+
+  /* —— 血诏：狼、死亡、危险 —— */
+  --blood: #9b2226;
+  --blood-hi: #d4453c;
+  --blood-dim: #5c1618;
+
+  /* —— 苔绿：好人、安全、确认 —— */
+  --moss: #4f7a5b;
+  --moss-hi: #86ba95;
+
+  /* —— 月光：夜间信息、预言家 —— */
+  --moon: #8fa8c8;
+  --moon-hi: #cfdff4;
+
+  /* —— 木石：实体材质 —— */
+  --wood-900: #14100c;
+  --wood-700: #241c14;
+  --wood-500: #382b1e;
+
+  /* —— 排版 ——
+     中文用"楷 / 宋 / 黑"三体分工：楷体题字、宋体标题、黑体界面。
+     全部使用系统字体，不下载任何字体文件，因此离线也一定是这个面貌。 */
+  --font-brush: "Ma Shan Zheng", "STKaiti", "KaiTi", "Kaiti SC", "STSong", "FangSong", "STFangsong", serif;
+  --font-serif: "Songti SC", "STSong", "Source Han Serif SC", "Noto Serif SC", "SimSun", serif;
+  --font-ui: "Noto Sans SC", "Source Han Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  --font-num: "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", "Courier New", monospace;
+
+  /* —— 尺度 —— */
+  --gap-1: 4px;
+  --gap-2: 8px;
+  --gap-3: 12px;
+  --gap-4: 16px;
+  --gap-5: 24px;
+  --gap-6: 32px;
+  --gap-7: 48px;
+
+  --radius: 3px;
+  --radius-lg: 5px;
+
+  --rail-w: 322px;
+  --dock-h: 182px;
+  --canopy-h: 164px;
+
+  /* —— 质感 —— */
+  --line: rgba(201, 162, 39, 0.15);
+  --line-soft: rgba(239, 230, 210, 0.07);
+  --line-strong: rgba(201, 162, 39, 0.36);
+  --shadow-1: 0 1px 0 rgba(239, 230, 210, 0.05) inset, 0 10px 26px rgba(0, 0, 0, 0.55);
+  --shadow-2: 0 24px 60px rgba(0, 0, 0, 0.68);
+
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* 白天把整体色温往暖里推一点：桌面真的像被太阳照到 */
+:root[data-tone="day"] {
+  --line: rgba(201, 162, 39, 0.2);
+}
+
+@media (max-width: 1080px) {
+  :root {
+    --rail-w: 100%;
+    --canopy-h: 132px;
+    --dock-h: auto;
+  }
+}

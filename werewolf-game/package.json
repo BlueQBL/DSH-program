@@ -1,0 +1,23 @@
+{
+  "name": "werewolf-game",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "狼人杀 · 9 人标准局，单人对战 AI 机器人",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "simulate": "node scripts/simulate.mjs",
+    "fairness": "node scripts/fairness.mjs",
+    "check": "node scripts/simulate.mjs 400 && node scripts/fairness.mjs 25 --selftest --cheat-vote && node scripts/fairness.mjs 40",
+    "smoke": "vite build --ssr scripts/ssr-smoke.js --outDir dist-ssr --emptyOutDir && node dist-ssr/ssr-smoke.js"
+  },
+  "dependencies": {
+    "vue": "^3.5.42"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.8",
+    "vite": "^8.3.0"
+  }
+}

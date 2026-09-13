@@ -1,0 +1,234 @@
+/* ============================================================
+   基础层：重置、排版、共用原语
+   ============================================================ */
+
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html, body, #app { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--night-1000);
+  color: var(--paper);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+
+button, input, textarea, select {
+  font: inherit;
+  color: inherit;
+}
+
+button { cursor: pointer; background: none; border: none; padding: 0; }
+button:disabled { cursor: not-allowed; }
+
+:focus-visible {
+  outline: 2px solid var(--brass-hi);
+  outline-offset: 2px;
+}
+
+::selection { background: rgba(201, 162, 39, 0.35); }
+
+/* 细滚动条，尽量不打扰暗场 */
+* { scrollbar-width: thin; scrollbar-color: rgba(201, 162, 39, 0.28) transparent; }
+*::-webkit-scrollbar { width: 9px; height: 9px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: rgba(201, 162, 39, 0.2);
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: 99px;
+}
+*::-webkit-scrollbar-thumb:hover { background: rgba(201, 162, 39, 0.4); background-clip: content-box; }
+
+/* ---------------- 排版原语 ---------------- */
+
+.eyebrow {
+  font-family: var(--font-num);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--paper-3);
+}
+
+.title-serif {
+  font-family: var(--font-serif);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.num {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+/* ---------------- 面板与卡片 ---------------- */
+
+.panel {
+  background:
+    linear-gradient(180deg, rgba(22, 34, 46, 0.86), rgba(8, 14, 21, 0.94));
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-3);
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.panel-title {
+  font-family: var(--font-serif);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  color: var(--paper-2);
+}
+
+/* 切角：木牌与碑刻的形制，代替圆角 */
+.cut {
+  clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+}
+
+.cut-sm {
+  clip-path: polygon(0 0, calc(100% - 6px) 0, 100% 6px, 100% 100%, 6px 100%, 0 calc(100% - 6px));
+}
+
+/* ---------------- 按钮 ---------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--gap-2);
+  padding: 9px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, rgba(32, 49, 63, 0.5), rgba(10, 18, 27, 0.6));
+  color: var(--paper-2);
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  transition: color 0.18s var(--ease), border-color 0.18s var(--ease),
+              background 0.18s var(--ease), transform 0.14s var(--ease);
+}
+
+.btn:hover:not(:disabled) {
+  color: var(--paper);
+  border-color: var(--line-strong);
+  background: linear-gradient(180deg, rgba(201, 162, 39, 0.16), rgba(201, 162, 39, 0.05));
+}
+
+.btn:active:not(:disabled) { transform: translateY(1px); }
+
+.btn:disabled { opacity: 0.34; }
+
+.btn-primary {
+  border-color: rgba(201, 162, 39, 0.5);
+  color: #1a1408;
+  background: linear-gradient(180deg, var(--brass-hi), var(--brass));
+  font-weight: 700;
+}
+
+.btn-primary:hover:not(:disabled) {
+  color: #120d04;
+  background: linear-gradient(180deg, #ffe89a, var(--brass-hi));
+  border-color: var(--brass-hi);
+}
+
+.btn-danger { border-color: rgba(212, 69, 60, 0.42); color: var(--blood-hi); }
+.btn-danger:hover:not(:disabled) { background: rgba(155, 34, 38, 0.2); color: #f08c84; }
+
+.btn-ghost { background: transparent; border-color: var(--line-soft); color: var(--paper-3); }
+.btn-ghost:hover:not(:disabled) { border-color: var(--line); color: var(--paper-2); background: rgba(201, 162, 39, 0.06); }
+
+.btn-sm { padding: 6px 11px; font-size: 12px; }
+.btn-lg { padding: 13px 28px; font-size: 15px; letter-spacing: 0.14em; }
+
+/* ---------------- 标记 ---------------- */
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  line-height: 1.5;
+  opacity: 0.85;
+  white-space: nowrap;
+}
+
+.tag-blood { color: var(--blood-hi); background: rgba(155, 34, 38, 0.14); }
+.tag-moss { color: var(--moss-hi); background: rgba(79, 122, 91, 0.16); }
+.tag-brass { color: var(--brass-hi); background: rgba(201, 162, 39, 0.12); }
+.tag-moon { color: var(--moon-hi); background: rgba(143, 168, 200, 0.14); }
+
+/* ---------------- 分隔 ---------------- */
+
+.rule {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--line), transparent);
+  border: 0;
+  margin: 0;
+}
+
+/* ---------------- 全局噪点：避免大面积纯色渐变显得"数字" ---------------- */
+
+#app::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ---------------- 动效 ---------------- */
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+@keyframes pulse-soft {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+
+@keyframes sweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+
+@keyframes seal-in {
+  0% { opacity: 0; transform: scale(1.5) rotate(-12deg); }
+  60% { opacity: 1; transform: scale(0.94) rotate(-2deg); }
+  100% { opacity: 1; transform: scale(1) rotate(-4deg); }
+}
+
+.anim-up { animation: fade-up 0.42s var(--ease-out) both; }
+.anim-in { animation: fade-in 0.5s var(--ease-out) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
