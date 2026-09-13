@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>水尺 · 喝水提醒</title>
+<meta name="description" content="刻度尺式的喝水提醒：记录今天的饮水量，按作息时段自动提醒你喝水。">
+<meta name="theme-color" content="#E7EDEF">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Karla:wght@400;500;700&family=Saira+Condensed:wght@500;600;700&display=swap">
+<link rel="stylesheet" href="styles.css">
+<script defer src="app.js"></script>
+</head>
+<body>
+<div class="paper" aria-hidden="true"></div>
+
+<div class="app">
+  <!-- ── 仪器：刻度柱 ───────────────────────────────── -->
+  <aside class="gauge">
+    <div class="gauge__head">
+      <div class="brand">
+        <span class="brand__cn">水尺</span>
+        <span class="brand__en">Water Gauge</span>
+      </div>
+      <div class="gauge__status">
+        <span class="chip" id="statusChip" data-state="on-track">按计划</span>
+        <button class="btn btn--tiny" id="pauseBtn" type="button">暂停提醒</button>
+      </div>
+    </div>
+
+    <div class="scale mode-v" id="scale">
+      <div class="scale__labels" id="scaleLabels" aria-hidden="true"></div>
+      <div class="scale__rail" id="rail" title="拖动水位可直接记录">
+        <div class="rail__gap" id="gap" aria-hidden="true"></div>
+        <div class="rail__water" id="water"><span class="rail__meniscus" aria-hidden="true"></span></div>
+        <div class="rail__ticks" id="ticks" aria-hidden="true"></div>
+        <div class="rail__cursor" id="cursor" aria-hidden="true"></div>
+      </div>
+      <div class="scale__times" id="scaleTimes" aria-hidden="true"></div>
+    </div>
+
+    <div class="gauge__foot">
+      <ul class="legend">
+        <li><span class="legend__key legend__key--plan"></span>计划时刻</li>
+        <li><span class="legend__key legend__key--now"></span>应到水位</li>
+      </ul>
+      <p class="gauge__hint">拖动水位可以直接记录。</p>
+    </div>
+  </aside>
+
+  <!-- ── 读数与记录 ─────────────────────────────────── -->
+  <main class="panel">
+    <section class="readout">
+      <p class="eyebrow">今日摄入 · Intake</p>
+      <p class="readout__value">
+        <span class="readout__num" id="totalMl">0</span><span class="readout__unit">ml</span>
+      </p>
+      <p class="readout__goal">目标 <span id="goalMl">2 000</span> ml</p>
+      <p class="readout__next" id="nextLine">读取中…</p>
+    </section>
+
+    <section class="block">
+      <div class="block__head">
+        <h2 class="block__title">记一杯</h2>
+        <span class="block__en">Log</span>
+      </div>
+      <div class="presets" id="presets">
+        <button class="preset" type="button" data-ml="150" data-name="小杯">
+          <span class="preset__ml">150<em>ml</em></span><span class="preset__name">小杯</span>
+        </button>
+        <button class="preset" type="button" data-ml="250" data-name="玻璃杯">
+          <span class="preset__ml">250<em>ml</em></span><span class="preset__name">玻璃杯</span>
+        </button>
+        <button class="preset" type="button" data-ml="500" data-name="水壶">
+          <span class="preset__ml">500<em>ml</em></span><span class="preset__name">水壶</span>
+        </button>
+      </div>
+      <form class="custom" id="customForm" novalidate>
+        <label class="custom__label" for="customMl">其他容量</label>
+        <input class="custom__input" id="customMl" type="number" inputmode="numeric" step="10" min="10" max="2000" placeholder="ml">
+        <button class="btn" type="submit">记录</button>
+        <p class="custom__error" id="customError" role="status" hidden></p>
+      </form>
+    </section>
+
+    <section class="block">
+      <div class="block__head">
+        <h2 class="block__title">今日记录</h2>
+        <span class="block__en" id="logMeta"></span>
+      </div>
+      <ul class="log" id="logList"></ul>
+      <p class="empty" id="logEmpty">今天还没有记录。按上面的按钮记一杯，或者拖动刻度柱上的水位。</p>
+    </section>
+
+    <section class="block">
+      <div class="block__head">
+        <h2 class="block__title">最近 7 天</h2>
+        <span class="block__en">虚线为每日目标</span>
+      </div>
+      <div class="week" id="week"></div>
+    </section>
+
+    <section class="block block--settings">
+      <div class="block__head">
+        <h2 class="block__title">设置</h2>
+        <span class="block__en">Settings</span>
+      </div>
+      <div class="fields">
+        <label class="field">
+          <span class="field__label">提醒间隔</span>
+          <select class="field__control" id="setInterval">
+            <option value="20">每 20 分钟</option>
+            <option value="30">每 30 分钟</option>
+            <option value="45">每 45 分钟</option>
+            <option value="60">每 60 分钟</option>
+            <option value="90">每 90 分钟</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field__label">每日目标（ml）</span>
+          <input class="field__control" id="setGoal" type="number" inputmode="numeric" step="100" min="500" max="6000">
+        </label>
+        <label class="field">
+          <span class="field__label">作息开始</span>
+          <input class="field__control" id="setStart" type="time">
+        </label>
+        <label class="field">
+          <span class="field__label">作息结束</span>
+          <input class="field__control" id="setEnd" type="time">
+        </label>
+      </div>
+      <div class="actions">
+        <label class="switch">
+          <input type="checkbox" id="setSound"><span class="switch__track" aria-hidden="true"></span><span class="switch__text">提示音</span>
+        </label>
+        <button class="btn btn--ghost" id="testChime" type="button">试听提示音</button>
+        <button class="btn btn--ghost" id="notifyBtn" type="button">开启桌面通知</button>
+        <button class="btn btn--ghost btn--danger" id="resetBtn" type="button">清空今天的记录</button>
+      </div>
+      <p class="hint" id="notifyHint" hidden></p>
+    </section>
+
+    <p class="note">数据只保存在这台浏览器的本地存储里，不会上传。</p>
+  </main>
+</div>
+
+<!-- ── 提醒横幅 ────────────────────────────────────── -->
+<div class="nudge" id="nudge" role="alert" aria-labelledby="nudgeTitle" aria-describedby="nudgeSub" hidden>
+  <div class="nudge__body">
+    <p class="nudge__title" id="nudgeTitle">该喝水了</p>
+    <p class="nudge__sub" id="nudgeSub"></p>
+  </div>
+  <div class="nudge__actions">
+    <button class="btn btn--primary" id="nudgeLog" type="button">记一杯 250 ml</button>
+    <button class="btn btn--ghost" id="nudgeSnooze" type="button">推迟 10 分钟</button>
+  </div>
+</div>
+
+<noscript>
+  <p class="note note--noscript">这个页面需要 JavaScript 才能记录饮水量和定时提醒。</p>
+</noscript>
+</body>
+</html>
