@@ -1,4 +1,4 @@
-# DSH-program
+﻿# DSH-program
 
 基于 **DeepSeek Harness（DSH）** 生成、实践和持续沉淀的研发项目仓库。
 
@@ -428,9 +428,20 @@ http://localhost:5173
 | **React Router 演示** | `react-frontend/` | React 18 + TypeScript + React Router 7 + Vite 7 | `cd react-frontend && npm install && npm run dev` → http://localhost:5174 |
 | **水尺 · 喝水提醒** | `water-reminder/` | 零依赖 HTML + CSS + 原生 JS | `cd water-reminder && node server.js` → http://localhost:5180 |
 | **流水账 · 个人记账** | `ledger/` | 零依赖 HTML + CSS + 原生 JS + PWA | `cd ledger && node server.js` → http://localhost:5190 |
+| **个人作品集网站** | `portfolio/` | 零依赖 HTML + CSS + 原生 JS | `cd portfolio && node server.js` → http://localhost:5200 |
 
 图片压缩工具实现了图片上传压缩、质量调节、前后对比、批量打包下载的完整前后端闭环，
 并内置端到端冒烟测试（`npm run smoke`），详见 [image-compressor/README.md](image-compressor/README.md)。
+
+**个人作品集**是本仓库的"门面"：首页 / 关于我 / 项目 / 联系方式四个区块，
+深色主题 + 滚动动画 + 移动端适配。视觉母题是**暗室里正在扫描成像的工作台**——
+首屏头像配一条自上而下扫过的扫描线，把肖像"显影"出来，照片可以在页面上直接上传替换
+（只存在本机浏览器，零上传接口）。六个项目的缩略图全部按各自的视觉母题手绘成内联 SVG
+（流水账是热敏小票、水尺是刻度柱、狼人杀是牌桌……），零额外请求；项目列表与联系方式
+都是数据驱动的，往数组里追加一项即可，另有"在 GitHub 上查看全部项目"入口收口。
+零依赖、无构建步骤，直接用浏览器打开也能跑，另带 95 项冒烟测试（含真实浏览器里跑一遍
+头像上传）与一套布局/对比度体检（2 主题 × 4 宽度实测），
+详见 [portfolio/README.md](portfolio/README.md)。
 
 **流水账**是一本只做四件事的个人记账应用：快速记一笔、按日期翻记录、看月度统计、数据只留在本机。
 视觉母题是**热敏小票**——整页是一卷热敏纸压在深墨绿桌垫上，只用墨黑和热敏红两种墨，

@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark" class="no-js">
+<head>
+<meta charset="utf-8" />
+<!-- 首帧就把记住的主题贴上，避免浅色用户看到一下黑闪 -->
+<script>
+(function () {
+  var m = location.search.match(/[?&]theme=(dark|light)\b/);
+  var t = m ? m[1] : null;
+  if (!t) { try { t = localStorage.getItem('portfolio.theme'); } catch (e) {} }
+  if (!t && window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) t = 'light';
+  if (t) document.documentElement.setAttribute('data-theme', t);
+  document.documentElement.classList.remove('no-js');
+})();
+</script>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>薛小飞 · 个人作品集</title>
+<meta name="description" content="薛小飞 —— 全栈开发者，后端出身，近三年做大模型与 AI 应用。" />
+<meta name="author" content="薛小飞" />
+<meta name="theme-color" content="#0b1015" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b1015'/%3E%3Cpath d='M8 10l6 6-6 6M17 22h7' stroke='%234fd1c5' stroke-width='2.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<!-- Web 字体是增强项：拿不到时自动回落到系统字体栈，站点不依赖 CDN -->
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+
+<!-- ============ 左侧索引栏（桌面） ============ -->
+<nav class="rail" aria-label="页面索引">
+  <a class="rail__mark" href="#top" aria-label="回到首页">XXF</a>
+  <ul class="rail__list">
+    <li><a class="rail__link" href="#about" data-nav="about"><span class="rail__tick" aria-hidden="true"></span>关于</a></li>
+    <li><a class="rail__link" href="#work" data-nav="work"><span class="rail__tick" aria-hidden="true"></span>作品</a></li>
+    <li><a class="rail__link" href="#contact" data-nav="contact"><span class="rail__tick" aria-hidden="true"></span>联系</a></li>
+  </ul>
+  <div class="rail__foot">
+    <span class="rail__progress" data-progress-label>00%</span>
+    <span class="rail__bar" aria-hidden="true"><i data-progress-bar></i></span>
+  </div>
+</nav>
+
+<!-- ============ 顶部栏（窄屏） ============ -->
+<header class="topbar" data-topbar>
+  <a class="topbar__mark" href="#top">XXF</a>
+  <nav class="topbar__nav" aria-label="移动端导航">
+    <a href="#about">关于</a>
+    <a href="#work">作品</a>
+    <a href="#contact">联系</a>
+  </nav>
+  <button class="icon-btn" type="button" data-theme-toggle aria-label="切换浅色 / 深色主题">
+    <span class="icon-btn__glyph" data-theme-glyph aria-hidden="true"></span>
+  </button>
+</header>
+
+<button class="icon-btn rail-toggle" type="button" data-theme-toggle aria-label="切换浅色 / 深色主题">
+  <span class="icon-btn__glyph" data-theme-glyph aria-hidden="true"></span>
+</button>
+
+<main id="top">
+
+  <!-- ============ 首屏 ============ -->
+  <section class="hero" data-section="hero">
+    <div class="hero__inner">
+      <h1 class="hero__name" data-reveal>薛小飞</h1>
+      <p class="hero__role" data-reveal>全栈开发者 <span class="sep" aria-hidden="true">/</span> 前端 · 后端 · 人工智能</p>
+      <p class="hero__lede" data-reveal>
+        后端出身，写了五年多服务。最近三年把重心挪到大模型上：
+        从提示词到智能体，从 Coze、Dify 到把 Claude Code 和 DeepSeek Harness 揉进日常开发。
+        下面这些项目，每一个都能在你自己的机器上启动。
+      </p>
+      <div class="hero__actions" data-reveal>
+        <a class="btn btn--solid" href="#work">看作品<span class="btn__arrow" aria-hidden="true">→</span></a>
+        <a class="btn btn--ghost" href="#contact">联系我</a>
+      </div>
+      <ul class="hero__meta" data-reveal>
+        <li><span class="hero__meta-dot" aria-hidden="true"></span>目前开放新机会</li>
+        <li>江苏 · 南京</li>
+      </ul>
+    </div>
+
+    <!-- 签名元素：扫描成像肖像。默认照片在 assets/avatar.jpg，可用下面的按钮换成别的 -->
+    <figure class="portrait" data-portrait data-reveal>
+      <div class="portrait__stage">
+        <span class="portrait__mesh" aria-hidden="true"></span>
+        <img class="portrait__photo" src="./assets/avatar.jpg"
+             alt="薛小飞的照片" width="1080" height="1080"
+             data-portrait-photo
+             onerror="this.onerror=null;this.src='./assets/avatar-line-art.svg';this.removeAttribute('data-custom')" />
+        <span class="portrait__scan" aria-hidden="true"></span>
+        <span class="portrait__glow" aria-hidden="true"></span>
+        <svg class="portrait__brackets" viewBox="0 0 400 400" aria-hidden="true" preserveAspectRatio="none">
+          <path d="M14 54V14h40M346 14h40v40M386 346v40h-40M54 386H14v-40" />
+        </svg>
+        <span class="portrait__status" data-portrait-status aria-hidden="true">initializing&nbsp;profile</span>
+      </div>
+
+      <div class="portrait__tools">
+        <button class="mini-btn" type="button" data-photo-upload>
+          <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M8 11V3.4M5.2 6.2 8 3.4l2.8 2.8M2.6 11.4v1.2a1.4 1.4 0 0 0 1.4 1.4h8a1.4 1.4 0 0 0 1.4-1.4v-1.2" />
+          </svg>
+          <span>上传照片</span>
+        </button>
+        <button class="mini-btn mini-btn--quiet" type="button" data-photo-reset hidden>恢复默认</button>
+        <input class="visually-hidden" type="file" accept="image/*" data-photo-input
+               tabindex="-1" aria-hidden="true" />
+      </div>
+      <p class="portrait__hint" data-photo-hint role="status" aria-live="polite"></p>
+
+      <figcaption class="portrait__cap">
+        <span class="portrait__who">薛小飞 · Xue Xiaofei</span>
+        <span class="portrait__dot" aria-hidden="true"></span>
+      </figcaption>
+    </figure>
+  </section>
+
+  <!-- ============ 关于我 ============ -->
+  <section class="section" id="about" data-section="about">
+    <header class="sec-head" data-reveal>
+      <p class="sec-head__idx">02</p>
+      <h2 class="sec-head__title">关于我</h2>
+      <p class="sec-head__note">— 怎么做事，用什么做</p>
+    </header>
+
+    <div class="about">
+      <div class="about__body">
+        <p data-reveal>
+          我写代码五年多，一直在后端这条线上：接口、数据、并发，以及上线之后被叫起来改的那部分。
+          服务端最难的不是写出功能，是写完之后半年还有人敢动它。所以我在这里养成了一个习惯 ——
+          <strong>先把边界画清楚</strong>，再动手。
+        </p>
+        <p data-reveal>
+          最近三年我把重心挪到了 AI 上：做<strong>大模型应用开发</strong>，
+          从提示词工程、RAG 检索到智能体编排，平台侧用过 <strong>Coze</strong> 和 <strong>Dify</strong>；
+          同时把 <strong>Claude Code</strong> 和 <strong>DeepSeek Harness</strong> 这类 AI 编程工具
+          真正揉进了日常开发流程 —— 不是拿它写个 demo，是让它参与需求分析、方案设计、
+          代码生成和问题排查，然后自己逐行验收。
+        </p>
+        <p data-reveal>
+          所以我现在两头都要：<em>后端保证它经得起跑，AI 保证它值得跑</em>。
+          不写代码的时候我在做木工 —— 锯一条直线和写一个函数是同一件事：
+          <em>手里的工具什么样，决定你能想到什么</em>。
+        </p>
+        <ul class="tags" data-reveal aria-label="工作方式">
+          <li class="tag">保留可读性</li>
+          <li class="tag">先跑起来再优化</li>
+          <li class="tag">接口即文档</li>
+          <li class="tag">AI 写的代码逐行验收</li>
+        </ul>
+      </div>
+
+      <aside class="facts" data-reveal aria-label="基本信息">
+        <div class="facts__row">
+          <span class="facts__k">现居</span>
+          <span class="facts__v">江苏 · 南京</span>
+        </div>
+        <div class="facts__row">
+          <span class="facts__k">方向</span>
+          <span class="facts__v">全栈 · 后端为主</span>
+        </div>
+        <div class="facts__row">
+          <span class="facts__k">经验</span>
+          <span class="facts__v"><b>5</b> 年+ 后端，近 <b>3</b> 年转 AI</span>
+        </div>
+        <div class="facts__row">
+          <span class="facts__k">现在</span>
+          <span class="facts__v">开放新机会</span>
+        </div>
+        <div class="facts__row">
+          <span class="facts__k">在做</span>
+          <span class="facts__v">大模型应用 · 智能体编排</span>
+        </div>
+        <div class="facts__row">
+          <span class="facts__k">每天用</span>
+          <span class="facts__v">Claude Code · DeepSeek Harness</span>
+        </div>
+      </aside>
+    </div>
+
+    <h3 class="sub-head" data-reveal>技能 <span class="sub-head__note">按"我用它做什么"分组，不按百分比</span></h3>
+    <div class="skills" aria-label="技能列表">
+      <div class="skills__lead" data-reveal>
+        <span class="skills__mark" aria-hidden="true">▚</span>
+        <span class="skills__lead-text">顺手的那一行是每天在用的，下面两行是清楚边界、能接进项目里的。</span>
+      </div>
+
+      <div class="skills__row skills__row--lead" data-reveal>
+        <p class="skills__k">我用来搭服务</p>
+        <ul class="skills__items">
+          <li>Java</li><li>Spring Boot</li><li>Node.js</li><li>REST 接口设计</li>
+          <li>MySQL</li><li>Redis</li><li>鉴权与会话</li><li>并发与性能</li><li>日志与排查</li>
+        </ul>
+      </div>
+
+      <div class="skills__row" data-reveal>
+        <p class="skills__k">我用来做 AI 应用</p>
+        <ul class="skills__items">
+          <li>大模型应用开发</li><li>提示词工程</li><li>RAG 检索增强</li>
+          <li>智能体编排</li><li>Coze</li><li>Dify</li>
+          <li>Claude Code</li><li>DeepSeek Harness</li><li>工具调用 / MCP</li>
+        </ul>
+      </div>
+
+      <div class="skills__row" data-reveal>
+        <p class="skills__k">我用来做界面</p>
+        <ul class="skills__items">
+          <li>Vue 3</li><li>React</li><li>TypeScript</li><li>原生 HTML / CSS / JS</li>
+          <li>响应式布局</li><li>无障碍</li><li>动画与滚动叙事</li>
+        </ul>
+      </div>
+    </div>
+    <p class="skills__fine" data-reveal>另外：Docker、Nginx、Git 工作流、Figma、Vite —— 每天都在用，就不占地方了。</p>
+  </section>
+
+  <!-- ============ 项目展示 ============ -->
+  <section class="section" id="work" data-section="work">
+    <header class="sec-head" data-reveal>
+      <p class="sec-head__idx">03</p>
+      <h2 class="sec-head__title">项目</h2>
+      <p class="sec-head__note">— 每个都能跑起来，代码都在 GitHub</p>
+    </header>
+    <div class="work__bar" data-reveal>
+      <p class="work__count"><b data-project-count>6</b> 个项目<span class="work__count-note"> · 持续新增</span></p>
+      <p class="work__hint">打开任一仓库，按 README 里的两行命令即可本地运行</p>
+    </div>
+    <div class="cards" data-cards><!-- 由 main.js 从 site.projects 渲染 --></div>
+    <p class="work__more" data-reveal>
+      <a class="btn btn--ghost" href="https://github.com/BlueQBL" target="_blank" rel="noopener noreferrer">
+        在 GitHub 上查看全部项目<span class="btn__arrow" aria-hidden="true">↗</span>
+      </a>
+      <span class="work__more-note">新项目会陆续加到这个列表里</span>
+    </p>
+  </section>
+
+  <!-- ============ 联系方式 ============ -->
+  <section class="section section--contact" id="contact" data-section="contact">
+    <header class="sec-head" data-reveal>
+      <p class="sec-head__idx">04</p>
+      <h2 class="sec-head__title">联系</h2>
+      <p class="sec-head__note">— 想做点什么，或者只是想聊聊</p>
+    </header>
+
+    <div class="contact">
+      <div class="contact__lead" data-reveal>
+        <p>
+          有新项目、有岗位、或者你只是看到一个觉得还可以更好的地方 —— 都欢迎直接找我。
+          我一般在两个工作日内回复。
+        </p>
+      </div>
+
+      <div class="links" data-links><!-- 由 main.js 从 site.links 渲染 --></div>
+
+      <div class="contact__mail" data-reveal>
+        <button class="copy" type="button" data-copy-email>
+          <span data-copy-label>复制邮箱</span>
+        </button>
+        <p class="contact__note">邮件不需要主题格式，直接说事就行。</p>
+      </div>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <div class="foot__inner">
+      <p class="foot__mark">XXF <span aria-hidden="true">·</span> <span data-year>2026</span></p>
+      <p class="foot__note">纯静态前端，零依赖，零追踪。用原生 HTML / CSS / JS 手写。</p>
+      <a class="foot__top" href="#top">回到顶部 <span aria-hidden="true">↑</span></a>
+    </div>
+  </footer>
+
+</main>
+
+<script src="./main.js"></script>
+</body>
+</html>

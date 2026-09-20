@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="720" height="720" role="img" aria-label="线描风格的头像：短发、戴眼镜、穿连帽卫衣">
+  <defs>
+    <linearGradient id="hoodie" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b2733" />
+      <stop offset="1" stop-color="#121c25" />
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4fd1c5" stop-opacity="0.55" />
+      <stop offset="1" stop-color="#4fd1c5" stop-opacity="0" />
+    </linearGradient>
+  </defs>
+
+  <!-- 肩与连帽卫衣 -->
+  <path d="M40 400c0-88 62-150 160-150s160 62 160 150z" fill="url(#hoodie)" />
+  <!-- 侧光 -->
+  <path d="M200 250c-98 0-160 62-160 150h44c0-72 44-118 116-124z" fill="url(#rim)" />
+  <!-- 帽绳 -->
+  <path d="M152 292c-4 26-4 50 2 74M248 292c4 26 4 50-2 74" fill="none" stroke="#3d4c5a" stroke-width="7" stroke-linecap="round" />
+  <!-- 领口 -->
+  <path d="M158 262c14 22 30 33 42 33s28-11 42-33" fill="none" stroke="#2b3947" stroke-width="8" stroke-linejoin="round" />
+  <!-- 脖子 -->
+  <path d="M172 206h56v52c0 16-12 24-28 24s-28-8-28-24z" fill="#d3a985" />
+
+  <!-- 头发（后层） -->
+  <path d="M124 186c-4-56 30-92 76-92s80 36 76 92c-2 24-8 34-12 34 2-32-10-46-26-54-22-11-58-10-80 6-16 12-22 26-20 48-6-2-12-12-14-34z" fill="#151c24" />
+
+  <!-- 脸 -->
+  <path d="M132 158c0-38 30-66 68-66s68 28 68 66v30c0 46-30 76-68 76s-68-30-68-76z" fill="#e8c39e" />
+  <!-- 耳朵 -->
+  <path d="M130 176c-9-2-14 5-14 16s6 20 16 20zM270 176c9-2 14 5 14 16s-6 20-16 20z" fill="#dbb28c" />
+
+  <!-- 刘海 -->
+  <path d="M130 168c-2-42 30-70 70-70s72 28 70 70c-8-22-26-34-52-34-14 0-26-4-36-12-8 12-24 20-34 24-10 4-16 10-18 22z" fill="#1b232c" />
+
+  <!-- 眉 -->
+  <path d="M156 168c10-7 24-7 34-1M210 167c10-6 24-6 34 1" fill="none" stroke="#1b232c" stroke-width="7" stroke-linecap="round" />
+  <!-- 眼镜 -->
+  <g fill="none" stroke="#8fa3b3" stroke-width="5">
+    <rect x="146" y="178" width="48" height="42" rx="13" />
+    <rect x="206" y="178" width="48" height="42" rx="13" />
+    <path d="M194 196c4-4 8-4 12 0" />
+    <path d="M146 192l-16-8M254 192l16-8" />
+  </g>
+  <g fill="#26313c">
+    <circle cx="170" cy="199" r="6" />
+    <circle cx="230" cy="199" r="6" />
+  </g>
+  <!-- 鼻与嘴 -->
+  <path d="M200 208v16l-9 5" fill="none" stroke="#c69a76" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+  <path d="M182 248c11 9 25 9 36 0" fill="none" stroke="#b07f5e" stroke-width="7" stroke-linecap="round" />
+</svg>
