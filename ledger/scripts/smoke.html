@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>流水账 · 冒烟测试</title>
+<style>
+  body { font: 13px/1.6 Consolas, monospace; background: #121813; color: #d8e0d8; margin: 0; padding: 18px; }
+  pre { white-space: pre-wrap; margin: 0 0 18px; }
+  iframe { width: 1280px; height: 940px; border: 1px solid #26302a; background: #121813; }
+  .bad { color: #e0837a; }
+</style>
+</head>
+<body>
+<pre id="out">running…</pre>
+<iframe id="app" title="流水账"></iframe>
+<script>
+/* ═══════════════════════════════════════════════════════════════
+   流水账 · 冒烟测试（零依赖，不用装任何东西）
+
+   它在一个 iframe 里加载真实的 index.html，然后在真实 DOM 上点，
+   把结果打在页面上。不 mock，不假装——跑的就是线上那份代码。
+
+   跑法：
+     node server.js
+     浏览器打开 http://localhost:5190/scripts/smoke.html
+
+   想无头跑也行，加 ?report=<收集地址> 会把结果 GET 导航回该地址：
+     chrome --headless=new --screenshot=out.png --virtual-time-budget=30000 \
+       "http://localhost:5190/scripts/smoke.html?report=http://localhost:5199/"
+
+   注意：它会先清空 localStorage 里的账本，别拿正在用的浏览器打开。
+   ═══════════════════════════════════════════════════════════════ */
+(function () {
+  'use strict';
+
+  var results = [];
+  var fails = 0;
+
+  function ok(name, cond, extra) {
+    if (!cond) fails++;
+    results.push((cond ? 'OK   ' : 'FAIL ') + name + (extra != null ? '   「' + extra + '」' : ''));
+  }
+
+  function eq(name, got, want) {
+    ok(name, got === want, got === want ? String(got) : '得到 ' + JSON.stringify(got) + '，期望 ' + JSON.stringify(want));
+  }
+
+  function contains(name, hay, needle) {
+    ok(name, String(hay).indexOf(needle) >= 0, '在 ' + String(hay).slice(0, 90) + ' 里找 ' + needle);
+  }
+
+  function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  function finish() {
+    var head = (fails ? '✗ ' + fails + ' 项失败' : '✓ 全部通过') + '（共 ' + results.length + ' 项）';
+    var text = head + '\n\n' + results.join('\n');
+    document.getElementById('out').textContent = text;
+    document.getElementById('out').className = fails ? 'bad' : '';
+    document.title = (fails ? 'FAIL ' + fails : 'PASS') + '/' + results.length;
+
+    // 无头跑的时候把结果送回本地收集器，省得去捞 stdout
+    var report = new URLSearchParams(location.search).get('report');
+    if (report) {
+      setTimeout(function () {
+        location.href = report + '?r=' + encodeURIComponent(text);
+      }, 60);
+    }
+  }
+
+  function run() {
+    // 先把上一个测试留下的账本清掉，从零开始
+    try { localStorage.removeItem('ledger.v1'); localStorage.removeItem('ledger.prefs.v1'); } catch (e) {}
+
+    var frame = document.getElementById('app');
+    var loaded = new Promise(function (r) { frame.addEventListener('load', r, { once: true }); });
+    frame.src = '../index.html';
+
+    return loaded.then(function () { return wait(200); }).then(function () {
+      var W = frame.contentWindow;
+      var D = frame.contentDocument;
+      var L = W.Ledger;
+      var $ = function (id) { return D.getElementById(id); };
+      var $$ = function (sel) { return Array.prototype.slice.call(D.querySelectorAll(sel)); };
+
+      var submit = function () {
+        $('entry-form').dispatchEvent(new W.Event('submit', { cancelable: true, bubbles: true }));
+      };
+      var setAmount = function (v) { $('amount').value = v; };
+
+      /* ── 0. 模块与启动 ─────────────────────────────────── */
+      ok('store.js 暴露 Ledger', !!L);
+      contains('顶栏日期已填', $('today-stamp').textContent, '月');
+      eq('汇总有三格', $('summary').querySelectorAll('.sum-cell').length, 3);
+      eq('支出分类 chip 数', $('category-picker').querySelectorAll('.chip').length, 10);
+      eq('页签三个', $$('.tab').length, 3);
+      eq('初始账本为空', L.load().records.length, 0);
+      contains('月份标题是本月', $('month-label').textContent, '年');
+      eq('空状态提示可见', $('today-empty').hidden, false);
+
+      /* ── 1. 金额算式与校验 ─────────────────────────────── */
+      eq('算式 128+36.5', L.parseAmount('128+36.5'), 16450);
+      eq('算式 1,024.50', L.parseAmount('1,024.50'), 102450);
+      eq('算式 ¥88', L.parseAmount('¥88'), 8800);
+      eq('算式 3*4', L.parseAmount('3*4'), 1200);
+      eq('算式 10-2.5', L.parseAmount('10-2.5'), 750);
+      eq('空值返回 null', L.parseAmount(''), null);
+      eq('字母返回 null', L.parseAmount('abc'), null);
+      eq('负数返回 null', L.parseAmount('-5'), null);
+      eq('算式注入被拒', L.parseAmount('1+alert(1)'), null);
+      eq('金额格式化', L.money(102450), '1,024.50');
+      eq('元格式化', L.yuan(8800), '¥88.00');
+
+      /* ── 2. 记一笔支出（走算式） ───────────────────────── */
+      setAmount('128+36.5');
+      $('note').value = '和同事吃饭';
+      submit();
+
+      eq('今日流水一行', $('today-list').querySelectorAll('li').length, 1);
+      contains('行金额是红色支出', $('today-list').querySelector('.row-amount').textContent, '−164.50');
+      contains('行备注', $('today-list').textContent, '和同事吃饭');
+      eq('今日支出合计', $('today-expense').textContent, '¥164.50');
+      eq('今日收入为空', $('today-income').textContent, '—');
+      eq('落库一笔', L.load().records.length, 1);
+      eq('落库金额为分', L.load().records[0].amount, 16450);
+      eq('提交后清空金额框', $('amount').value, '');
+      ok('出现撤销提示条', $$('.toast-act').length > 0);
+      contains('汇总含支出', $('summary').textContent, '164.50');
+      contains('结余为负（带负号）', $('summary').textContent, '−¥164.50');
+
+      /* ── 3. 记一笔收入 ─────────────────────────────────── */
+      D.querySelector('.seg-btn[data-type="income"]').click();
+      eq('切收入后 chip 数', $('category-picker').querySelectorAll('.chip').length, 7);
+      setAmount('5000');
+      $('note').value = '月薪';
+      submit();
+
+      eq('今日两行', $('today-list').querySelectorAll('li').length, 2);
+      eq('今日收入合计', $('today-income').textContent, '¥5,000.00');
+      contains('收入行是加号', $('today-list').textContent, '+5,000.00');
+      eq('落库两笔', L.load().records.length, 2);
+
+      /* ── 4. 撤销最后一笔 ───────────────────────────────── */
+      var acts = $$('.toast-act');
+      acts[acts.length - 1].click();
+      eq('撤销后剩一笔', L.load().records.length, 1);
+      eq('撤销后今日一行', $('today-list').querySelectorAll('li').length, 1);
+
+      /* ── 5. 类型记忆 ───────────────────────────────────── */
+      eq('记住上次用的类型', W.localStorage.getItem('ledger.prefs.v1').indexOf('"income"') >= 0, true);
+
+      /* ── 6. 统计页 ─────────────────────────────────────── */
+      D.querySelector('.tab[data-tab="stats"]').click();
+      eq('统计面板显示', $('panel-stats').hidden, false);
+      eq('流水面板隐藏', $('panel-flow').hidden, true);
+      ok('分类条码有行', $$('.bc-row').length >= 1, $$('.bc-row').length + ' 行');
+      ok('每日支出图表已画', $$('.chart').length >= 1, $$('.chart').length + ' 张图');
+      ok('条码宽度按占比', $$('.bc-bar')[0].getAttribute('style').indexOf('--w:100') >= 0,
+        $$('.bc-bar')[0].getAttribute('style'));
+      contains('预算未设时给指引', $('panel-stats').textContent, '还没设预算');
+
+      /* ── 7. 条码点进流水并带上筛选 ─────────────────────── */
+      $$('.bc-row')[0].click();
+      eq('跳回流水页', $('panel-flow').hidden, false);
+      eq('分类筛选已带上', $('f-cat').value, $$('.bc-row').length ? L.load().records[0].category : '');
+      ok('筛选后仍能看到记录', $('groups').querySelectorAll('.grow').length >= 1);
+      $('f-clear').click();
+      eq('清除筛选后下拉归位', $('f-cat').value, '');
+
+      /* ── 8. 搜索筛选 ───────────────────────────────────── */
+      $('f-q').value = '和同事';
+      $('f-q').dispatchEvent(new W.Event('input', { bubbles: true }));
+      eq('搜到一条', $('groups').querySelectorAll('.grow').length, 1);
+      $('f-q').value = '不存在的词';
+      $('f-q').dispatchEvent(new W.Event('input', { bubbles: true }));
+      eq('搜不到时为空态', $('groups').querySelectorAll('.grow').length, 0);
+      contains('空态给了出口', $('groups').textContent, '清除筛选');
+      $('f-q').value = '';
+      $('f-q').dispatchEvent(new W.Event('input', { bubbles: true }));
+
+      /* ── 9. 设置页 + 预算 ──────────────────────────────── */
+      D.querySelector('.tab[data-tab="setup"]').click();
+      contains('设置页有数据统计', $('panel-setup').textContent, '存储键');
+      ok('预算输入框在', !!$('bud-monthly'));
+      eq('支出分类可管理', $('panel-setup').querySelectorAll('[data-rename]').length, 17);
+
+      $('bud-monthly').value = '100';
+      $('save-budget').click();
+      eq('预算已存（分）', L.load().budgets.monthly, 10000);
+      contains('保存预算有回执', document.body.textContent + D.body.textContent, '预算已保存');
+
+      /* 超支：已有 164.50 > 100 */
+      ok('小票底部出现超支警告', $('budget-warn').hidden === false);
+      contains('警告写的是超支', $('budget-warn').textContent, '超支');
+      contains('警告给出超支金额', $('budget-warn').textContent, '64.50');
+
+      /* ── 10. 分类改名 / 新增 / 删除改挂 ────────────────── */
+      var firstCat = $('panel-setup').querySelector('[data-rename]');
+      var oldName = firstCat.value;
+      firstCat.value = '吃饭';
+      firstCat.dispatchEvent(new W.Event('change', { bubbles: true }));
+      eq('改名已落库', L.load().categories.filter(function (c) { return c.name === '吃饭'; }).length, 1);
+
+      var addInput = $('panel-setup').querySelector('[data-newcat="expense"]');
+      addInput.value = '宠物';
+      $('panel-setup').querySelector('[data-addcat="expense"]').click();
+      eq('新增分类已落库', L.load().categories.filter(function (c) { return c.name === '宠物'; }).length, 1);
+      eq('新增后 chip 同步', L.load().categories.filter(function (c) { return c.type === 'expense'; }).length, 11);
+
+      var before = L.load().records.length;
+      var res = L.removeCategory(L.load(), L.load().records[0].category);
+      ok('删除被占用的分类会改挂而不是丢记录', res.ok === true && res.moved >= 1, JSON.stringify({ moved: res.moved }));
+      eq('记录数没变', L.load().records.length, before);
+
+      /* ── 11. CSV 往返 ──────────────────────────────────── */
+      var data = L.load();
+      var csv = L.toCSV(data);
+      contains('CSV 有 BOM（Excel 不乱码）', csv.charCodeAt(0), 65279);
+      contains('CSV 表头', csv.split('\r\n')[0], '日期,时间,类型,分类,金额,备注');
+      contains('CSV 含支出', csv, '支出');
+      contains('CSV 金额两位小数', csv, '164.50');
+
+      var parsed = L.fromCSV({ categories: data.categories.slice(), records: [] }, csv);
+      eq('CSV 往返条数一致', parsed.records.length, data.records.length);
+      eq('CSV 往返金额一致', parsed.records[0].amount, data.records[0].amount);
+      eq('CSV 往返备注一致', parsed.records[0].note, data.records[0].note);
+
+      /* CSV 表头乱序 + 缺列 + 正负号推类型 + 0 元行要被丢掉 */
+      var messy = '金额,备注,日期\n-8.50,早餐,2026/3/2\n+300,红包,2026-03-05\n0,,';
+      var messyRes = L.fromCSV({ categories: data.categories.slice(), records: [] }, messy);
+      eq('乱序表头能认', messyRes.records.length, 2, JSON.stringify(messyRes.records));
+      eq('0 元行被跳过', messyRes.skipped, 1);
+      eq('负号推成支出', messyRes.records[0].type, 'expense');
+      eq('正号推成收入', messyRes.records[1].type, 'income');
+      eq('斜杠日期能认', messyRes.records[0].date, '2026-03-02');
+
+      /* ── 12. JSON 导入：外部分类 id 要重映射 ───────────── */
+      var store2 = { categories: data.categories.slice(), records: [] };
+      var foreign = JSON.stringify({
+        app: '别家记账',
+        categories: [{ id: 'X9', name: '餐饮', type: 'expense' }],
+        records: [{ date: '2026-01-20', time: '09:00', type: 'expense', category: 'X9', amount: 3000, note: '外来的' }]
+      });
+      var imp = L.parseAnyImport(store2, foreign);
+      eq('JSON 导入成功', imp.error, null);
+      eq('JSON 导入一笔', imp.records.length, 1);
+      ok('外部分类 id 已映射到本机 id',
+        store2.categories.filter(function (c) { return c.id === imp.records[0].category; }).length === 1,
+        imp.records[0].category);
+      contains('导入记录备注保留', imp.records[0].note, '外来的');
+
+      /* ── 13. 统计数据正确性 ────────────────────────────── */
+      var s = L.load();
+      var ym = L.ymOf(L.todayStr());
+      var monthSum = L.sum(L.inMonth(s, ym));
+      ok('本月支出统计正确', monthSum.expense === s.records.filter(function (r) {
+        return r.type === 'expense' && L.ymOf(r.date) === ym;
+      }).reduce(function (a, r) { return a + r.amount; }, 0));
+      var bc = L.byCategory(s, ym, 'expense');
+      eq('分类占比合计为 1', Math.round(bc.list.reduce(function (a, c) { return a + c.pct; }, 0) * 100) / 100, 1);
+      eq('连续记账天数', L.streak(s), 1);
+      eq('月份偏移：上个月', L.ymShift('2026-01', -1), '2025-12');
+      eq('月份偏移：跨年', L.ymShift('2026-12', 1), '2027-01');
+      eq('二月天数', L.daysInMonth('2026-02'), 28);
+      eq('闰年二月天数', L.daysInMonth('2024-02'), 29);
+      eq('星期正确（2026-02-14）', L.weekday('2026-02-14'), '周六');
+
+      /* ── 14. 删除记录 ──────────────────────────────────── */
+      D.querySelector('.tab[data-tab="flow"]').click();
+      // 先补一笔，保证删完还有记录可以编辑
+      D.querySelector('.seg-btn[data-type="expense"]').click();
+      setAmount('12');
+      submit();
+      var n = L.load().records.length;
+      D.querySelector('.grow [data-del]').click();
+      eq('删除后少一笔', L.load().records.length, n - 1);
+      ok('删除后还有记录', n - 1 >= 1);
+
+      /* ── 15. 月份翻页 ──────────────────────────────────── */
+      var thisMonth = L.ymOf(L.todayStr());
+      $('prev-month').click();
+      eq('翻到上个月', L.ymOf($('month-picker').value), L.ymShift(thisMonth, -1));
+      contains('上个月标题对', $('month-label').textContent, L.ymLabel(L.ymShift(thisMonth, -1)));
+      $('this-month').click();
+      eq('一键回到本月', L.ymOf($('month-picker').value), thisMonth);
+
+      /* ── 15b. 全部时间模式 ────────────────────────────── */
+      $('all-time').click();
+      eq('全部模式已打开', $('all-time').getAttribute('aria-pressed'), 'true');
+      contains('标题变成全部时间', $('month-label').textContent, '全部时间');
+      eq('全部模式下「本月」按钮收起', $('this-month').hidden, true);
+      $('all-time').click();
+      eq('再点关闭全部模式', $('all-time').getAttribute('aria-pressed'), 'false');
+      contains('标题回到月份', $('month-label').textContent, '年');
+
+      /* ── 16. 编辑一笔 ──────────────────────────────────── */
+      D.querySelector('.tab[data-tab="flow"]').click();
+      var firstRec = L.sorted(L.load().records)[0];
+      D.querySelector('.grow [data-edit]').click();
+      contains('进入编辑态', $('print-label').textContent, '保存修改');
+      eq('表单回填金额', $('amount').value, L.plain(firstRec.amount));
+      setAmount('99.99');
+      submit();
+      eq('修改已落库', L.load().records.filter(function (r) { return r.id === firstRec.id; })[0].amount, 9999);
+      eq('退出编辑态', $('print-label').textContent, '打印这一笔');
+      eq('记录数不变', L.load().records.length, n - 1);
+    });
+  }
+
+  run().then(function () {
+    finish();
+  }).catch(function (e) {
+    results.push('FAIL 测试抛异常：' + (e && e.message) + '\n' + (e && e.stack));
+    fails++;
+    finish();
+  });
+})();
+</script>
+</body>
+</html>

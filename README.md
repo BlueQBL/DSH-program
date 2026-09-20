@@ -426,9 +426,17 @@ http://localhost:5173
 | JWT 认证示例 | `backend/` + `frontend/` | Spring Boot 3 + Vue 3 | 见上文 |
 | **图片压缩工具** | `image-compressor/` | Node.js + Express + Sharp（前端原生） | `cd image-compressor && npm install && npm start` → http://localhost:3210 |
 | **React Router 演示** | `react-frontend/` | React 18 + TypeScript + React Router 7 + Vite 7 | `cd react-frontend && npm install && npm run dev` → http://localhost:5174 |
+| **水尺 · 喝水提醒** | `water-reminder/` | 零依赖 HTML + CSS + 原生 JS | `cd water-reminder && node server.js` → http://localhost:5180 |
+| **流水账 · 个人记账** | `ledger/` | 零依赖 HTML + CSS + 原生 JS + PWA | `cd ledger && node server.js` → http://localhost:5190 |
 
 图片压缩工具实现了图片上传压缩、质量调节、前后对比、批量打包下载的完整前后端闭环，
 并内置端到端冒烟测试（`npm run smoke`），详见 [image-compressor/README.md](image-compressor/README.md)。
+
+**流水账**是一本只做四件事的个人记账应用：快速记一笔、按日期翻记录、看月度统计、数据只留在本机。
+视觉母题是**热敏小票**——整页是一卷热敏纸压在深墨绿桌垫上，只用墨黑和热敏红两种墨，
+分类占比做成条码。零依赖、无构建步骤、无后端、无账号。除核心需求外还带分类标签、
+CSV / JSON 导入导出、预算与超支提醒、搜索筛选、PWA 离线安装。
+两套零依赖测试（数据层 136 项 + 整页 103 项），详见 [ledger/README.md](ledger/README.md)。
 
 后续新增项目会继续追加到本表。
 

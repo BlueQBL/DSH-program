@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>流水账 · 个人记账</title>
+<meta name="description" content="一本只做一件事的流水账：快速记下每一笔收支，按月看清钱去了哪儿。数据只存在你自己的浏览器里。">
+<meta name="theme-color" content="#121813">
+<meta name="color-scheme" content="dark light">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- 桌垫 -->
+<div class="desk">
+
+  <header class="masthead">
+    <h1 class="wordmark">
+      流水账
+      <span class="wordmark-sub">个人记账 · 数据只在本机</span>
+    </h1>
+    <div class="masthead-right">
+      <p class="stamp" id="today-stamp"></p>
+    </div>
+  </header>
+
+  <main class="bench">
+
+    <!-- ══ 左：热敏纸卷（记一笔 + 今日流水） ══ -->
+    <section class="tape" aria-labelledby="tape-title">
+      <div class="tape-scroll">
+
+        <div class="tape-head">
+          <span class="rule" aria-hidden="true"></span>
+          <h2 class="tape-title" id="tape-title">记一笔</h2>
+          <span class="rule" aria-hidden="true"></span>
+        </div>
+
+        <form class="entry" id="entry-form" novalidate>
+
+          <div class="seg" role="radiogroup" aria-label="收支类型">
+            <button type="button" class="seg-btn" role="radio" data-type="expense" aria-checked="true">支出</button>
+            <button type="button" class="seg-btn" role="radio" data-type="income" aria-checked="false">收入</button>
+          </div>
+
+          <div class="field field-amount">
+            <label class="field-label" for="amount">金额</label>
+            <div class="amount-box">
+              <span class="yuan" aria-hidden="true">¥</span>
+              <input id="amount" name="amount" type="text" inputmode="decimal"
+                     autocomplete="off" enterkeyhint="done" spellcheck="false"
+                     placeholder="0.00" aria-describedby="amount-hint">
+              <button type="button" class="keypad-toggle" id="keypad-toggle"
+                      aria-expanded="false" aria-controls="keypad">键盘</button>
+            </div>
+            <p class="hint" id="amount-hint">可以直接写算式，比如 <code>128+36.5</code>。</p>
+          </div>
+
+          <div class="keypad" id="keypad" hidden aria-label="数字键盘">
+            <button type="button" data-key="7">7</button>
+            <button type="button" data-key="8">8</button>
+            <button type="button" data-key="9">9</button>
+            <button type="button" data-key="back" class="key-alt" aria-label="退格">⌫</button>
+            <button type="button" data-key="4">4</button>
+            <button type="button" data-key="5">5</button>
+            <button type="button" data-key="6">6</button>
+            <button type="button" data-key="+" class="key-alt">+</button>
+            <button type="button" data-key="1">1</button>
+            <button type="button" data-key="2">2</button>
+            <button type="button" data-key="3">3</button>
+            <button type="button" data-key="-" class="key-alt">−</button>
+            <button type="button" data-key="00" class="key-alt">00</button>
+            <button type="button" data-key="0">0</button>
+            <button type="button" data-key=".">.</button>
+            <button type="button" data-key="enter" class="key-go" aria-label="打印这一笔">⏎</button>
+          </div>
+
+          <div class="field">
+            <span class="field-label" id="cat-label">分类</span>
+            <div class="chips" id="category-picker" role="radiogroup" aria-labelledby="cat-label"></div>
+          </div>
+
+          <label class="field field-line" for="note">
+            <span class="field-label">备注</span>
+            <input id="note" name="note" type="text" maxlength="60"
+                   autocomplete="off" placeholder="可选">
+          </label>
+
+          <label class="field field-line" for="date">
+            <span class="field-label">日期</span>
+            <input id="date" name="date" type="date">
+          </label>
+
+          <div class="entry-actions">
+            <button type="submit" class="print-btn" id="print-btn">
+              <span id="print-label">打印这一笔</span>
+              <span class="print-caret" aria-hidden="true">▾</span>
+            </button>
+            <button type="button" class="ghost-btn" id="cancel-edit" hidden>取消修改</button>
+          </div>
+          <p class="form-error" id="form-error" role="alert" hidden></p>
+        </form>
+
+        <span class="rule" aria-hidden="true"></span>
+
+        <section class="today" aria-labelledby="today-title">
+          <div class="tape-sub-row">
+            <h3 class="tape-sub" id="today-title">今日流水</h3>
+            <span class="tape-sub-meta" id="today-meta"></span>
+          </div>
+          <ol class="lines" id="today-list"></ol>
+          <p class="empty" id="today-empty" hidden>
+            今天还没有记录。<br>在上面输入金额，按 <kbd>回车</kbd> 就记下了。
+          </p>
+        </section>
+
+        <div class="tape-foot">
+          <div class="tape-total">
+            <span>今日支出</span>
+            <strong id="today-expense">—</strong>
+          </div>
+          <div class="tape-total">
+            <span>今日收入</span>
+            <strong id="today-income">—</strong>
+          </div>
+          <p class="streak" id="streak"></p>
+          <p class="budget-warn" id="budget-warn" hidden></p>
+          <span class="tear" aria-hidden="true"></span>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ══ 右：本月账页 ══ -->
+    <section class="book" aria-labelledby="book-title">
+      <h2 class="visually-hidden" id="book-title">本月账页</h2>
+
+      <div class="book-bar">
+        <div class="month-nav">
+          <button type="button" class="icon-btn" id="prev-month" aria-label="上个月">‹</button>
+          <button type="button" class="month-label" id="month-label" title="选择月份"></button>
+          <button type="button" class="icon-btn" id="next-month" aria-label="下个月">›</button>
+          <button type="button" class="ghost-btn ghost-sm" id="this-month">本月</button>
+          <button type="button" class="ghost-btn ghost-sm" id="all-time"
+                  aria-pressed="false" title="不分月份，按时间倒序看全部记录">全部</button>
+          <input type="month" id="month-picker" class="visually-hidden" aria-label="选择月份" tabindex="-1">
+        </div>
+        <div class="tabs" role="tablist" aria-label="账页视图">
+          <button type="button" role="tab" class="tab" data-tab="flow" aria-selected="true" aria-controls="panel-flow" id="tab-flow">流水</button>
+          <button type="button" role="tab" class="tab" data-tab="stats" aria-selected="false" aria-controls="panel-stats" id="tab-stats" tabindex="-1">统计</button>
+          <button type="button" role="tab" class="tab" data-tab="setup" aria-selected="false" aria-controls="panel-setup" id="tab-setup" tabindex="-1">设置</button>
+        </div>
+      </div>
+
+      <div class="book-body">
+
+        <!-- 流水 -->
+        <section class="panel" id="panel-flow" role="tabpanel" aria-labelledby="tab-flow" tabindex="0">
+          <div class="summary" id="summary"></div>
+          <div class="filter-bar" id="filter-bar"></div>
+          <div class="groups" id="groups"></div>
+        </section>
+
+        <!-- 统计 -->
+        <section class="panel" id="panel-stats" role="tabpanel" aria-labelledby="tab-stats" tabindex="0" hidden></section>
+
+        <!-- 设置 -->
+        <section class="panel" id="panel-setup" role="tabpanel" aria-labelledby="tab-setup" tabindex="0" hidden></section>
+
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- 提示条 -->
+<div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+<!-- 确认框 -->
+<dialog class="sheet" id="confirm-dialog" aria-labelledby="confirm-title">
+  <h2 class="sheet-title" id="confirm-title">确认</h2>
+  <p class="sheet-body" id="confirm-body"></p>
+  <div class="sheet-actions">
+    <button type="button" class="ghost-btn" id="confirm-cancel">取消</button>
+    <button type="button" class="print-btn print-btn-sm" id="confirm-ok">确定</button>
+  </div>
+</dialog>
+
+<script src="store.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
