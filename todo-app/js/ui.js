@@ -26,6 +26,9 @@
       dueQuick: $('#due-quick'),
       category: $('#f-category'),
       categoryList: $('#category-list'),
+      subtask: $('#f-subtask'),
+      subtaskAdd: $('#f-subtask-add'),
+      subtaskList: $('#f-subtask-list'),
       prioGroup: $('#f-priority'),
       submit: $('#compose-submit'),
       reset: $('#compose-reset'),
@@ -58,6 +61,13 @@
       statToday: $('#stat-today'),
       statUpcoming: $('#stat-upcoming'),
       statStreak: $('#stat-streak'),
+      subtaskStat: $('#subtask-stat'),
+      statSubtasks: $('#stat-subtasks'),
+      statSubtaskRate: $('#stat-subtask-rate'),
+      subtaskPanel: $('#subtask-panel'),
+      subtaskMeta: $('#subtask-meta'),
+      subtaskMeter: $('#subtask-meter'),
+      subtaskBreakdown: $('#subtask-breakdown'),
       categoryStats: $('#category-stats'),
       categoryEmpty: $('#category-stats-empty'),
       series: $('#series'),
@@ -93,6 +103,10 @@
     let toastTimer = 0;
     let toastUndo = null;
     let scrollAnchor = null;
+    /** 立单表单里还没提交的子任务草稿 */
+    let draftSubtasks = [];
+    /** 卡片上展开的子任务面板：任务 id 的集合 */
+    const expanded = new Set();
 
     /* ------------------------------------------------------------ 存储 */
 
@@ -147,6 +161,7 @@
       due: els.due.value,
       priority: ($$('#f-priority input:checked')[0] || {}).value || 'normal',
       category: (els.category.value || '').trim() || '未分类',
+      subtasks: draftSubtasks.map((s) => ({ id: s.id, title: s.title, done: Boolean(s.done) })),
     });
 
     function clearForm(focus) {
@@ -156,9 +171,128 @@
         input.checked = input.value === 'normal';
       });
       els.category.value = '';
+      draftSubtasks = [];
+      if (els.subtask) els.subtask.value = '';
+      renderDraftSubtasks();
       updateCounters();
       setFormError('');
       if (focus !== false) els.title.focus();
+    }
+
+    /* ------------------------------------------------------------ 子任务：草稿编辑 */
+
+    /** 立单表单和编辑对话框共用的"子任务草稿编辑器"；getList 必须返回同一个活数组 */
+    function makeSubtaskDraftEditor(listEl, inputEl, addBtn, getList, onSummary) {
+      const items = () => getList() || [];
+
+      const render = () => {
+        if (!listEl) return;
+        const list = items();
+        listEl.textContent = '';
+        list.forEach((sub) => {
+          const li = document.createElement('li');
+          li.className = 'draft-sub';
+          li.classList.toggle('is-done', Boolean(sub.done));
+          li.dataset.subtaskId = sub.id;
+
+          const toggle = document.createElement('button');
+          toggle.type = 'button';
+          toggle.className = 'draft-sub-check';
+          toggle.dataset.act = listEl === els.subtaskList ? 'draft-toggle' : 'edit-toggle';
+          toggle.dataset.id = sub.id;
+          toggle.setAttribute('aria-pressed', String(Boolean(sub.done)));
+          toggle.setAttribute('aria-label', sub.done ? `标记「${sub.title}」为未完成` : `标记「${sub.title}」为完成`);
+          const tick = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+          tick.setAttribute('aria-hidden', 'true');
+          const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+          use.setAttribute('href', '#icon-check');
+          tick.appendChild(use);
+          toggle.appendChild(tick);
+
+          const text = document.createElement('span');
+          text.className = 'draft-sub-text';
+          text.textContent = sub.title;
+
+          const del = document.createElement('button');
+          del.type = 'button';
+          del.className = 'draft-sub-remove';
+          del.dataset.act = listEl === els.subtaskList ? 'draft-remove' : 'edit-remove';
+          del.dataset.id = sub.id;
+          del.setAttribute('aria-label', `移除子任务「${sub.title}」`);
+          del.title = '移除';
+          del.textContent = '×';
+
+          li.append(toggle, text, del);
+          listEl.appendChild(li);
+        });
+        const done = list.filter((s) => s.done).length;
+        if (onSummary) onSummary(list.length, done);
+      };
+
+      const add = () => {
+        const raw = inputEl && inputEl.value.trim();
+        if (!raw) {
+          if (inputEl) inputEl.focus();
+          return false;
+        }
+        const list = items();
+        if (list.length >= core.MAX_SUBTASKS) {
+          showToast(`一个任务最多 ${core.MAX_SUBTASKS} 条子任务`, null);
+          return false;
+        }
+        let sub;
+        try {
+          sub = core.createSubtask({ title: raw, createdAt: now().getTime() });
+        } catch {
+          return false;
+        }
+        list.push(sub);
+        inputEl.value = '';
+        inputEl.focus();
+        render();
+        return true;
+      };
+
+      const toggle = (id) => {
+        const list = items();
+        const sub = list.find((s) => s.id === id);
+        if (!sub) return;
+        sub.done = !sub.done;
+        sub.completedAt = sub.done ? now().getTime() : null;
+        render();
+      };
+
+      const remove = (id) => {
+        const list = items();
+        const i = list.findIndex((s) => s.id === id);
+        if (i >= 0) list.splice(i, 1);
+        render();
+      };
+
+      if (addBtn) addBtn.addEventListener('click', add);
+      if (inputEl) {
+        inputEl.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter') return;
+          event.preventDefault();
+          add();
+        });
+      }
+
+      return { render, add, toggle, remove, items };
+    }
+
+    let editSubtasks = [];
+    let draftEditor = null;
+    let editEditor = null;
+    const liveDraft = () => draftSubtasks;
+    const liveEdit = () => editSubtasks;
+
+    function renderDraftSubtasks() {
+      if (draftEditor) draftEditor.render();
+    }
+
+    function renderEditSubtasks() {
+      if (editEditor) editEditor.render();
     }
 
     function updateCounters() {
@@ -461,6 +595,7 @@
         meta.appendChild(when);
       }
       body.appendChild(meta);
+      body.appendChild(renderSubtaskPanel(task));
 
       /* ---- 操作 ---- */
       const actions = document.createElement('div');
@@ -481,8 +616,195 @@
       return li;
     }
 
-    function button(icon, label, className, onClick) {
-      const btn = document.createElement('button');
+    /** 卡片上的子任务面板：一条进度条 + 可展开的清单 */
+    function renderSubtaskPanel(task) {
+      const progress = core.subtaskProgress(task);
+      const wrap = document.createElement('div');
+      wrap.className = 'subtasks';
+      if (!progress.has) {
+        wrap.hidden = true;
+        return wrap;
+      }
+
+      wrap.classList.toggle('is-complete', progress.allDone);
+      wrap.classList.toggle('is-open', expanded.has(task.id));
+
+      /* 进度条：本身就是展开/收起的按钮 */
+      const bar = document.createElement('button');
+      bar.type = 'button';
+      bar.className = 'subtask-bar';
+      bar.dataset.act = 'sub-expand';
+      bar.dataset.id = task.id;
+      bar.setAttribute('aria-expanded', String(expanded.has(task.id)));
+      bar.title = expanded.has(task.id) ? '收起子任务' : '展开子任务';
+
+      const caret = document.createElement('span');
+      caret.className = 'subtask-caret';
+      caret.setAttribute('aria-hidden', 'true');
+      caret.textContent = '▸';
+
+      const track = document.createElement('span');
+      track.className = 'subtask-track';
+      const fill = document.createElement('i');
+      fill.style.width = `${progress.rate}%`;
+      track.appendChild(fill);
+
+      const count = document.createElement('span');
+      count.className = 'subtask-count';
+      count.textContent = `${progress.done}/${progress.total}`;
+
+      const note = document.createElement('span');
+      note.className = 'subtask-note';
+      note.textContent = progress.allDone ? '子任务全部完成' : progress.next ? `下一步：${progress.next.title}` : '';
+
+      bar.append(caret, track, count, note);
+      wrap.appendChild(bar);
+
+      if (!expanded.has(task.id)) return wrap;
+
+      /* 展开后的清单 */
+      const list = document.createElement('ul');
+      list.className = 'subtask-list';
+      (task.subtasks || []).forEach((sub) => {
+        const li = document.createElement('li');
+        li.className = 'subtask-item';
+        li.classList.toggle('is-done', sub.done);
+        li.dataset.subtaskId = sub.id;
+
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'subtask-check';
+        toggle.dataset.act = 'sub-toggle';
+        toggle.dataset.id = task.id;
+        toggle.dataset.subtaskId = sub.id;
+        toggle.setAttribute('aria-pressed', String(sub.done));
+        toggle.setAttribute('aria-label', sub.done ? `恢复「${sub.title}」` : `完成「${sub.title}」`);
+
+        const text = document.createElement('span');
+        text.className = 'subtask-title';
+        text.textContent = sub.title;
+
+        const rename = document.createElement('button');
+        rename.type = 'button';
+        rename.className = 'subtask-act';
+        rename.dataset.act = 'sub-rename';
+        rename.dataset.id = task.id;
+        rename.dataset.subtaskId = sub.id;
+        rename.title = '改名';
+        rename.setAttribute('aria-label', `重命名「${sub.title}」`);
+        rename.textContent = '改名';
+
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'subtask-act danger';
+        del.dataset.act = 'sub-remove';
+        del.dataset.id = task.id;
+        del.dataset.subtaskId = sub.id;
+        del.title = '删除这一步';
+        del.setAttribute('aria-label', `删除子任务「${sub.title}」`);
+        del.textContent = '×';
+
+        li.append(toggle, text, rename, del);
+        list.appendChild(li);
+      });
+      wrap.appendChild(list);
+
+      /* 就地新增一步 */
+      const adder = document.createElement('div');
+      adder.className = 'subtask-adder';
+      const adderInput = document.createElement('input');
+      adderInput.type = 'text';
+      adderInput.maxLength = core.MAX_SUBTASK;
+      adderInput.placeholder = '再拆一步，回车加入';
+      adderInput.dataset.act = 'sub-input';
+      adderInput.dataset.id = task.id;
+      adderInput.setAttribute('aria-label', `给「${task.title}」加一条子任务`);
+      adderInput.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        addSubtaskToTask(task.id, adderInput.value);
+      });
+      adder.appendChild(adderInput);
+
+      if (progress.done > 0) {
+        const clear = document.createElement('button');
+        clear.type = 'button';
+        clear.className = 'subtask-act';
+        clear.dataset.act = 'sub-clear-done';
+        clear.dataset.id = task.id;
+        clear.textContent = '清掉已完成';
+        clear.title = '移除已完成的子任务';
+        adder.appendChild(clear);
+      }
+      wrap.appendChild(adder);
+      return wrap;
+    }
+
+    function toggleSubtaskById(taskId, subtaskId) {
+      const next = core.toggleSubtask(state, taskId, subtaskId, now());
+      const finished = core.applySubtaskMomentum(next, taskId, now());
+      commit(finished, finished !== next ? '子任务全部完成 · 大任务也划掉了' : null, { snapshot: true, full: true });
+    }
+
+    function addSubtaskToTask(taskId, raw) {
+      const title = String(raw || '').trim();
+      if (!title) return;
+      const res = core.addSubtask(state, taskId, { title }, now());
+      if (!res.subtask) return;
+      expanded.add(taskId);
+      commit(res.state, '已加一步', { snapshot: true, full: true });
+      const li = els.list && els.list.querySelector(`[data-id="${taskId}"]`);
+      if (li) {
+        const input = li.querySelector('.subtask-adder input');
+        if (input) input.focus();
+      }
+    }
+
+    function renameSubtask(taskId, subtaskId) {
+      const task = state.tasks.find((t) => t.id === taskId);
+      const sub = core.findSubtask(task, subtaskId);
+      if (!sub) return;
+      const li = els.list && els.list.querySelector(`.subtask-item[data-subtask-id="${subtaskId}"]`);
+      const host = li && li.querySelector('.subtask-title');
+      if (!host) return;
+
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'subtask-rename';
+      input.value = sub.title;
+      input.maxLength = core.MAX_SUBTASK;
+      host.textContent = '';
+      host.appendChild(input);
+      input.focus();
+      input.select();
+
+      let settled = false;
+      const finish = (save) => {
+        if (settled) return;
+        settled = true;
+        const value = input.value.trim();
+        if (save && value && value !== sub.title) {
+          commit(core.updateSubtask(state, taskId, subtaskId, { title: value }, now()), '子任务已改名', {
+            snapshot: true,
+            full: true,
+          });
+        } else {
+          renderBoard();
+        }
+      };
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          finish(true);
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          finish(false);
+        }
+      });
+      input.addEventListener('blur', () => finish(true));
+    }
+
+    function button(icon, label, className, onClick) {      const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = className;
       btn.title = label;
@@ -589,6 +911,7 @@
       setText(els.statToday, stats.today);
       if (els.statUpcoming) els.statUpcoming.textContent = String(stats.upcoming);
       if (els.statStreak) els.statStreak.textContent = `${core.streak(state.tasks, date)} 天`;
+      renderSubtaskStats(stats);
 
       // 分类分布
       if (els.categoryStats) {
@@ -683,6 +1006,64 @@
 
     function setText(el, value) {
       if (el) el.textContent = String(value);
+    }
+
+    /** 子任务统计：只有真的用了子任务才显示，避免空占位 */
+    function renderSubtaskStats(stats) {
+      const st = stats.subtasks;
+      const used = st && st.total > 0;
+      if (els.subtaskStat) els.subtaskStat.hidden = !used;
+      if (els.subtaskPanel) els.subtaskPanel.hidden = !used;
+      if (!used) return;
+
+      setText(els.statSubtasks, `${st.done}/${st.total}`);
+      if (els.statSubtaskRate) els.statSubtaskRate.textContent = `${st.rate}%`;
+      if (els.subtaskMeta) {
+        els.subtaskMeta.textContent = `${st.withSubtasks} 个任务 · 还差 ${st.active} 步`;
+      }
+      if (els.subtaskMeter) {
+        const fill = els.subtaskMeter.querySelector('i');
+        if (fill) fill.style.width = `${st.rate}%`;
+      }
+
+      if (els.subtaskBreakdown) {
+        els.subtaskBreakdown.textContent = '';
+        const rows = state.tasks
+          .map((t) => ({ task: t, p: core.subtaskProgress(t) }))
+          .filter((row) => row.p.has)
+          .sort((a, b) => b.p.active - a.p.active || a.p.rate - b.p.rate)
+          .slice(0, 5);
+        rows.forEach(({ task, p }) => {
+          const li = document.createElement('li');
+          li.className = 'bar-row';
+          li.style.setProperty('--cat-color', core.categoryColor(state, task.category));
+
+          const name = document.createElement('button');
+          name.type = 'button';
+          name.className = 'bar-name';
+          name.textContent = task.title;
+          name.title = `展开「${task.title}」的子任务`;
+          name.addEventListener('click', () => {
+            expanded.add(task.id);
+            renderBoard();
+            const card = els.list && els.list.querySelector(`[data-id="${task.id}"]`);
+            if (card) card.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+          });
+
+          const track = document.createElement('div');
+          track.className = 'bar-track';
+          const fill = document.createElement('span');
+          fill.style.width = `${p.rate}%`;
+          fill.style.setProperty('--done-width', `${p.rate}%`);
+          track.appendChild(fill);
+
+          const value = document.createElement('span');
+          value.className = 'bar-value';
+          value.textContent = `${p.done}/${p.total}`;
+          li.append(name, track, value);
+          els.subtaskBreakdown.appendChild(li);
+        });
+      }
     }
 
     /* ------------------------------------------------------------ 刷新 */
@@ -821,6 +1202,13 @@
       $$('#e-priority input').forEach((input) => {
         input.checked = input.value === task.priority;
       });
+      // 子任务跟着对话框走：先在框里改，点"保存改动"才落地
+      editSubtasks = (task.subtasks || []).map((s) => Object.assign({}, s));
+      if (editEditor) editEditor.render();
+      const bulkAll = $('#e-subtask-all');
+      const bulkClear = $('#e-subtask-clear');
+      if (bulkAll) bulkAll.disabled = editSubtasks.length === 0;
+      if (bulkClear) bulkClear.disabled = !editSubtasks.some((s) => s.done);
       $('#e-error').hidden = true;
       dialog.showModal();
       $('#e-title').focus();
@@ -849,8 +1237,14 @@
         due,
         category: $('#e-category').value.trim() || '未分类',
         priority: ($$('#e-priority input:checked')[0] || {}).value || 'normal',
+        subtasks: editSubtasks.map((s) => ({ id: s.id, title: s.title, done: Boolean(s.done), completedAt: s.completedAt || null })),
       };
-      const next = core.withTask(state, id, patch, now());
+      let next = core.withTask(state, id, patch, now());
+      // 保存时如果子任务已全部完成，顺手把大任务也标记完成（和卡片上撕最后一步的行为一致）
+      const before = state.tasks.find((t) => t.id === id);
+      if (before && !before.done && core.subtaskProgress({ subtasks: patch.subtasks }).allDone) {
+        next = core.withTask(next, id, { done: true }, now());
+      }
       $('#edit-dialog').close();
       commit(next, '已保存改动', { undo: true });
       flashCard(id);
@@ -939,7 +1333,19 @@
     function loadDemo() {
       const today = core.todayISO(now());
       const demo = [
-        { title: '把季度复盘写成三页纸', desc: '结论放第一页，数据放第二页，下周计划放第三页。', due: today, priority: 'urgent', category: '工作' },
+        {
+          title: '把季度复盘写成三页纸',
+          desc: '结论放第一页，数据放第二页，下周计划放第三页。',
+          due: today,
+          priority: 'urgent',
+          category: '工作',
+          subtasks: [
+            { title: '导出季度数据', done: true },
+            { title: '写第一页结论', done: true },
+            { title: '补三张图表' },
+            { title: '发给组内过一遍' },
+          ],
+        },
         { title: '给接口补上失败重试', desc: '超时 3 次退避重试，失败写进日志。', due: core.shiftISO(2, now()), priority: 'high', category: '工作' },
         { title: '读完《重构》第 6 章', desc: '把书里的例子敲一遍，记在笔记里。', due: core.shiftISO(5, now()), priority: 'normal', category: '学习' },
         { title: '预约牙科检查', desc: '', due: core.shiftISO(-2, now()), priority: 'high', category: '生活' },
@@ -957,6 +1363,114 @@
         }
       });
       commit(next, '示例数据已铺好', { undo: true });
+    }
+
+    /* ------------------------------------------------------------ 子任务：接线 */
+
+    function bindSubtaskUi() {
+      // 立单表单里的草稿编辑器
+      draftEditor = makeSubtaskDraftEditor(
+        els.subtaskList,
+        els.subtask,
+        els.subtaskAdd,
+        liveDraft,
+        (total, done) => {
+          const label = $('#f-subtask-count');
+          if (label) label.textContent = total ? `${done}/${total} 已完成` : '';
+        }
+      );
+      draftEditor.render();
+
+      // 编辑对话框里的编辑器
+      editEditor = makeSubtaskDraftEditor(
+        $('#e-subtask-list'),
+        $('#e-subtask'),
+        $('#e-subtask-add'),
+        liveEdit,
+        (total, done) => {
+          const label = $('#e-subtask-summary');
+          if (label) label.textContent = total ? `${done}/${total} 已完成（保存后生效）` : '';
+          const all = $('#e-subtask-all');
+          const clear = $('#e-subtask-clear');
+          if (all) all.disabled = total === 0;
+          if (clear) clear.disabled = done === 0;
+        }
+      );
+      editEditor.render();
+
+      const bulkAll = $('#e-subtask-all');
+      const bulkClear = $('#e-subtask-clear');
+      if (bulkAll) {
+        bulkAll.addEventListener('click', () => {
+          editSubtasks.forEach((s) => {
+            s.done = true;
+            s.completedAt = s.completedAt || now().getTime();
+          });
+          editEditor.render();
+          bulkAll.disabled = editSubtasks.length === 0;
+          if (bulkClear) bulkClear.disabled = false;
+        });
+      }
+      if (bulkClear) {
+        bulkClear.addEventListener('click', () => {
+          // 就地删除，保持数组引用不变，两个编辑器看到的是同一份
+          for (let i = editSubtasks.length - 1; i >= 0; i -= 1) {
+            if (editSubtasks[i].done) editSubtasks.splice(i, 1);
+          }
+          editEditor.render();
+        });
+      }
+
+      // 卡片上的子任务：统一走事件委托
+      document.addEventListener('click', (event) => {
+        const el = event.target.closest && event.target.closest('[data-act]');
+        if (!el) return;
+        const act = el.dataset.act;
+        const taskId = el.dataset.id;
+        const subId = el.dataset.subtaskId;
+        if (window.__traceSub) console.log('   [sub-act]', act, 'task=', taskId, 'sub=', subId);
+
+        switch (act) {
+          case 'draft-toggle':
+            draftEditor.toggle(taskId);
+            break;
+          case 'draft-remove':
+            draftEditor.remove(taskId);
+            break;
+          case 'edit-toggle':
+            editEditor.toggle(taskId);
+            break;
+          case 'edit-remove':
+            editEditor.remove(taskId);
+            break;
+          case 'sub-expand':
+            if (expanded.has(taskId)) expanded.delete(taskId);
+            else expanded.add(taskId);
+            renderBoard();
+            break;
+          case 'sub-toggle':
+            toggleSubtaskById(taskId, subId);
+            break;
+          case 'sub-remove':
+            commit(core.removeSubtask(state, taskId, subId, now()), '已删掉这一步', { snapshot: true, full: true });
+            break;
+          case 'sub-rename':
+            renameSubtask(taskId, subId);
+            break;
+          case 'sub-clear-done': {
+            const task = state.tasks.find((t) => t.id === taskId);
+            const doneCount = task ? core.subtaskProgress(task).done : 0;
+            if (!doneCount) return;
+            commit(core.clearDoneSubtasks(state, taskId, now()), `已移除 ${doneCount} 条子任务`, {
+              snapshot: true,
+              full: true,
+            });
+            break;
+          }
+          default:
+            break;
+        }
+      });
     }
 
     /* ------------------------------------------------------------ 事件绑定 */
@@ -1063,6 +1577,8 @@
           if (fn) fn();
         });
       }
+
+      bindSubtaskUi();
 
       const editForm = $('#edit-form');
       if (editForm) editForm.addEventListener('submit', submitEditor);

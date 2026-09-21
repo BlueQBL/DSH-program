@@ -110,6 +110,15 @@
         <datalist id="category-list"></datalist>
       </label>
 
+      <div class="field">
+        <span class="field-label">子任务 <em class="field-hint" id="f-subtask-count"></em></span>
+        <div class="subtask-composer">
+          <input type="text" id="f-subtask" maxlength="60" placeholder="拆一步，回车加入" aria-label="拆一步子任务" />
+          <button type="button" id="f-subtask-add" class="ghost-button small">加入</button>
+        </div>
+        <ul class="subtask-draft" id="f-subtask-list"></ul>
+      </div>
+
       <p class="form-error" id="compose-error" role="alert" hidden></p>
 
       <div class="form-actions">
@@ -130,8 +139,7 @@
   <section class="board" id="board" aria-labelledby="board-heading">
     <div class="board-head">
       <h2 id="board-heading">案头</h2>
-      <p class="board-sub">拖动卡片上沿的票根撕下来，就把这件事划掉了。</p>
-    </div>
+      <p class="board-sub">拖动卡片上沿的票根撕下来，就把这件事划掉了。</p>    </div>
 
     <div class="toolbar">
       <div class="search-field">
@@ -203,7 +211,17 @@
       <div class="stat"><dt>今天到期</dt><dd id="stat-today">0</dd></div>
       <div class="stat"><dt>7 天内</dt><dd id="stat-upcoming">0</dd></div>
       <div class="stat wide"><dt>连续完成</dt><dd id="stat-streak">0 天</dd></div>
+      <div class="stat wide subtask-stat" id="subtask-stat" hidden>
+        <dt>子任务</dt>
+        <dd><span id="stat-subtasks">0/0</span> <small id="stat-subtask-rate"></small></dd>
+      </div>
     </dl>
+
+    <section class="panel" id="subtask-panel" hidden>
+      <h3>子任务推进 <span class="panel-note" id="subtask-meta"></span></h3>
+      <div class="subtask-meter" id="subtask-meter"><i></i></div>
+      <ul class="bar-list" id="subtask-breakdown"></ul>
+    </section>
 
     <section class="panel">
       <h3>分类分布 <span class="panel-note">已完成 / 总数</span></h3>
@@ -265,6 +283,19 @@
       <span class="field-label">分类</span>
       <input type="text" id="e-category" maxlength="16" list="category-list" />
     </label>
+
+    <div class="field">
+      <span class="field-label">子任务 <em class="field-hint" id="e-subtask-summary"></em></span>
+      <div class="subtask-composer">
+        <input type="text" id="e-subtask" maxlength="60" placeholder="拆一步，回车加入" aria-label="拆一步子任务" />
+        <button type="button" id="e-subtask-add" class="ghost-button small">加入</button>
+      </div>
+      <ul class="subtask-draft" id="e-subtask-list"></ul>
+      <div class="subtask-bulk">
+        <button type="button" id="e-subtask-all" class="ghost-button small">全部完成</button>
+        <button type="button" id="e-subtask-clear" class="ghost-button small">清掉已完成</button>
+      </div>
+    </div>
 
     <p class="form-error" id="e-error" role="alert" hidden></p>
 
@@ -334,11 +365,23 @@
     if (/selfcheck/.test(location.search)) {
       window.addEventListener('load', function () {
         if (/selfcheck=seed/.test(location.search)) {
-          // 铺三条样例（含一条逾期、一条已完成），用于刷新后仍在的验收
+          // 铺三条样例（一条带子任务、一条逾期、一条已完成），用于刷新后仍在的验收
           var core = window.TodoCore;
           var today = core.todayISO(new Date());
           [
-            { title: '把季度复盘写成三页纸', desc: '结论放第一页。', due: today, priority: 'urgent', category: '工作' },
+            {
+              title: '把季度复盘写成三页纸',
+              desc: '结论放第一页。',
+              due: today,
+              priority: 'urgent',
+              category: '工作',
+              subtasks: [
+                { title: '导出季度数据', done: true },
+                { title: '写第一页结论', done: true },
+                { title: '补三张图表' },
+                { title: '发给组内过一遍' },
+              ],
+            },
             { title: '预约牙科检查', desc: '顺便问一下智齿。', due: core.shiftISO(-2, new Date()), priority: 'high', category: '生活' },
             { title: '读完《重构》第 6 章', desc: '', due: core.shiftISO(5, new Date()), priority: 'low', category: '学习', done: true },
           ].forEach(function (item) {
@@ -350,13 +393,21 @@
             Array.prototype.forEach.call(document.querySelectorAll('#f-priority input'), function (r) {
               r.checked = r.value === item.priority;
             });
+            // 立单表单里的子任务草稿（已经完成的先勾上，验证状态能带过去）
+            (item.subtasks || []).forEach(function (sub) {
+              document.querySelector('#f-subtask').value = sub.title;
+              document.querySelector('#f-subtask-add').click();
+              if (sub.done) {
+                var rows = document.querySelectorAll('#f-subtask-list .draft-sub');
+                var last = rows[rows.length - 1];
+                if (last) last.querySelector('.draft-sub-check').click();
+              }
+            });
             form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-            if (item.done) {
-              var id = window.__todoApp.state.tasks[0].id;
-              document.querySelector('#task-list .task .icon-button.check').click();
-              void id;
-            }
           });
+          // 把带子任务的那张卡片展开，方便量展开态的布局
+          var firstBar = document.querySelector('#task-list .subtask-bar');
+          if (firstBar) firstBar.click();
         }
         var report = window.__todoSelfCheck();
         report.seeded = window.__todoApp.state.tasks.length;
@@ -366,6 +417,24 @@
         report.statusBarSegs = document.querySelectorAll('#status-bar .seg').length;
         report.chips = document.querySelectorAll('.chip').length;
         report.todayTick = document.querySelectorAll('#series .tick.is-today').length;
+        // 子任务相关的现场数据
+        var subBar = document.querySelector('#task-list .subtask-bar');
+        report.subtaskBar = subBar ? { w: Math.round(subBar.getBoundingClientRect().width), count: subBar.querySelector('.subtask-count').textContent } : null;
+        report.subtaskItems = document.querySelectorAll('#task-list .subtask-item').length;
+        var item = document.querySelector('#task-list .subtask-item');
+        report.subtaskItemBox = item ? { w: Math.round(item.getBoundingClientRect().width), h: Math.round(item.getBoundingClientRect().height) } : null;
+        report.subtaskStat = document.querySelector('#stat-subtasks').textContent;
+        report.subtaskRate = document.querySelector('#stat-subtask-rate').textContent;
+        report.subtaskPanelHidden = document.querySelector('#subtask-panel').hidden;
+        report.subtaskTrees = window.__todoApp.state.tasks
+          .filter(function (t) {
+            return t.subtasks && t.subtasks.length;
+          })
+          .map(function (t) {
+            return t.title + ' → ' + t.subtasks.map(function (s) {
+              return s.title + (s.done ? '(完成)' : '');
+            }).join('、');
+          });
         var text = '自检 ' + (report.ok ? '1' : '0') + ' ' + JSON.stringify(report);
         console.log(text);
         if (/selfcheck=post/.test(location.search)) {

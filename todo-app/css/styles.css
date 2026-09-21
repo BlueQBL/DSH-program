@@ -1226,6 +1226,376 @@ kbd {
   background: linear-gradient(180deg, var(--card-alt), transparent);
 }
 
+/* ------------------------------------------------------------------ 子任务 */
+/* 进度条做成一条"齿孔条"，和票根同一套语言：一步一步往下打孔 */
+
+.field-hint {
+  margin-left: auto;
+  font-family: var(--font-body);
+  font-size: 10.5px;
+  font-style: normal;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink-4);
+}
+
+.subtask-composer {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.subtask-composer input {
+  flex: 1;
+  min-width: 0;
+  border: 1px dashed var(--rule);
+  border-radius: var(--r-sm);
+  background: var(--card-alt);
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.subtask-composer input:focus {
+  outline: none;
+  border-style: solid;
+  border-color: var(--ink);
+  background: var(--card);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.subtask-composer .ghost-button {
+  flex: none;
+}
+
+/* 草稿列表：立单表单 / 编辑对话框里还没提交的子任务 */
+.subtask-draft {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.subtask-draft:empty {
+  margin: 0;
+}
+
+.draft-sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--r-sm);
+  background: var(--card-alt);
+  font-size: 13px;
+}
+
+.draft-sub-check {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  background: var(--card);
+  color: transparent;
+  transition: all 0.15s ease;
+}
+
+.draft-sub-check svg {
+  width: 12px;
+  height: 12px;
+}
+
+.draft-sub.is-done .draft-sub-check {
+  background: var(--teal);
+  border-color: var(--teal);
+  color: var(--card);
+}
+
+.draft-sub-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.draft-sub.is-done .draft-sub-text {
+  color: var(--ink-4);
+  text-decoration: line-through;
+}
+
+.draft-sub-remove {
+  flex: none;
+  border: none;
+  background: none;
+  padding: 0 4px;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--ink-4);
+}
+
+.draft-sub-remove:hover {
+  color: var(--accent);
+}
+
+.subtask-bulk {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* ---- 卡片上的子任务面板 ---- */
+.subtasks {
+  margin-top: 8px;
+  border-top: 1px dashed var(--rule-soft);
+  padding-top: 7px;
+}
+
+.subtask-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 2px 0;
+  text-align: left;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.subtask-caret {
+  flex: none;
+  font-size: 9px;
+  color: var(--ink-4);
+  transition: transform 0.15s ease;
+}
+
+.subtasks.is-open .subtask-caret {
+  transform: rotate(90deg);
+}
+
+.subtask-track {
+  flex: none;
+  width: 78px;
+  height: 6px;
+  border-radius: 2px;
+  background: var(--rule-soft);
+  overflow: hidden;
+}
+
+.subtask-track > i {
+  display: block;
+  height: 100%;
+  background: var(--teal);
+  transition: width 0.25s ease;
+}
+
+.subtasks.is-complete .subtask-track > i {
+  background: var(--teal);
+}
+
+.subtask-count {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-2);
+}
+
+/* 下一步是哪个：悬停/展开时才显示，平时保持安静 */
+.subtask-note {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--ink-4);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.task:hover .subtask-note,
+.subtasks.is-open .subtask-note {
+  opacity: 1;
+}
+
+.subtasks.is-complete .subtask-note {
+  color: var(--teal);
+  opacity: 1;
+}
+
+.subtask-list {
+  list-style: none;
+  margin: 7px 0 0;
+  padding: 0 0 0 17px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* 左侧一条虚线：展开的清单像从票面撕下的一串小票 */
+  border-left: 1px dashed var(--rule);
+}
+
+.subtask-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: var(--r-sm);
+  font-size: 13px;
+}
+
+.subtask-item:hover {
+  background: var(--card-alt);
+}
+
+.subtask-check {
+  position: relative;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  background: var(--card);
+  transition: all 0.15s ease;
+}
+
+.subtask-check:hover {
+  border-color: var(--teal);
+}
+
+.subtask-item.is-done .subtask-check {
+  background: var(--teal);
+  border-color: var(--teal);
+}
+
+.subtask-item.is-done .subtask-check::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--card);
+  border-width: 0 1.6px 1.6px 0;
+  transform: rotate(42deg);
+}
+
+.subtask-title {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.subtask-item.is-done .subtask-title {
+  color: var(--ink-4);
+  text-decoration: line-through;
+}
+
+.subtask-act {
+  flex: none;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  background: none;
+  padding: 1px 6px;
+  font-size: 11px;
+  color: var(--ink-4);
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.subtask-item:hover .subtask-act,
+.subtask-act:focus-visible,
+.subtask-adder .subtask-act {
+  opacity: 1;
+}
+
+.subtask-act:hover {
+  border-color: var(--rule);
+  color: var(--ink);
+}
+
+.subtask-act.danger:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.subtask-rename {
+  width: 100%;
+  border: 1px solid var(--ink);
+  border-radius: 2px;
+  background: var(--card);
+  padding: 1px 5px;
+  font-size: 13px;
+}
+
+.subtask-adder {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding-left: 17px;
+}
+
+.subtask-adder input {
+  flex: 1;
+  min-width: 0;
+  border: 1px dashed var(--rule);
+  border-radius: var(--r-sm);
+  background: transparent;
+  padding: 4px 8px;
+  font-size: 12.5px;
+}
+
+.subtask-adder input:focus {
+  outline: none;
+  border-style: solid;
+  border-color: var(--ink);
+  background: var(--card);
+}
+
+/* 已完成的卡片：子任务条整体降调 */
+.task.is-done .subtasks {
+  opacity: 0.72;
+}
+
+/* ---- 右栏：子任务统计 ---- */
+.subtask-meter {
+  height: 9px;
+  border-radius: 2px;
+  background: var(--rule-soft);
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.subtask-meter > i {
+  display: block;
+  height: 100%;
+  background: var(--teal);
+  transition: width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.subtask-stat dd {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.subtask-stat small {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--teal);
+}
+
 /* ------------------------------------------------------------------ 空态 */
 .empty {
   display: grid;

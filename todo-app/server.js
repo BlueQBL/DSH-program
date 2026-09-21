@@ -74,6 +74,14 @@ const server = http.createServer((req, res) => {
 });
 
 if (require.main === module) {
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`端口 ${PORT} 已被占用：换一个端口再试，例如 PORT=5211 node server.js`);
+    } else {
+      console.error('启动失败：' + err.message);
+    }
+    process.exit(1);
+  });
   server.listen(PORT, HOST, () => {
     console.log(`案头待办已启动 → http://${HOST}:${PORT}`);
   });

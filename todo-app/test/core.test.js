@@ -309,6 +309,209 @@ group('近两周完成量与连续天数', () => {
   eq(core.streak([], NOW), 0, '没数据连续 0 天');
 });
 
+/* ------------------------------------------------------------------ 子任务 */
+group('子任务：构造与清洗', () => {
+  const sub = core.createSubtask({ title: '  导出数据  ', done: true });
+  eq(sub.title, '导出数据', '标题去空格');
+  eq(sub.done, true, '完成状态保留');
+  ok(sub.id, '自动生成 id');
+  eq(core.createSubtask('字符串也能建').title, '字符串也能建', '支持直接传字符串');
+  throws(() => core.createSubtask({ title: '   ' }), '空标题抛错');
+  eq(core.createSubtask({ title: 'x'.repeat(100) }).title.length, core.MAX_SUBTASK, '按上限截断');
+
+  const dirty = core.sanitizeSubtasks([
+    { title: '好的' },
+    { title: '  ' },
+    null,
+    '裸字符串',
+    { id: 'dup', title: '一' },
+    { id: 'dup', title: '二' },
+    undefined,
+    { done: true },
+    42, // 数字这类原始值直接丢掉，只有字符串和对象会被接受
+  ]);
+  eq(dirty.length, 4, '脏数据只留下能用的');
+  eq(dirty.map((s) => s.title), ['好的', '裸字符串', '一', '二'], '空标题 / null / undefined / 没有标题的对象 / 数字都被丢掉');
+  eq(new Set(dirty.map((s) => s.id)).size, 4, '重复 id 被拆开');
+  eq(core.sanitizeSubtasks('不是数组'), [], '非数组得到空列表');
+  eq(core.sanitizeSubtasks(undefined), [], 'undefined 得到空列表');
+  ok(core.sanitizeSubtasks(new Array(80).fill(0).map((_, i) => ({ title: 's' + i }))).length <= core.MAX_SUBTASKS, '条数有上限');
+});
+
+group('子任务：随大任务一起创建与读取', () => {
+  const task = core.createTask({ title: '大任务', subtasks: [{ title: '第一步' }, { title: '第二步', done: true }] }, NOW);
+  eq(task.subtasks.length, 2, '创建时就带上子任务');
+  eq(task.subtasks[1].done, true, '子任务完成状态保留');
+
+  eq(core.createTask({ title: '没有子任务' }, NOW).subtasks, [], '不传就是空数组（不是 undefined）');
+  eq(core.countSubtasks([task]).total, 2, '统计所有子任务');
+  eq(core.countSubtasks([task]).done, 1, '统计已完成子任务');
+  eq(core.countSubtasks([task]).active, 1, '统计未完成子任务');
+  eq(core.countSubtasks([task]).rate, 50, '子任务完成率');
+  eq(core.countSubtasks([task]).withSubtasks, 1, '统计用了子任务的大任务数');
+  eq(core.countSubtasks([core.createTask({ title: '没拆过' }, NOW)]).rate, 0, '没有子任务时完成率是 0，不是 NaN');
+
+  const p = core.subtaskProgress(task);
+  eq([p.total, p.done, p.active, p.rate, p.allDone, p.has], [2, 1, 1, 50, false, true], '进度对象五个字段');
+  eq(p.next.title, '第一步', 'next 指向第一个没完成的');
+  const empty = core.subtaskProgress(core.createTask({ title: '空' }, NOW));
+  eq([empty.total, empty.has, empty.allDone], [0, false, false], '没有子任务时 has/allDone 都是 false');
+});
+
+group('子任务：增删改与切换', () => {
+  let state = core.createState();
+  state = core.addTask(state, { title: '大任务' }, NOW).state;
+  const taskId = state.tasks[0].id;
+
+  const added = core.addSubtask(state, taskId, { title: '第一步' }, NOW);
+  eq(added.state.tasks[0].subtasks.length, 1, '加了一条');
+  ok(added.subtask && added.subtask.id, '返回新建的子任务');
+  state = added.state;
+  state = core.addSubtask(state, taskId, '第二步', NOW).state;
+  eq(state.tasks[0].subtasks.length, 2, '字符串形式也能加');
+  eq(core.addSubtask(state, 'no-such-task', 'x', NOW).state, state, '任务不存在时原样返回');
+  eq(core.addSubtask(state, taskId, '   ', NOW).state, state, '空标题不加');
+
+  const subId = state.tasks[0].subtasks[0].id;
+  state = core.toggleSubtask(state, taskId, subId, NOW);
+  eq(state.tasks[0].subtasks[0].done, true, '切换成完成');
+  ok(typeof state.tasks[0].subtasks[0].completedAt === 'number', '完成时记下时间');
+  state = core.toggleSubtask(state, taskId, subId, NOW);
+  eq(state.tasks[0].subtasks[0].done, false, '再切换回未完成');
+  eq(state.tasks[0].subtasks[0].completedAt, null, '恢复时清掉完成时间');
+  eq(core.toggleSubtask(state, taskId, 'no-such-sub', NOW), state, '子任务不存在时原样返回');
+
+  state = core.updateSubtask(state, taskId, subId, { title: '改过名的第一步' }, NOW);
+  eq(state.tasks[0].subtasks[0].title, '改过名的第一步', '改名生效');
+  state = core.updateSubtask(state, taskId, subId, { title: '  ' }, NOW);
+  eq(state.tasks[0].subtasks[0].title, '改过名的第一步', '空标题不会把原名冲掉');
+
+  state = core.setAllSubtasks(state, taskId, true, NOW);
+  eq(state.tasks[0].subtasks.every((s) => s.done), true, '一键全部完成');
+  eq(core.subtaskProgress(state.tasks[0]).allDone, true, '此时全部完成');
+  state = core.setAllSubtasks(state, taskId, false, NOW);
+  eq(state.tasks[0].subtasks.every((s) => !s.done), true, '一键全部还原');
+
+  state = core.toggleSubtask(state, taskId, subId, NOW);
+  const cleared = core.clearDoneSubtasks(state, taskId, NOW);
+  eq(cleared.tasks[0].subtasks.length, 1, '清掉已完成的子任务');
+  eq(core.clearDoneSubtasks(cleared, taskId, NOW), cleared, '没有已完成的就原样返回');
+
+  const before = state.tasks[0].subtasks.length;
+  const after = core.removeSubtask(state, taskId, subId, NOW);
+  eq(after.tasks[0].subtasks.length, before - 1, '删掉一条');
+  eq(core.removeSubtask(state, taskId, 'no-such-sub', NOW), state, '删不存在的原样返回');
+  eq(state.tasks[0].subtasks.length, before, '整个过程不改动原状态');
+
+  let fresh = core.createState();
+  fresh = core.addTask(fresh, { title: '另一单', subtasks: [{ title: '唯一一步' }] }, NOW).state;
+  const onlyId = fresh.tasks[0].subtasks[0].id;
+  eq(core.removeSubtask(fresh, fresh.tasks[0].id, onlyId, NOW).tasks[0].subtasks.length, 0, '删掉最后一条子任务后列表为空');
+});
+
+group('子任务：全部完成时的顺手动完成', () => {
+  let state = core.createState();
+  state = core.addTask(state, { title: '大任务', subtasks: [{ title: 'A' }, { title: 'B' }] }, NOW).state;
+  const taskId = state.tasks[0].id;
+  const [a, b] = state.tasks[0].subtasks;
+
+  state = core.toggleSubtask(state, taskId, a.id, NOW);
+  let next = core.applySubtaskMomentum(state, taskId, NOW);
+  eq(next, state, '只完成一半时不动大任务');
+
+  state = core.toggleSubtask(state, taskId, b.id, NOW);
+  next = core.applySubtaskMomentum(state, taskId, NOW);
+  eq(next.tasks[0].done, true, '全部完成时把大任务也划掉');
+  ok(typeof next.tasks[0].completedAt === 'number', '顺手完成也记完成时间');
+
+  // 反向不动：把所有子任务改回未完成，大任务保持已完成
+  let back = core.setAllSubtasks(next, taskId, false, NOW);
+  back = core.applySubtaskMomentum(back, taskId, NOW);
+  eq(back.tasks[0].done, true, '把子任务改回未完成不会撤销大任务');
+
+  const manual = core.withTask(state, taskId, { done: true }, NOW);
+  eq(core.applySubtaskMomentum(manual, taskId, NOW), manual, '大任务已经完成时不重复处理');
+  eq(core.applySubtaskMomentum(state, 'no-such-task', NOW), state, '任务不存在时原样返回');
+  const noSubs = core.addTask(core.createState(), { title: '没子任务' }, NOW).state;
+  eq(core.applySubtaskMomentum(noSubs, noSubs.tasks[0].id, NOW), noSubs, '没有子任务时不会被顺手完成');
+});
+
+group('子任务：复制、持久化与检索', () => {
+  let state = core.createState();
+  state = core.addTask(state, { title: '大任务', subtasks: [{ title: 'A', done: true }, { title: 'B' }] }, NOW).state;
+  const taskId = state.tasks[0].id;
+
+  const dup = core.duplicateTask(state, taskId, NOW);
+  eq(dup.tasks[0].subtasks.length, 2, '副本带着子任务一起复制');
+  eq(dup.tasks[0].subtasks[0].done, true, '子任务的完成状态也一起复制');
+  no(dup.tasks[0].done, '副本本身是未完成');
+  const ids = new Set(dup.tasks[0].subtasks.map((s) => s.id));
+  eq(ids.size, 2, '子任务 id 在副本里唯一');
+  const originIds = new Set(state.tasks[0].subtasks.map((s) => s.id));
+  eq(
+    dup.tasks[0].subtasks.some((s) => originIds.has(s.id)),
+    false,
+    '副本里的子任务不沿用原任务的 id'
+  );
+  eq(dup.tasks[0].subtasks.map((s) => s.title), state.tasks[0].subtasks.map((s) => s.title), '副本子任务标题与原件一致');
+
+  // 搜索能命中子任务标题
+  const q = (query) => core.selectTasks(core.setFilter(state, { query }), { now: NOW }).map((t) => t.title);
+  eq(q('第二步'), [], '没这条就不该命中');
+  state = core.addSubtask(state, taskId, '给客户发预览', NOW).state;
+  eq(q('客户'), ['大任务'], '搜索能命中子任务标题');
+  eq(q('大任务 客户'), ['大任务'], '大任务标题 + 子任务标题可以组合命中');
+
+  // 统计里带上子任务汇总
+  const stats = core.computeStats(state.tasks, NOW);
+  eq(stats.subtasks.total, 3, '总体统计里有子任务总数');
+  eq(stats.subtasks.done, 1, '总体统计里有子任务完成数');
+
+  // 持久化往返
+  const store = fakeStorage();
+  core.save(state, store);
+  const reloaded = core.load(store);
+  eq(reloaded.tasks[0].subtasks.length, 3, '子任务跟着存进 LocalStorage');
+  eq(reloaded.tasks[0].subtasks[0].done, true, '子任务完成状态不丢');
+  eq(reloaded.tasks[0].subtasks[0].title, 'A', '子任务标题不丢');
+
+  // 老数据（没有 subtasks 字段）要能平滑读进来
+  const legacy = fakeStorage({
+    [core.STORAGE_KEY]: JSON.stringify({ version: 1, tasks: [{ title: '老任务' }], categories: ['工作'] }),
+  });
+  const old = core.load(legacy);
+  eq(old.tasks[0].subtasks, [], '老数据补成空子任务列表，不报错');
+  eq(core.subtaskProgress(old.tasks[0]).has, false, '老任务被当作没用子任务');
+
+  // JSON 往返保真
+  const round = core.fromJSON(core.toJSON(state));
+  eq(round.tasks[0].subtasks.length, 3, 'JSON 往返保留子任务');
+  eq(round.tasks[0].subtasks[2].title, '给客户发预览', 'JSON 往返保留子任务标题');
+
+  // CSV 带子任务列
+  const csv = core.toCSV(state);
+  ok(csv.includes('子任务'), 'CSV 有子任务表头');
+  ok(csv.includes('[x] A'), 'CSV 里已完成的子任务带 [x]');
+  ok(csv.includes('[ ] B'), 'CSV 里未完成的子任务带 [ ]');
+});
+
+group('子任务：边界与限制', () => {
+  let state = core.createState();
+  state = core.addTask(state, { title: '大任务' }, NOW).state;
+  const taskId = state.tasks[0].id;
+  for (let i = 0; i < core.MAX_SUBTASKS; i += 1) {
+    state = core.addSubtask(state, taskId, '第 ' + i + ' 步', NOW).state;
+  }
+  eq(state.tasks[0].subtasks.length, core.MAX_SUBTASKS, '加到上限');
+  const over = core.addSubtask(state, taskId, '再来一条', NOW);
+  eq(over.state, state, '超过上限时不再加');
+  eq(over.subtask, null, '超过上限时不返回子任务');
+
+  const noSubtasks = core.createTask({ title: 'x' }, NOW);
+  eq(core.findSubtask(noSubtasks, 'anything'), null, 'findSubtask 对没有子任务的任务返回 null');
+  eq(core.findSubtask(null, 'x'), null, 'findSubtask 对 null 安全');
+});
+
 /* ------------------------------------------------------------------ 持久化 */
 group('LocalStorage：保存 / 读取 / 坏数据兜底', () => {
   const store = fakeStorage();

@@ -37,6 +37,10 @@ function ok(value, label) {
   eq(Boolean(value), true, label);
 }
 
+function no(value, label) {
+  eq(Boolean(value), false, label);
+}
+
 async function group(name, fn) {
   const before = failures.length;
   await fn();
@@ -128,6 +132,18 @@ function tearStub(win, card, dy) {
 }
 
 const tapStub = (win, card) => tearStub(win, card, 0);
+
+/** 展开某张卡片的子任务面板（已经展开就什么都不做） */
+function expandCard(win, title) {
+  const card = cardOf(win, title);
+  if (!card) return false;
+  if (!card.querySelector('.subtask-list')) {
+    const bar = card.querySelector('.subtask-bar');
+    if (!bar) return false;
+    click(bar, win);
+  }
+  return Boolean(cardOf(win, title).querySelector('.subtask-list'));
+}
 
 /* ------------------------------------------------------------------ 测试主体 */
 
@@ -446,6 +462,215 @@ const tapStub = (win, card) => tearStub(win, card, 0);
     await tick(40);
     eq(taskCount(win), before, '数据没被破坏');
     ok($(win, '#toast-text').textContent.includes('导入失败'), '提示说明导入失败');
+  });
+
+  /* ---------------------------------------------------------------- 子任务 */
+  await group('子任务：立单时就能拆好几步', async () => {
+    const before = taskCount(win);
+    const subInput = $(win, '#f-subtask');
+    $(win, '#f-title').value = '准备季度评审';
+    type(subInput, '整理数据', win);
+    subInput.dispatchEvent(new win.Event('keydown', { bubbles: true, key: 'Enter', cancelable: true }));
+    $(win, '#f-subtask-add').dispatchEvent(new win.Event('click', { bubbles: true }));
+    type(subInput, '写讲稿', win);
+    $(win, '#f-subtask-add').dispatchEvent(new win.Event('click', { bubbles: true }));
+    eq($$(win, '#f-subtask-list .draft-sub').length, 2, '两条草稿在表单里');
+
+    // 草稿里勾掉一条
+    click($(win, '#f-subtask-list .draft-sub-check'), win);
+    eq($$(win, '#f-subtask-list .draft-sub.is-done').length, 1, '草稿可以勾选');
+    eq($(win, '#f-subtask-count').textContent, '1/2 已完成', '草稿显示进度');
+
+    // 移除一条，再加回来
+    click($(win, '#f-subtask-list .draft-sub.is-done .draft-sub-remove'), win);
+    eq($$(win, '#f-subtask-list .draft-sub').length, 1, '草稿可以移除');
+    type(subInput, '整理数据', win);
+    $(win, '#f-subtask-add').dispatchEvent(new win.Event('click', { bubbles: true }));
+    eq($$(win, '#f-subtask-list .draft-sub').length, 2, '移除后能再加');
+
+    submit($(win, '#compose-form'), win);
+    eq(taskCount(win), before + 1, '大任务建好了');
+    const task = taskBy(win, '准备季度评审');
+    eq(task.subtasks.map((s) => s.title), ['写讲稿', '整理数据'], '子任务顺序与输入一致');
+    eq(task.subtasks.length, 2, '两条子任务都写进去了');
+
+    await tick(30);
+    const card = cardOf(win, '准备季度评审');
+    ok(card.querySelector('.subtask-bar'), '卡片上出现子任务进度条');
+    eq(card.querySelector('.subtask-count').textContent, '0/2', '进度条显示 0/2');
+    eq(card.querySelector('.subtask-note').textContent, '下一步：写讲稿', '提示下一步做什么');
+    eq($(win, '#subtask-stat').hidden, false, '统计面板出现子任务一栏');
+    eq($(win, '#stat-subtasks').textContent, '0/2', '统计显示子任务总数');
+    await tick(0);
+    type($(win, '#f-subtask'), '', win);
+    $(win, '#compose-submit').dispatchEvent(new win.Event('click', { bubbles: true }));
+    eq($(win, '#f-subtask-list').children.length, 0, '提交后草稿清空');
+  });
+
+  await group('子任务：展开、勾选与完成度', async () => {
+    const card = cardOf(win, '准备季度评审');
+    eq(card.querySelector('.subtask-list'), null, '默认收起');
+
+    click(card.querySelector('.subtask-bar'), win);
+    const open = cardOf(win, '准备季度评审');
+    eq(open.querySelectorAll('.subtask-list .subtask-item').length, 2, '展开后列出两步');
+    eq(open.querySelector('.subtask-bar').getAttribute('aria-expanded'), 'true', '展开状态可读');
+
+    click(open.querySelector('.subtask-item .subtask-check'), win);
+    const afterFirst = cardOf(win, '准备季度评审');
+    eq(afterFirst.querySelector('.subtask-count').textContent, '1/2', '勾掉一步后进度 1/2');
+    eq(afterFirst.querySelectorAll('.subtask-item.is-done').length, 1, '那一步变成已完成样式');
+    eq($(win, '#stat-subtasks').textContent, '1/2', '右栏统计跟着走');
+    eq(taskBy(win, '准备季度评审').done, false, '大任务还没完成');
+
+    click(afterFirst.querySelector('.subtask-item:not(.is-done) .subtask-check'), win);
+    const afterAll = cardOf(win, '准备季度评审');
+    eq(afterAll.querySelector('.subtask-count').textContent, '2/2', '两步都勾完了');
+    eq(taskBy(win, '准备季度评审').done, true, '子任务全完成时大任务被顺手动完成');
+    eq(afterAll.querySelector('.subtask-note').textContent, '子任务全部完成', '提示全部完成');
+    ok($(win, '#toast-text').textContent.includes('大任务'), '提示里说明了顺手完成');
+  });
+
+  await group('子任务：反向不会自动撤销大任务', async () => {
+    const card = cardOf(win, '准备季度评审');
+    click(card.querySelector('.subtask-list .subtask-item .subtask-check'), win);
+    eq(taskBy(win, '准备季度评审').done, true, '把子任务改回未完成，大任务保持已完成');
+    eq(cardOf(win, '准备季度评审').querySelector('.subtask-count').textContent, '1/2', '进度回到 1/2');
+    // 手动把大任务也恢复。这里用卡片上的"恢复未完成"按钮：
+    // 撕票根要等 360ms 离场动画，属于另一个分组专门覆盖的交互。
+    const restoreCard = cardOf(win, '准备季度评审');
+    click(restoreCard.querySelector('.icon-button[aria-label="恢复未完成"]'), win);
+    eq(taskBy(win, '准备季度评审').done, false, '手动恢复大任务');
+    eq(win.TodoCore.subtaskProgress(taskBy(win, '准备季度评审')).done, 1, '恢复大任务不影响子任务');
+  });
+
+  await group('子任务：卡片上就地加一步 / 改名 / 删除', async () => {
+    expandCard(win, '准备季度评审');
+    const card = cardOf(win, '准备季度评审');
+    const adder = card.querySelector('.subtask-adder input');
+    ok(adder, '展开后有就地新增输入框');
+    type(adder, '约会议室', win);
+    adder.dispatchEvent(new win.Event('keydown', { bubbles: true, key: 'Enter', cancelable: true }));
+    eq(taskBy(win, '准备季度评审').subtasks.length, 3, '就地加了一条');
+
+    const renamed = cardOf(win, '准备季度评审');
+    const lastItem = renamed.querySelector('.subtask-list .subtask-item:last-child');
+    click(lastItem.querySelector('.subtask-act'), win);
+    const input = renamed.querySelector('.subtask-rename');
+    ok(input, '改名输入框出现');
+    input.value = '约大会议室';
+    input.dispatchEvent(new win.Event('keydown', { bubbles: true, key: 'Enter', cancelable: true }));
+    eq(taskBy(win, '准备季度评审').subtasks[2].title, '约大会议室', '改名生效');
+
+    const withRename = cardOf(win, '准备季度评审');
+    const last = withRename.querySelector('.subtask-list .subtask-item:last-child');
+    click(last.querySelector('.subtask-act.danger'), win);
+    eq(taskBy(win, '准备季度评审').subtasks.length, 2, '删掉一条子任务');
+  });
+
+  await group('子任务：清掉已完成', async () => {
+    expandCard(win, '准备季度评审');
+    const card = cardOf(win, '准备季度评审');
+    const clear = card.querySelector('.subtask-adder .subtask-act');
+    ok(clear, '有已完成子任务时才出现清理按钮');
+    click(clear, win);
+    eq(taskBy(win, '准备季度评审').subtasks.length, 1, '已完成的被清掉，只剩未完成的那条');
+    eq(cardOf(win, '准备季度评审').querySelector('.subtask-count').textContent, '0/1', '进度重算');
+  });
+
+  await group('子任务：编辑对话框里改子任务（保存才生效）', async () => {
+    click(cardOf(win, '准备季度评审').querySelector('.icon-button[aria-label="编辑"]'), win);
+    eq($$(win, '#e-subtask-list .draft-sub').length, 1, '对话框里带出已有子任务');
+    ok($(win, '#e-subtask-summary').textContent.includes('保存后生效'), '标明保存后才生效');
+
+    const editInput = $(win, '#e-subtask');
+    type(editInput, '彩排一遍', win);
+    editInput.dispatchEvent(new win.Event('keydown', { bubbles: true, key: 'Enter', cancelable: true }));
+    eq($$(win, '#e-subtask-list .draft-sub').length, 2, '又加了一条');
+
+    // 点"全部完成"再取消：不应该改动任何数据
+    click($(win, '#e-subtask-all'), win);
+    eq($$(win, '#e-subtask-list .draft-sub.is-done').length, 2, '对话框里全部标成完成');
+    click($(win, '#e-subtask-clear'), win);
+    eq($$(win, '#e-subtask-list .draft-sub').length, 0, '清掉已完成后草稿为空');
+    eq(taskBy(win, '准备季度评审').subtasks.length, 1, '取消前数据库里的子任务没被动过');
+    $(win, '#edit-dialog').close();
+    eq(taskBy(win, '准备季度评审').subtasks.length, 1, '直接关闭对话框不保存');
+
+    // 重新打开，正常加一条并保存
+    click(cardOf(win, '准备季度评审').querySelector('.icon-button[aria-label="编辑"]'), win);
+    eq($$(win, '#e-subtask-list .draft-sub').length, 1, '重新打开回到已保存的状态');
+    type($(win, '#e-subtask'), '彩排一遍', win);
+    $(win, '#e-subtask-add').dispatchEvent(new win.Event('click', { bubbles: true }));
+    submit($(win, '#edit-form'), win);
+    eq(taskBy(win, '准备季度评审').subtasks.map((s) => s.title), ['写讲稿', '彩排一遍'], '保存后子任务落地');
+  });
+
+  await group('子任务：搜索能命中子任务标题', async () => {
+    const total = win.__todoApp.state.tasks.length;
+    type($(win, '#search-input'), '彩排', win);
+    await tick(220);
+    eq(titles(win), ['准备季度评审'], '搜子任务标题能找到大任务');
+    click($(win, '#search-clear'), win);
+    await tick(30);
+    eq(taskCount(win), total, '清空搜索后回到全部');
+  });
+
+  await group('子任务：跟着复制与持久化', async () => {
+    click(cardOf(win, '给接口补重试').querySelector('.icon-button[aria-label="复制一份"]'), win);
+    const beforeCopy = win.__todoApp.state.tasks.length;
+
+    click(cardOf(win, '准备季度评审').querySelector('.icon-button[aria-label="复制一份"]'), win);
+    const copy = win.__todoApp.state.tasks.find((t) => t.title.includes('副本'));
+    eq(copy.subtasks.length, 2, '副本带着子任务');
+    eq(copy.subtasks.map((s) => s.title), ['写讲稿', '彩排一遍'], '子任务标题一起复制');
+    eq(copy.subtasks[0].id === taskBy(win, '准备季度评审').subtasks[0].id, false, '副本里的子任务换了新 id');
+    const copyIds = new Set(copy.subtasks.map((s) => s.id));
+    eq(copyIds.size, 2, '副本内部子任务 id 互不相同');
+    no(copy.subtasks.every((s) => taskBy(win, '准备季度评审').subtasks.some((o) => o.id === s.id)), '副本没有沿用原任务的子任务 id');
+
+    const stored = JSON.parse(win.localStorage.getItem(win.TodoCore.STORAGE_KEY));
+    const storedTask = stored.tasks.find((t) => t.title === '准备季度评审');
+    eq(storedTask.subtasks.length, 2, '子任务写进了 LocalStorage');
+
+    // 把两份副本都铲掉，收尾干净
+    click($(win, '#filters-reset'), win);
+    while (win.__todoApp.state.tasks.some((t) => t.title.includes('副本'))) {
+      const copyCard = $$(win, '#task-list .task').find((li) => li.querySelector('.task-title').textContent.includes('副本'));
+      click(copyCard.querySelector('.icon-button[aria-label="删除"]'), win);
+      click($(win, '#confirm-ok'), win);
+    }
+    eq(win.__todoApp.state.tasks.length, beforeCopy - 1, '副本清掉了');
+  });
+
+  await group('子任务：重建应用后仍在', () => {
+    const again = boot(win.localStorage);
+    const task = again.__todoApp.state.tasks.find((t) => t.title === '准备季度评审');
+    eq(task.subtasks.map((s) => s.title), ['写讲稿', '彩排一遍'], '刷新后子任务还在');
+    eq(task.subtasks[0].done, false, '刷新后子任务状态还在');
+    const card = again.document.querySelectorAll('#task-list .task').find((li) => li.dataset.id === task.id);
+    eq(card.querySelector('.subtask-count').textContent, '0/2', '刷新后进度条也重算对了');
+    eq($(again, '#subtask-stat').hidden, false, '刷新后子任务统计还在');
+  });
+
+  /* ---------------------------------------------------------------- 子任务统计 */
+
+  await group('子任务统计：右栏面板与分解明细', () => {
+    expandCard(win, '准备季度评审');
+    const statCard = cardOf(win, '准备季度评审');
+    eq(statCard.querySelector('.subtask-count').textContent, '0/2', '展开后进度条显示 0/2');
+    eq($(win, '#stat-subtasks').textContent, '0/2', '统计显示 0/2');
+    click(statCard.querySelector('.subtask-list .subtask-item .subtask-check'), win);
+    eq($(win, '#stat-subtasks').textContent, '1/2', '勾掉一步后统计显示 1/2');
+    eq($(win, '#stat-subtask-rate').textContent, '50%', '统计显示完成率 50%');
+    ok($(win, '#subtask-meta').textContent.includes('还差 1 步'), '统计写明还差几步');
+    // 把这一条再勾回来，别影响后面的分组
+    click(cardOf(win, '准备季度评审').querySelector('.subtask-list .subtask-item .subtask-check'), win);
+    eq($(win, '#stat-subtasks').textContent, '0/2', '取消后统计回到 0/2');
+    eq($(win, '#subtask-breakdown').children.length, 1, '分解明细只列用了子任务的大任务');
+    // 点明细里的任务名会展开那张卡片
+    click($(win, '#subtask-breakdown .bar-name'), win);
+    ok(cardOf(win, '准备季度评审').querySelector('.subtask-list'), '点击明细后卡片展开');
   });
 
   /* ---------------------------------------------------------------- 大列表 */

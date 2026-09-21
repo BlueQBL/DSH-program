@@ -159,6 +159,15 @@ class Node {
     /* 布局无关，忽略 */
   }
 
+  /** 文本输入框上的全选；测试里只需要不报错 */
+  select() {
+    this._selection = { start: 0, end: String(this.value == null ? '' : this.value).length };
+  }
+
+  setSelectionRange(start, end) {
+    this._selection = { start, end };
+  }
+
   setPointerCapture() {}
   releasePointerCapture() {}
 
@@ -600,11 +609,23 @@ function matchPart(el, raw) {
     if (raw === ':checked') return el.checked === true;
     if (raw === ':disabled') return el.disabled === true;
     if (raw === ':enabled') return el.disabled !== true;
+    if (raw === ':first-child') return elementSiblings(el)[0] === el;
+    if (raw === ':last-child') {
+      const sibs = elementSiblings(el);
+      return sibs[sibs.length - 1] === el;
+    }
+    if (raw === ':only-child') return elementSiblings(el).length === 1;
     if (raw.startsWith(':not(')) return !matchSimple(el, raw.slice(5, -1));
     if (raw.startsWith(':has(')) return Boolean(el.querySelector(raw.slice(5, -1)));
     return false; // 其它伪类不影响本应用的行为断言
   }
   return el.localName === raw.toLowerCase();
+}
+
+function elementSiblings(el) {
+  const parent = el.parentNode;
+  if (!parent) return [el];
+  return parent.childNodes.filter((n) => n.nodeType === 1);
 }
 
 function walk(node, visit) {

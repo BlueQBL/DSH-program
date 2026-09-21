@@ -15,6 +15,8 @@
   const MAX_TITLE = 80;
   const MAX_DESC = 500;
   const MAX_CATEGORY = 16;
+  const MAX_SUBTASK = 60;
+  const MAX_SUBTASKS = 50;
   const UNDO_LIMIT = 10;
 
   const PRIORITIES = [
@@ -159,11 +161,159 @@
       due,
       priority: normalizePriority(src.priority),
       category: clamp(src.category, MAX_CATEGORY).trim() || '未分类',
+      subtasks: sanitizeSubtasks(src.subtasks),
       done: Boolean(src.done),
       createdAt: typeof src.createdAt === 'number' ? src.createdAt : iso.getTime(),
       updatedAt: typeof src.updatedAt === 'number' ? src.updatedAt : iso.getTime(),
       completedAt: typeof src.completedAt === 'number' ? src.completedAt : null,
     };
+  }
+
+  /* ---------------------------------------------------------------- 子任务 */
+
+  function createSubtask(input) {
+    const src = typeof input === 'string' ? { title: input } : input || {};
+    const title = clamp(src.title, MAX_SUBTASK).trim();
+    if (!title) throw new Error('子任务标题不能为空');
+    return {
+      id: src.id || uid(),
+      title,
+      done: Boolean(src.done),
+      createdAt: typeof src.createdAt === 'number' ? src.createdAt : Date.now(),
+      completedAt: typeof src.completedAt === 'number' ? src.completedAt : null,
+    };
+  }
+
+  /** 清洗子任务列表：丢掉空标题、拆开重复 id、限制条数 */
+  function sanitizeSubtasks(raw) {
+    if (!Array.isArray(raw)) return [];
+    const seen = new Set();
+    const out = [];
+    for (const item of raw) {
+      if (typeof item !== 'string' && (typeof item !== 'object' || item === null)) continue;
+      let sub;
+      try {
+        sub = createSubtask(item);
+      } catch {
+        continue;
+      }
+      if (seen.has(sub.id)) sub.id = uid();
+      seen.add(sub.id);
+      out.push(sub);
+      if (out.length >= MAX_SUBTASKS) break;
+    }
+    return out;
+  }
+
+  function findSubtask(task, subtaskId) {
+    return (task && task.subtasks ? task.subtasks : []).find((s) => s.id === subtaskId) || null;
+  }
+
+  /** 某个任务的子任务进度：{total, done, active, rate, allDone, has} */
+  function subtaskProgress(task) {
+    const list = (task && task.subtasks) || [];
+    const total = list.length;
+    const done = list.filter((s) => s.done).length;
+    return {
+      total,
+      done,
+      active: total - done,
+      rate: total === 0 ? 0 : Math.round((done / total) * 100),
+      allDone: total > 0 && done === total,
+      has: total > 0,
+      next: list.find((s) => !s.done) || null,
+    };
+  }
+
+  function countSubtasks(tasks) {
+    let total = 0;
+    let done = 0;
+    let withSubtasks = 0;
+    (tasks || []).forEach((t) => {
+      const p = subtaskProgress(t);
+      if (!p.has) return;
+      withSubtasks += 1;
+      total += p.total;
+      done += p.done;
+    });
+    return { total, done, active: total - done, withSubtasks, rate: total === 0 ? 0 : Math.round((done / total) * 100) };
+  }
+
+  function addSubtask(state, taskId, input, now) {
+    const iso = now instanceof Date ? now : new Date();
+    const task = state.tasks.find((t) => t.id === taskId);
+    if (!task) return { state, subtask: null };
+    const list = task.subtasks || [];
+    if (list.length >= MAX_SUBTASKS) return { state, subtask: null };
+    let subtask;
+    try {
+      subtask = createSubtask(typeof input === 'string' ? { title: input, createdAt: iso.getTime() } : Object.assign({ createdAt: iso.getTime() }, input));
+    } catch {
+      return { state, subtask: null };
+    }
+    const subtasks = list.concat([subtask]);
+    const next = withTask(state, taskId, { subtasks }, iso);
+    return { state: next, subtask: next === state ? null : subtask };
+  }
+
+  function updateSubtask(state, taskId, subtaskId, patch, now) {
+    const iso = now instanceof Date ? now : new Date();
+    const task = state.tasks.find((t) => t.id === taskId);
+    const target = findSubtask(task, subtaskId);
+    if (!target) return state;
+    const next = Object.assign({}, target, patch);
+    // 只有调用方显式给了 title 才动标题，且空标题不会把原名冲掉
+    if (Object.prototype.hasOwnProperty.call(patch, 'title')) {
+      const clean = clamp(next.title, MAX_SUBTASK).trim();
+      if (clean) next.title = clean;
+      else next.title = target.title;
+    }
+    next.done = Boolean(next.done);
+    next.completedAt = next.done ? target.completedAt || iso.getTime() : null;
+    const subtasks = task.subtasks.map((s) => (s.id === subtaskId ? next : s));
+    return withTask(state, taskId, { subtasks }, iso);
+  }
+
+  function removeSubtask(state, taskId, subtaskId, now) {
+    const iso = now instanceof Date ? now : new Date();
+    const task = state.tasks.find((t) => t.id === taskId);
+    if (!findSubtask(task, subtaskId)) return state;
+    return withTask(state, taskId, { subtasks: task.subtasks.filter((s) => s.id !== subtaskId) }, iso);
+  }
+
+  function toggleSubtask(state, taskId, subtaskId, now) {
+    const target = findSubtask(state.tasks.find((t) => t.id === taskId), subtaskId);
+    if (!target) return state;
+    return updateSubtask(state, taskId, subtaskId, { done: !target.done }, now);
+  }
+
+  function clearDoneSubtasks(state, taskId, now) {
+    const iso = now instanceof Date ? now : new Date();
+    const task = state.tasks.find((t) => t.id === taskId);
+    if (!task || !subtaskProgress(task).done) return state;
+    return withTask(state, taskId, { subtasks: (task.subtasks || []).filter((s) => !s.done) }, iso);
+  }
+
+  /** 一键把某个任务的所有子任务标记为完成 / 未完成 */
+  function setAllSubtasks(state, taskId, done, now) {
+    const iso = now instanceof Date ? now : new Date();
+    const task = state.tasks.find((t) => t.id === taskId);
+    if (!task || !subtaskProgress(task).has) return state;
+    const subtasks = (task.subtasks || []).map((s) =>
+      Object.assign({}, s, {
+        done: Boolean(done),
+        completedAt: done ? s.completedAt || iso.getTime() : null,
+      })
+    );
+    return withTask(state, taskId, { subtasks }, iso);
+  }
+
+  /** 全部子任务都完成时，顺手把大任务也标记完成（只在"完成"方向生效） */
+  function applySubtaskMomentum(state, taskId, now) {
+    const task = state.tasks.find((t) => t.id === taskId);
+    if (!task || task.done) return state;
+    if (!subtaskProgress(task).allDone) return state;
+    return withTask(state, taskId, { done: true }, now);
   }
 
   /* ---------------------------------------------------------------- 存储适配 */
@@ -333,6 +483,8 @@
     byCategory.sort((a, b) => b.total - a.total || a.name.localeCompare(b.name, 'zh-CN'));
     priMap.forEach((p) => byPriority.push(p));
 
+    const st = countSubtasks(tasks);
+
     return {
       total,
       done,
@@ -341,6 +493,7 @@
       today,
       upcoming,
       rate: total === 0 ? 0 : Math.round((done / total) * 100),
+      subtasks: st,
       byCategory,
       byPriority,
     };
@@ -397,7 +550,8 @@
   function matchesQuery(task, query) {
     const q = String(query || '').trim().toLowerCase();
     if (!q) return true;
-    const haystack = [task.title, task.desc, task.category, priorityLabel(task.priority), task.due]
+    const subs = (task.subtasks || []).map((s) => s.title).join('\u0000');
+    const haystack = [task.title, task.desc, task.category, priorityLabel(task.priority), task.due, subs]
       .join('\u0000')
       .toLowerCase();
     // 多关键词按 AND 处理，让「工作 报告」这类输入能收敛结果
@@ -473,6 +627,7 @@
       next.category = clamp(next.category, MAX_CATEGORY).trim() || '未分类';
       next.due = isValidDate(next.due) ? next.due : '';
       next.priority = normalizePriority(next.priority);
+      next.subtasks = sanitizeSubtasks(next.subtasks);
       next.done = Boolean(next.done);
       next.completedAt = next.done ? t.completedAt || iso.getTime() : null;
       next.updatedAt = iso.getTime();
@@ -518,6 +673,8 @@
     if (!target) return state;
     const copy = Object.assign({}, target, { id: uid(), done: false, completedAt: null });
     copy.title = clamp(copy.title, MAX_TITLE - 5) + ' 副本';
+    // 子任务也要换新 id：副本里的每一步都是独立的，不能和原件共用一个身份
+    copy.subtasks = (target.subtasks || []).map((s) => Object.assign({}, s, { id: uid() }));
     return addTask(state, copy, now).state;
   }
 
@@ -595,8 +752,12 @@
   }
 
   function toCSV(state) {
-    const head = ['标题', '描述', '截止日期', '优先级', '分类', '状态', '创建时间', '完成时间'];
+    const head = ['标题', '描述', '截止日期', '优先级', '分类', '状态', '子任务', '创建时间', '完成时间'];
     const esc = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+    const subs = (t) =>
+      (t.subtasks || [])
+        .map((s) => (s.done ? `[x] ${s.title}` : `[ ] ${s.title}`))
+        .join(' | ');
     const rows = state.tasks.map((t) =>
       [
         t.title,
@@ -605,6 +766,7 @@
         priorityLabel(t.priority),
         t.category,
         t.done ? '已完成' : '未完成',
+        subs(t),
         new Date(t.createdAt).toLocaleString('zh-CN'),
         t.completedAt ? new Date(t.completedAt).toLocaleString('zh-CN') : '',
       ]
@@ -620,6 +782,8 @@
     MAX_TITLE,
     MAX_DESC,
     MAX_CATEGORY,
+    MAX_SUBTASK,
+    MAX_SUBTASKS,
     UNDO_LIMIT,
     DONE_RETENTION_DAYS,
     PRIORITIES,
@@ -664,6 +828,19 @@
     resetFilters,
     addCategory,
     removeCategory,
+    // 子任务
+    createSubtask,
+    sanitizeSubtasks,
+    subtaskProgress,
+    countSubtasks,
+    findSubtask,
+    addSubtask,
+    updateSubtask,
+    removeSubtask,
+    toggleSubtask,
+    clearDoneSubtasks,
+    setAllSubtasks,
+    applySubtaskMomentum,
     // 查询
     selectTasks,
     sortTasks,
