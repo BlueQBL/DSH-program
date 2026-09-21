@@ -1,13 +1,15 @@
 {
   "name": "portfolio",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
-  "description": "薛小飞 · 个人作品集网站 —— 零依赖手写 HTML / CSS / JS，深色主题 + 滚动动画 + 移动端适配",
+  "description": "薛小飞 · 个人作品集网站 —— 零依赖手写 HTML / CSS / JS。中英双语、深色主题、滚动动画、移动端适配，自带访问统计与留言板",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "smoke": "node scripts/smoke-test.js"
+    "smoke": "node scripts/smoke-test.js",
+    "test:api": "node scripts/test-api.js",
+    "check": "node scripts/test-api.js && node scripts/smoke-test.js"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -15,8 +17,9 @@
   "keywords": [
     "portfolio",
     "vanilla-js",
+    "i18n",
+    "guestbook",
     "dark-theme",
-    "scroll-animation",
     "作品集"
   ],
   "license": "MIT"

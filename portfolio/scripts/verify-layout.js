@@ -24,6 +24,11 @@ const path = require('node:path');
 const CHROME = process.env.CHROME_PATH || '';
 const ROOT = path.join(__dirname, '..');
 const PORT = 5511 + Math.floor(Math.random() * 120);
+const API_PORT = PORT + 400;      // 真 API 服务，临时站点把 /api/ 转发过去
+
+// 用临时数据目录，别把体检产生的访问量写进真实统计
+process.env.DSH_PORTFOLIO_DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'portfolio-layout-data-'));
+process.env.TRUST_PROXY = '1';
 
 /* ---------------------------------------------------------------
    注入到页面里的探针。整段被包成字符串，最后在浏览器里 eval。
@@ -161,6 +166,42 @@ const PROBE = function () {
   out.revealDone = document.querySelectorAll('[data-reveal][data-shown]').length;
   out.scanned = !!document.querySelector('[data-scanned="true"]');
   out.theme = de.getAttribute('data-theme');
+  out.lang = de.getAttribute('data-lang');
+
+  // 三个新功能的实测
+  out.langToggle = (function () {
+    // 有两个开关（侧栏一个、顶栏一个），量"当前真正可见"的那个
+    var list = Array.prototype.slice.call(document.querySelectorAll('[data-lang-toggle]'));
+    var visible = null;
+    list.forEach(function (el) {
+      var r = el.getBoundingClientRect();
+      if (r.width > 1 && r.height > 1) visible = r;
+    });
+    var all = list.map(function (el) {
+      var r = el.getBoundingClientRect();
+      return Math.round(r.width) + 'x' + Math.round(r.height);
+    });
+    if (!visible) return { w: 0, h: 0, display: 'none', all: all };
+    return { w: Math.round(visible.width), h: Math.round(visible.height), display: 'flex', all: all };
+  })();
+  out.langLabel = (function () {
+    var el = document.querySelector('[data-lang-label]') || document.querySelector('[data-lang-short]');
+    return el ? el.textContent.trim() : null;
+  })();
+  out.langToggles = document.querySelectorAll('[data-lang-toggle]').length;
+  out.gb = {
+    boardHidden: document.querySelector('[data-gb]').hidden,
+    form: box('[data-gb-form]'),
+    name: box('[data-gb-name]'),
+    text: box('[data-gb-text]'),
+    submit: box('[data-gb-submit]'),
+    listW: (function () { var e = document.querySelector('[data-gb-list]'); return e ? Math.round(e.getBoundingClientRect().width) : null; })(),
+  };
+  out.stats = {
+    hidden: document.querySelector('[data-stats]').hidden,
+    bars: document.querySelectorAll('[data-stats-trend] .trend__bar').length,
+    h: (function () { var e = document.querySelector('[data-stats]'); var r = e.getBoundingClientRect(); return Math.round(r.height); })(),
+  };
 
   return out;
 };
@@ -258,11 +299,33 @@ function chromeDump(width, height, url) {
 
 async function probeAt(label, w, h, theme) {
   const dir = buildTempSite();
-  const srv = http.createServer(serve(dir));
+  // 把 /api/ 转发到真正的服务端，这样留言板和统计才会显示出来，
+  // 否则它们在纯静态副本里是 hidden 的，量不到真实布局
+  const srv = http.createServer((req, res) => {
+    if (req.url.indexOf('/api/') === 0) {
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        const up = http.request(
+          { host: '127.0.0.1', port: API_PORT, path: req.url, method: req.method,
+            headers: { 'Content-Type': 'application/json' } },
+          (ur) => {
+            res.writeHead(ur.statusCode, { 'Content-Type': ur.headers['content-type'] || 'application/json' });
+            ur.pipe(res);
+          }
+        );
+        up.on('error', (e) => { res.writeHead(502); res.end(JSON.stringify({ error: String(e) })); });
+        if (req.method === 'POST') up.end(Buffer.concat(chunks)); else up.end();
+      });
+      return;
+    }
+    serve(dir)(req, res);
+  });
   await new Promise((res) => srv.listen(PORT, '127.0.0.1', res));
   try {
     const dom = await chromeDump(w, h, `http://127.0.0.1:${PORT}/?reveal=all&theme=${theme}`);
-    const title = dom.match(/<title>([\s\S]*?)<\/title>/);
+    // 注意：<title> 上挂了 data-i18n，匹配时不能写死成 "<title>"
+    const title = dom.match(/<title[^>]*>([\s\S]*?)<\/title>/);
     if (!title) throw new Error('页面没有 title');
     const raw = title[1].trim();
     if (raw.indexOf('PROBE::') !== 0) {
@@ -284,6 +347,10 @@ async function probeAt(label, w, h, theme) {
 
   const sizes = [['desktop', 1440, 1050], ['tablet', 834, 1112], ['mobile', 390, 844], ['tiny', 320, 640]];
   const themes = ['dark', 'light'];
+
+  const { createServer } = require(path.join(ROOT, 'server.js'));
+  const apiServer = createServer();
+  await new Promise((res) => apiServer.listen(API_PORT, '127.0.0.1', res));
 
   const problems = [];
   let measured = 0;
@@ -337,6 +404,24 @@ async function probeAt(label, w, h, theme) {
       if (r.cardWidth && r.cardWidth < 300 && w < 760) bugs.push('窄屏卡片宽度异常');
 
       // 对比度：正文 4.5:1，辅助文字放宽到 3:1（大字号按 AA 也是 3:1）
+      // 语言开关必须能点到（宽屏用侧栏那个，窄屏用顶栏那个）
+      if (r.langToggles !== 2) bugs.push('语言开关数量不是 2: ' + r.langToggles);
+      if (!r.langToggle || r.langToggle.w === 0 || r.langToggle.h < 30) {
+        bugs.push('可见的语言开关不见了或太小: ' + JSON.stringify(r.langToggle));
+      }
+      // 按钮上写的是"切过去之后是什么语言"，所以中文界面显示 English 是正常的
+      if (r.langLabel !== 'English' && r.langLabel !== '中文') {
+        bugs.push('语言开关文案不对: ' + r.langLabel);
+      }
+
+      // 留言板与统计：后端可用时必须真的展开，而不是 hidden
+      if (r.gb.boardHidden) bugs.push('留言板没有展开（后端已经可用）');
+      if (r.gb.submit && r.gb.submit.h < 36) bugs.push(`留言按钮只有 ${r.gb.submit.h}px 高`);
+      if (r.gb.name && r.gb.name.w < 120) bugs.push('称呼输入框太窄: ' + r.gb.name.w);
+      if (r.gb.text && r.gb.text.h < 80) bugs.push('留言输入框太矮: ' + r.gb.text.h);
+      if (r.stats.hidden) bugs.push('访问统计没有展开（后端已经可用）');
+      if (r.stats.bars !== 14) bugs.push('统计折线不是 14 根: ' + r.stats.bars);
+
       const softOK = ['secNote', 'footer'];
       Object.keys(r.contrast).forEach((k) => {
         const v = r.contrast[k];
@@ -356,6 +441,13 @@ async function probeAt(label, w, h, theme) {
       console.log('缩略图:      ' + r.thumbSvg + ' 个 SVG / ' + r.thumbImg + ' 张截图');
       console.log('对比度:      ' + Object.keys(r.contrast).map((k) => k + ' ' + r.contrast[k]).join('  '));
       console.log('入场动画:    ' + r.revealDone + ' 已显示 / ' + r.revealPending + ' 待滚动');
+      console.log('语言开关:    ' + r.langToggle.w + '×' + r.langToggle.h + 'px 可见' +
+        '（两个：' + r.langToggle.all.join(' / ') + '），按钮文案「' + r.langLabel + '」');
+      console.log('留言板:      ' + (r.gb.boardHidden ? '未展开' : '已展开') +
+        '，表单 ' + (r.gb.form ? r.gb.form.w + 'px 宽' : '-') +
+        '，输入框 ' + (r.gb.text ? r.gb.text.w + '×' + r.gb.text.h : '-'));
+      console.log('访问统计:    ' + (r.stats.hidden ? '未展开' : '已展开') +
+        '，折线 ' + r.stats.bars + ' 根，高 ' + r.stats.h + 'px');
 
       if (bugs.length) {
         console.log('\n\u001b[31m问题:\u001b[0m');
@@ -368,6 +460,7 @@ async function probeAt(label, w, h, theme) {
   }
 
   console.log('\n' + '─'.repeat(58));
+  apiServer.close();
   if (problems.length) {
     console.log(`\u001b[31m共 ${problems.length} 项问题\u001b[0m（已测 ${measured}/${sizes.length * themes.length} 组）`);
     process.exitCode = 1;

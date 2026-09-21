@@ -9,3 +9,15 @@
 # 冒烟测试在仓库内临时搭的站点副本与 Chrome 配置目录（跑完会自己删）
 .smoke-stage-*/
 .smoke-profile-*/
+
+# =========================
+# 运行时数据（访问统计 + 留言）
+# =========================
+# 这些是本机/服务器运行产生的数据，不进仓库：
+#   data/store.json    访问统计与留言
+#   data/store.jsonl   逐条追加的日志
+#   data/secret        哈希访客身份的随机盐
+#   data/admin-token   删留言用的管理员令牌
+# 换机器想带走，就单独复制 data/ 目录。
+data/*
+!data/README.md
