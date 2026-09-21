@@ -1,0 +1,15 @@
+{
+  "name": "todo-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "案头待办 · 零依赖的待办事项应用（LocalStorage 持久化）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/core.test.js && node test/dom.test.js",
+    "test:core": "node test/core.test.js",
+    "test:dom": "node test/dom.test.js"
+  },
+  "keywords": ["todo", "localstorage", "vanilla-js", "zero-dependency"],
+  "license": "MIT"
+}

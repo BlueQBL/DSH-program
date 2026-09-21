@@ -429,6 +429,7 @@ http://localhost:5173
 | **水尺 · 喝水提醒** | `water-reminder/` | 零依赖 HTML + CSS + 原生 JS | `cd water-reminder && node server.js` → http://localhost:5180 |
 | **流水账 · 个人记账** | `ledger/` | 零依赖 HTML + CSS + 原生 JS + PWA | `cd ledger && node server.js` → http://localhost:5190 |
 | **个人作品集网站** | `portfolio/` | 零依赖 HTML + CSS + 原生 JS + Node 服务 | `cd portfolio && node server.js` → http://localhost:5200 |
+| **案头待办** | `todo-app/` | 零依赖 HTML + CSS + 原生 JS + Node 服务 | `cd todo-app && node server.js` → http://127.0.0.1:5210 |
 
 图片压缩工具实现了图片上传压缩、质量调节、前后对比、批量打包下载的完整前后端闭环，
 并内置端到端冒烟测试（`npm run smoke`），详见 [image-compressor/README.md](image-compressor/README.md)。
@@ -454,6 +455,20 @@ http://localhost:5173
 分类占比做成条码。零依赖、无构建步骤、无后端、无账号。除核心需求外还带分类标签、
 CSV / JSON 导入导出、预算与超支提醒、搜索筛选、PWA 离线安装。
 两套零依赖测试（数据层 136 项 + 整页 103 项），详见 [ledger/README.md](ledger/README.md)。
+
+**案头待办**是一个零依赖的待办事项应用，视觉母题是**铺着网格纸的案头 + 凸版印刷 + 可撕下的编号票根**：
+每张卡片左侧有一条印着编号、优先级、分类的票根，**往下拖过阈值就"撕"下来**（票根飞离、卡片划掉），
+轻点或键盘回车同样能切换完成状态——这是全页唯一一个张扬的设计动作，其余部分一律安静。
+
+功能上覆盖：添加（标题 / 描述 / 截止日期 / 优先级 / 分类）、按分类与优先级多选筛选、按状态分段筛选、
+多关键词搜索、五种排序、编辑 / 复制 / 删除（带确认与撤销）、完成率与分类分布等统计、
+LocalStorage 持久化、JSON / CSV 导入导出、夜间模式、到期桌面通知。分层上 `core.js` 是不碰 DOM 的纯数据核心，
+界面直接从它读取枚举来渲染选项，避免两套规则漂移。
+
+质量上：`npm test` 一条命令跑 **164 项数据层测试 + 121 项界面测试**（界面测试用自带的极简 DOM 垫片，
+把真实的 `index.html` + `core.js` + `ui.js` 整个跑起来，覆盖"添加 → 筛选 → 搜索 → 撕票根完成 → 编辑 → 删除 →
+重建应用后数据仍在"的完整闭环），另用无头 Edge 打开真实页面量过布局与溢出、并验证了刷新后数据仍在。
+详见 [todo-app/README.md](todo-app/README.md)。
 
 后续新增项目会继续追加到本表。
 

@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>案头待办 · 待办事项管理</title>
+<meta name="description" content="零依赖的待办事项应用：描述、截止日期、优先级、分类，支持筛选搜索与统计，数据保存在本机浏览器。" />
+<meta name="theme-color" content="#22262b" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2322262b'/%3E%3Cpath d='M9 11h14M9 16h14M9 21h9' stroke='%23fbfbf8' stroke-width='2.4' stroke-linecap='round'/%3E%3Cpath d='M23 20.5l2.6 2.6 4-4.4' stroke='%23d2401f' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+
+<!-- ---------------------------------------------------------------- 图标表 -->
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <defs>
+    <symbol id="icon-check" viewBox="0 0 24 24"><path d="M4.5 12.6l4.6 4.6L19.5 6.8" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="icon-edit" viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M13.6 6.4l4 4" fill="none" stroke="currentColor" stroke-width="1.7"/></symbol>
+    <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3" fill="none" stroke="currentColor" stroke-width="1.7"/></symbol>
+    <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M15.6 15.6L20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="icon-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 4v10m0 0l-3.5-3.5M12 14l3.5-3.5M5 18h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="icon-upload" viewBox="0 0 24 24"><path d="M12 16V6m0 0L8.5 9.5M12 6l3.5 3.5M5 18h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="icon-bell" viewBox="0 0 24 24"><path d="M7 10a5 5 0 0 1 10 0c0 4 1.5 5 1.5 5H5.5S7 14 7 10z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M10 18.5a2 2 0 0 0 4 0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+    <symbol id="icon-spark" viewBox="0 0 24 24"><path d="M12 3l1.8 5.4L19 10l-5.2 1.6L12 17l-1.8-5.4L5 10l5.2-1.6z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+  </defs>
+</svg>
+
+<!-- ---------------------------------------------------------------- 页头 -->
+<header class="masthead">
+  <div class="masthead-inner">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">待</span>
+      <span class="brand-text">
+        <strong>案头待办</strong>
+        <em>本地保存 · 无需登录 · 刷新不丢</em>
+      </span>
+    </div>
+
+    <nav class="header-actions" aria-label="数据与工具">
+      <button type="button" id="demo-button" class="ghost-button" title="铺一份示例数据，方便看效果">
+        <svg aria-hidden="true"><use href="#icon-spark"/></svg><span>示例数据</span>
+      </button>
+      <button type="button" id="notify-button" class="ghost-button" title="把今天到期和逾期的待办推一条桌面通知">
+        <svg aria-hidden="true"><use href="#icon-bell"/></svg><span>到期提醒</span>
+      </button>
+      <div class="menu-group">
+        <span class="menu-label">备份</span>
+        <button type="button" id="export-json" class="ghost-button" title="导出 JSON 备份">
+          <svg aria-hidden="true"><use href="#icon-download"/></svg><span>JSON</span>
+        </button>
+        <button type="button" id="export-csv" class="ghost-button" title="导出 CSV 表格（Excel 可直接打开）">
+          <svg aria-hidden="true"><use href="#icon-download"/></svg><span>CSV</span>
+        </button>
+        <button type="button" id="import-button" class="ghost-button" title="从 JSON 备份导入">
+          <svg aria-hidden="true"><use href="#icon-upload"/></svg><span>导入</span>
+        </button>
+        <input type="file" id="import-input" accept="application/json,.json" hidden />
+      </div>
+      <label class="theme-switch" title="切换白天 / 夜间">
+        <input type="checkbox" id="theme-toggle" />
+        <span class="track" aria-hidden="true"><span class="knob"></span></span>
+        <span class="theme-text">夜间</span>
+      </label>
+    </nav>
+  </div>
+</header>
+
+<div class="busy" id="busy-bar" hidden>正在读取本地数据…</div>
+
+<main class="workspace">
+
+  <!-- ------------------------------------------------------------ 左栏：立单 -->
+  <section class="compose rail" aria-labelledby="compose-heading">
+    <div class="rail-head">
+      <h2 id="compose-heading">新立一单</h2>
+      <span class="rail-note">写完按 Enter</span>
+    </div>
+
+    <form id="compose-form" class="sheet" novalidate autocomplete="off">
+      <label class="field">
+        <span class="field-label">标题 <b aria-hidden="true">必填</b></span>
+        <input type="text" id="f-title" name="title" maxlength="80" placeholder="要做什么？" required />
+        <span class="counter" id="title-count">0/80</span>
+      </label>
+
+      <label class="field">
+        <span class="field-label">描述</span>
+        <textarea id="f-desc" name="desc" rows="3" maxlength="500" placeholder="补充细节、验收标准、链接…"></textarea>
+        <span class="counter" id="desc-count">0/500</span>
+      </label>
+
+      <div class="field">
+        <span class="field-label" id="due-label">截止日期</span>
+        <div class="due-row">
+          <input type="date" id="f-due" name="due" aria-labelledby="due-label" />
+          <div class="quick-row" id="due-quick" role="group" aria-label="快捷日期"></div>
+        </div>
+      </div>
+
+      <div class="field">
+        <span class="field-label" id="priority-label">优先级</span>
+        <div class="prio-row" id="f-priority" role="radiogroup" aria-labelledby="priority-label"></div>
+      </div>
+
+      <label class="field">
+        <span class="field-label">分类</span>
+        <input type="text" id="f-category" name="category" maxlength="16" list="category-list" placeholder="工作 / 学习 / 生活…" />
+        <datalist id="category-list"></datalist>
+      </label>
+
+      <p class="form-error" id="compose-error" role="alert" hidden></p>
+
+      <div class="form-actions">
+        <button type="submit" id="compose-submit" class="primary">加入案头</button>
+        <button type="reset" id="compose-reset" class="ghost-button">清空</button>
+      </div>
+    </form>
+
+    <ul class="keyhints">
+      <li><kbd>N</kbd> 聚焦标题</li>
+      <li><kbd>/</kbd> 搜索</li>
+      <li><kbd>Ctrl</kbd>+<kbd>Z</kbd> 撤销</li>
+      <li><span class="hint-tear" aria-hidden="true"></span> 撕下票根 = 完成</li>
+    </ul>
+  </section>
+
+  <!-- ------------------------------------------------------------ 中栏：案头 -->
+  <section class="board" id="board" aria-labelledby="board-heading">
+    <div class="board-head">
+      <h2 id="board-heading">案头</h2>
+      <p class="board-sub">拖动卡片上沿的票根撕下来，就把这件事划掉了。</p>
+    </div>
+
+    <div class="toolbar">
+      <div class="search-field">
+        <svg aria-hidden="true"><use href="#icon-search"/></svg>
+        <input type="search" id="search-input" placeholder="搜索标题、描述、分类…（空格分隔多个关键词）" aria-label="搜索待办" />
+        <button type="button" id="search-clear" class="icon-button tiny" title="清空搜索" aria-label="清空搜索" hidden>
+          <svg aria-hidden="true"><use href="#icon-x"/></svg>
+        </button>
+      </div>
+
+      <div class="filter-row">
+        <div class="segmented" id="status-bar" role="group" aria-label="按状态筛选"></div>
+        <label class="sort-field">
+          <span class="visually-hidden">排序方式</span>
+          <select id="sort-select" aria-label="排序方式"></select>
+        </label>
+      </div>
+
+      <div class="filter-row filter-row-tight">
+        <span class="filter-label">分类</span>
+        <div class="chip-row" id="chip-categories"></div>
+      </div>
+
+      <div class="filter-row filter-row-tight">
+        <span class="filter-label">优先级</span>
+        <div class="chip-row" id="chip-priorities"></div>
+      </div>
+
+      <div class="toolbar-foot">
+        <span class="results" id="results-count">0 / 0 条</span>
+        <button type="button" id="filters-reset" class="ghost-button small">清空筛选</button>
+        <button type="button" id="clear-done" class="ghost-button small danger">清空已完成</button>
+      </div>
+    </div>
+
+    <ul class="task-list" id="task-list" aria-live="polite"></ul>
+
+    <div class="empty" id="empty-state" hidden>
+      <div class="empty-stub" aria-hidden="true"></div>
+      <h3 id="empty-title">案头是空的</h3>
+      <p id="empty-desc">在左边写下第一件事，给它一个截止日期和优先级。</p>
+      <button type="button" id="empty-action" class="primary small" data-mode="focus">写一条待办</button>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------------------ 右栏：统计 -->
+  <aside class="stats rail" aria-labelledby="stats-heading">
+    <div class="rail-head">
+      <h2 id="stats-heading">案头账</h2>
+      <span class="rail-note">实时统计</span>
+    </div>
+
+    <div class="rate-card">
+      <svg class="ring" viewBox="0 0 80 80" aria-hidden="true">
+        <circle class="ring-track" cx="40" cy="40" r="34" />
+        <circle class="ring-value" id="ring-value" cx="40" cy="40" r="34" />
+      </svg>
+      <div class="rate-text">
+        <strong id="stat-rate">0%</strong>
+        <span>完成率</span>
+      </div>
+    </div>
+
+    <dl class="stat-grid">
+      <div class="stat"><dt>全部</dt><dd id="stat-total">0</dd></div>
+      <div class="stat"><dt>待办</dt><dd id="stat-active">0</dd></div>
+      <div class="stat"><dt>已完成</dt><dd id="stat-done">0</dd></div>
+      <div class="stat warn"><dt>已逾期</dt><dd id="stat-overdue">0</dd></div>
+      <div class="stat"><dt>今天到期</dt><dd id="stat-today">0</dd></div>
+      <div class="stat"><dt>7 天内</dt><dd id="stat-upcoming">0</dd></div>
+      <div class="stat wide"><dt>连续完成</dt><dd id="stat-streak">0 天</dd></div>
+    </dl>
+
+    <section class="panel">
+      <h3>分类分布 <span class="panel-note">已完成 / 总数</span></h3>
+      <ul class="bar-list" id="category-stats"></ul>
+      <p class="panel-empty" id="category-stats-empty" hidden>还没有分类数据。</p>
+    </section>
+
+    <section class="panel">
+      <h3>优先级推进</h3>
+      <ul class="prio-list" id="priority-stats"></ul>
+    </section>
+
+    <section class="panel">
+      <h3>近两周 <span class="panel-note" id="series-meta"></span></h3>
+      <div class="ticks" id="series"></div>
+    </section>
+
+    <p class="footnote" id="stats-footnote"></p>
+
+    <div class="preset-row">
+      <button type="button" class="ghost-button small" data-preset-status="overdue">看逾期</button>
+      <button type="button" class="ghost-button small" data-preset-status="active">看待办</button>
+      <button type="button" class="ghost-button small" data-preset-status="all">看全部</button>
+    </div>
+  </aside>
+</main>
+
+<!-- ---------------------------------------------------------------- 编辑对话框 -->
+<dialog id="edit-dialog" class="sheet-dialog">
+  <form id="edit-form" class="sheet" novalidate>
+    <div class="dialog-head">
+      <h2>改这一单</h2>
+      <button type="button" class="icon-button" onclick="this.closest('dialog').close()" aria-label="关闭">
+        <svg aria-hidden="true"><use href="#icon-x"/></svg>
+      </button>
+    </div>
+
+    <label class="field">
+      <span class="field-label">标题 <b aria-hidden="true">必填</b></span>
+      <input type="text" id="e-title" maxlength="80" required />
+    </label>
+
+    <label class="field">
+      <span class="field-label">描述</span>
+      <textarea id="e-desc" rows="3" maxlength="500"></textarea>
+    </label>
+
+    <label class="field">
+      <span class="field-label">截止日期</span>
+      <input type="date" id="e-due" />
+    </label>
+
+    <div class="field">
+      <span class="field-label" id="e-priority-label">优先级</span>
+      <div class="prio-row" id="e-priority" role="radiogroup" aria-labelledby="e-priority-label"></div>
+    </div>
+
+    <label class="field">
+      <span class="field-label">分类</span>
+      <input type="text" id="e-category" maxlength="16" list="category-list" />
+    </label>
+
+    <p class="form-error" id="e-error" role="alert" hidden></p>
+
+    <div class="form-actions">
+      <button type="submit" class="primary">保存改动</button>
+      <button type="button" class="ghost-button" onclick="this.closest('dialog').close()">取消</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ---------------------------------------------------------------- 确认对话框 -->
+<dialog id="confirm-dialog" class="confirm-dialog">
+  <h2 id="confirm-title">确认操作</h2>
+  <p id="confirm-desc"></p>
+  <div class="dialog-actions">
+    <button type="button" class="danger-button" id="confirm-ok">确认</button>
+    <button type="button" class="ghost-button" onclick="this.closest('dialog').close()">取消</button>
+  </div>
+</dialog>
+
+<!-- ---------------------------------------------------------------- 提示条 -->
+<div class="toast" id="toast" role="status" aria-live="polite" hidden data-show="0">
+  <span id="toast-text"></span>
+  <button type="button" id="toast-action" class="toast-action" hidden>撤销</button>
+</div>
+
+<noscript>
+  <p class="noscript">这个应用完全在浏览器里运行，需要开启 JavaScript。</p>
+</noscript>
+
+<script src="js/core.js"></script>
+<script src="js/ui.js"></script>
+<script>
+  (function () {
+    var app = window.TodoUI.createApp({});
+    app.start();
+    window.__todoApp = app; // 冒烟测试与调试用
+
+    // 自检：在浏览器里跑一遍布局与规则的体检，控制台打印「自检 1/0」。
+    // 也支持 POST 回服务器（?selfcheck=post），方便无人值守的验收脚本收集。
+    window.__todoSelfCheck = function () {
+      var out = { theme: document.documentElement.dataset.theme, viewport: window.innerWidth };
+      var box = function (sel) {
+        var el = document.querySelector(sel);
+        if (!el) return null;
+        var r = el.getBoundingClientRect();
+        return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+      };
+      out.columns = getComputedStyle(document.querySelector('.workspace')).gridTemplateColumns;
+      out.compose = box('.compose');
+      out.board = box('.board');
+      out.stats = box('.stats');
+      out.cards = document.querySelectorAll('#task-list .task').length;
+      out.emptyHidden = document.querySelector('#empty-state').hidden;
+      out.perforation = getComputedStyle(document.querySelector('.task'), '::before').backgroundColor;
+      out.overflowing = [];
+      Array.prototype.forEach.call(document.querySelectorAll('body *'), function (el) {
+        var r = el.getBoundingClientRect();
+        if (r.width > 0 && r.right > window.innerWidth + 0.5) out.overflowing.push(el.className || el.tagName);
+      });
+      out.overflowing = out.overflowing.slice(0, 5);
+      out.docWidth = document.documentElement.scrollWidth;
+      out.ok = out.overflowing.length === 0 && out.docWidth <= window.innerWidth;
+      return out;
+    };
+
+    if (/selfcheck/.test(location.search)) {
+      window.addEventListener('load', function () {
+        if (/selfcheck=seed/.test(location.search)) {
+          // 铺三条样例（含一条逾期、一条已完成），用于刷新后仍在的验收
+          var core = window.TodoCore;
+          var today = core.todayISO(new Date());
+          [
+            { title: '把季度复盘写成三页纸', desc: '结论放第一页。', due: today, priority: 'urgent', category: '工作' },
+            { title: '预约牙科检查', desc: '顺便问一下智齿。', due: core.shiftISO(-2, new Date()), priority: 'high', category: '生活' },
+            { title: '读完《重构》第 6 章', desc: '', due: core.shiftISO(5, new Date()), priority: 'low', category: '学习', done: true },
+          ].forEach(function (item) {
+            var form = document.querySelector('#compose-form');
+            document.querySelector('#f-title').value = item.title;
+            document.querySelector('#f-desc').value = item.desc || '';
+            document.querySelector('#f-due').value = item.due || '';
+            document.querySelector('#f-category').value = item.category;
+            Array.prototype.forEach.call(document.querySelectorAll('#f-priority input'), function (r) {
+              r.checked = r.value === item.priority;
+            });
+            form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+            if (item.done) {
+              var id = window.__todoApp.state.tasks[0].id;
+              document.querySelector('#task-list .task .icon-button.check').click();
+              void id;
+            }
+          });
+        }
+        var report = window.__todoSelfCheck();
+        report.seeded = window.__todoApp.state.tasks.length;
+        report.titles = window.__todoApp.state.tasks.map(function (t) {
+          return t.title + (t.done ? '(完成)' : '');
+        });
+        report.statusBarSegs = document.querySelectorAll('#status-bar .seg').length;
+        report.chips = document.querySelectorAll('.chip').length;
+        report.todayTick = document.querySelectorAll('#series .tick.is-today').length;
+        var text = '自检 ' + (report.ok ? '1' : '0') + ' ' + JSON.stringify(report);
+        console.log(text);
+        if (/selfcheck=post/.test(location.search)) {
+          try {
+            fetch('/metrics', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: text });
+          } catch (e) {}
+        }
+      });
+    }
+  })();
+</script>
+</body>
+</html>
