@@ -28,8 +28,49 @@ const MIME = {
   '.md': 'text/markdown; charset=utf-8',
 };
 
+const MOUNT = '/__probe-report/';
+const REPORT_LIMIT = 4 * 1024 * 1024;
+
 const server = http.createServer((req, res) => {
   const url = decodeURIComponent((req.url || '/').split('?')[0]);
+
+  /* 开发用：探针把报告 POST 到这里，落成 .screens/<名字>.json。
+     为什么不走 localStorage：探针跑完是被 kill 掉的，Chrome 还没把
+     localStorage 刷到磁盘，报告就丢了（踩过这个坑，白白怀疑了半天自己的代码）。 */
+  if (url.indexOf(MOUNT) === 0) {
+    if (req.method !== 'POST') {
+      res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('只接受 POST');
+      return;
+    }
+    const name = url.slice(MOUNT.length).replace(/[^\w.-]/g, '') || 'report';
+    let body = '';
+    let tooBig = false;
+    req.on('data', (chunk) => {
+      if (tooBig) return;
+      body += chunk;
+      if (body.length > REPORT_LIMIT) {
+        tooBig = true;
+        res.writeHead(413, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end('报告太大了');
+      }
+    });
+    req.on('end', () => {
+      if (tooBig) return;
+      const dir = path.join(ROOT, '.screens');
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, name + '.json'), body, 'utf8');
+      } catch (err) {
+        res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end('写不进报告：' + err.message);
+        return;
+      }
+      res.writeHead(204).end();
+    });
+    return;
+  }
+
   const rel = url === '/' ? 'index.html' : url.replace(/^\/+/, '');
   const file = path.resolve(ROOT, rel);
 

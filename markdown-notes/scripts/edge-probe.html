@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>边界用例探针 · 校样</title>
+<style>
+  body { margin: 0; background: #0d1117; color: #e4e8ef;
+         font: 12px/1.65 "IBM Plex Mono", Consolas, monospace; }
+  pre { margin: 0; padding: 16px 20px; white-space: pre-wrap; }
+  iframe { position: fixed; left: -20000px; top: 0; border: 0; }
+</style>
+</head>
+<body>
+<!--
+  边界用例探针（开发用）
+  专门量那些"看起来渲染了、实际看不到"的情况：
+  整篇被 ``` 包裹、超长代码块、只有一张图、超长表格……
+  报的是几何与计算样式，不是"我觉得"。
+-->
+<iframe id="frame" src="../index.html" width="1440" height="900" title="被测页面"></iframe>
+<pre id="out">量边界用例…</pre>
+
+<script>
+'use strict';
+
+const frame = document.getElementById('frame');
+const out = document.getElementById('out');
+const cases = [];
+const errors = [];
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function waitFor(fn, timeout) {
+  const limit = timeout || 5000;
+  let waited = 0;
+  while (waited <= limit) {
+    try { if (fn()) return true; } catch { /* 接着等 */ }
+    await wait(50);
+    waited += 50;
+  }
+  return false;
+}
+
+const round = (n) => Math.round(n * 10) / 10;
+
+function publish(report) {
+  const text = JSON.stringify(report, null, 1);
+  out.textContent = text;
+  try { frame.contentWindow.localStorage.setItem('mdprobe:edge', text); } catch { /* 存不下就算了 */ }
+  try {
+    fetch('/__probe-report/edge', { method: 'POST', body: text }).catch(() => {});
+  } catch { /* 老浏览器没有 fetch 也无所谓 */ }
+}
+
+const FENCED = [
+  '```md',
+  '# 个人作品集网站 RPD',
+  '## 核心功能',
+  '1.首页:大标题+简介+头像',
+  '2.关于我:详细介绍+技能列表',
+  '3.项目展示:项目卡片列表，每个卡片包含项目名称、项目截图、简短描述、技术栈、项目链接',
+  '4.联系方式:邮箱、GitHub、社交媒体链接',
+  '## 设计要求',
+  '- 简洁现代的设计风格',
+  '- 深色主题',
+  '- 流畅的滚动动画',
+  '- 移动端适配',
+  '```',
+].join('\n');
+
+const LONG_FENCE = '```js\n' + Array.from({ length: 80 }, (_, i) => 'const line' + (i + 1) + ' = ' + i + ';').join('\n') + '\n```';
+
+const NORMAL = [
+  '# 个人作品集网站 RPD',
+  '',
+  '## 核心功能',
+  '',
+  '1. 首页：大标题 + 简介 + 头像',
+  '2. 关于我：详细介绍 + 技能列表',
+  '',
+  '## 设计要求',
+  '',
+  '- 简洁现代的设计风格',
+  '- 深色主题',
+].join('\n');
+
+const WIDE_TABLE = '| 列一 | 列二 | 列三 |\n| - | - | - |\n| 甲 | 乙 | 丙 |';
+
+const CASES = [
+  { name: '整篇被 ```md 包裹', body: FENCED },
+  { name: '整篇被 ``` 包裹（无语言）', body: FENCED.replace('```md', '```') },
+  { name: '未闭合的围栏', body: FENCED.replace(/\n```$/, '') },
+  { name: '80 行代码块', body: LONG_FENCE },
+  { name: '普通文档', body: NORMAL },
+  { name: '只有一张表', body: WIDE_TABLE },
+  { name: '空正文', body: '' },
+];
+
+function measureCase(win, doc, name, body) {
+  const $ = (sel) => doc.querySelector(sel);
+  const $$ = (sel) => Array.prototype.slice.call(doc.querySelectorAll(sel));
+  const preview = $('#preview');
+  const cont = $('#proofScroll');
+  const pv = preview.getBoundingClientRect();
+  const cv = cont.getBoundingClientRect();
+
+  const card = $('.md-codeblock');
+  const pre = $('.md-codeblock__pre');
+  const cardBox = card ? card.getBoundingClientRect() : null;
+  const cs = (el, prop) => (el ? win.getComputedStyle(el)[prop] : null);
+
+  const report = {
+    name: name,
+    bodyChars: body.length,
+    children: preview.children.length,
+    blocks: $$('#preview [data-line]').length,
+    textChars: (preview.textContent || '').length,
+    previewH: round(pv.height),
+    previewScrollH: preview.scrollHeight,
+    containerH: round(cv.height),
+    containerScrollH: cont.scrollHeight,
+    scrolled: Boolean(cont.scrollTop),
+    card: card
+      ? {
+        h: round(cardBox.height),
+        w: round(cardBox.width),
+        top: round(cardBox.top),
+        visible: cardBox.height > 0 && cardBox.bottom > cv.top && cardBox.top < cv.bottom,
+        overflow: cs(card, 'overflow'),
+        display: cs(card, 'display'),
+        bg: cs(card, 'backgroundColor'),
+        textColor: cs(pre, 'color'),
+        preOverflowX: cs(pre, 'overflowX'),
+        preScrollW: pre.scrollWidth,
+        preClientW: pre.clientWidth,
+        lineCount: (pre.textContent.match(/\n/g) || []).length + 1,
+        firstChars: pre.textContent.slice(0, 40),
+        tokenSpans: $$('.md-codeblock__pre .tk').length,
+      }
+      : null,
+  };
+  return report;
+}
+
+async function run() {
+  const win = frame.contentWindow;
+  const doc = frame.contentDocument;
+  const editor = doc.getElementById('editor');
+
+  await waitFor(() => doc.documentElement.dataset.ready === 'true', 6000);
+
+  for (let i = 0; i < CASES.length; i += 1) {
+    const item = CASES[i];
+    editor.value = item.body;
+    editor.dispatchEvent(new win.Event('input', { bubbles: true }));
+    await wait(350);
+    doc.getElementById('proofScroll').scrollTop = 0;
+    await wait(60);
+    cases.push(measureCase(win, doc, item.name, item.body));
+  }
+
+  publish({ cases: cases, windowErrors: errors });
+}
+
+/** 不依赖 iframe 的 load 事件（外部字体偶尔会挂住 load），改成轮询就绪 */
+async function waitForApp() {
+  for (let i = 0; i < 120; i += 1) {
+    try {
+      const doc = frame.contentDocument;
+      if (doc && doc.documentElement && doc.documentElement.dataset.ready === 'true') return true;
+      if (doc && doc.querySelectorAll('.card').length > 0) return true;
+    } catch { /* 还没文档，接着等 */ }
+    await wait(250);
+  }
+  return false;
+}
+
+waitForApp().then((ok) => {
+  if (!ok) {
+    publish({ crashed: '被测页面 30 秒内没就绪', cases: cases });
+    return;
+  }
+  try {
+    frame.contentWindow.addEventListener('error', (e) => errors.push(String(e.message)));
+  } catch { /* 挂不上就算了 */ }
+  run().catch((err) => publish({ crashed: String(err && err.stack ? err.stack : err), cases: cases }));
+});
+
+setTimeout(() => {
+  if (/量边界用例/.test(out.textContent)) {
+    publish({ crashed: '没跑完', cases: cases });
+  }
+}, 25000);
+</script>
+</body>
+</html>

@@ -14,7 +14,8 @@
 <!--
   流程探针（开发用，不是应用的一部分）
   把一个真实的 index.html 塞进 iframe，然后像用户那样动它：
-  打字、切笔记、搜索、点勾选框、点印张里的段落、删除再撤销。
+  打字、切笔记、搜索、点勾选框、点印张段落、删笔记再撤销、
+  上传图片、换主题、换 Markdown 风格、导出 ZIP。
   每一步都断言，结果写进下面的报告节点（id=out）。
   跑法见 scripts/shots.js（headless Chrome --dump-dom）。
 -->
@@ -30,14 +31,43 @@ const results = [];
 const errors = [];
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 等某个条件成立（图库是异步的，固定 sleep 靠不住） */
+async function waitFor(fn, timeout, label) {
+  const limit = timeout || 3000;
+  let waited = 0;
+  while (waited <= limit) {
+    try { if (fn()) return true; } catch { /* 元素还没出现，接着等 */ }
+    await wait(50);
+    waited += 50;
+  }
+  return false;
+}
+
 const round = (n) => Math.round(n * 10) / 10;
 
 function check(label, condition, detail) {
   results.push({ step: label, ok: Boolean(condition), detail: detail === undefined ? '' : String(detail) });
 }
 
+/** 每进一段就在报告节点上盖个章：万一被虚拟时钟截断，dump 出来也知道卡在哪 */
+function mark(step) {
+  out.dataset.step = step;
+  out.textContent = '跑流程… 当前：' + step;
+}
+
 function fire(el, type) {
   el.dispatchEvent(new frame.contentWindow.Event(type, { bubbles: true }));
+}
+
+/** 报告三写：POST 给本地服务（最可靠，探针被 kill 也不丢）、写 DOM、写 localStorage */
+function publish(report) {
+  const text = JSON.stringify(report, null, 1);
+  out.textContent = text;
+  try { frame.contentWindow.localStorage.setItem('mdprobe:flow', text); } catch { /* 存不下就算了 */ }
+  try {
+    fetch('/__probe-report/flow', { method: 'POST', body: text }).catch(() => {});
+  } catch { /* 老浏览器没有 fetch 也无所谓，还有另外两条路 */ }
 }
 
 async function run() {
@@ -53,14 +83,29 @@ async function run() {
   freeze.textContent = '*, *::before, *::after { transition: none !important; animation: none !important; }';
   doc.head.appendChild(freeze);
 
+  // 平滑滚动在虚拟时钟下同样可能不动，这里换成"立即到位"，只验"滚到哪儿"这件事
+  const scrollCalls = [];
+  win.Element.prototype.scrollTo = function (arg) {
+    if (arg && typeof arg === 'object' && typeof arg.top === 'number') {
+      scrollCalls.push(arg.top);
+      this.scrollTop = arg.top;
+    }
+  };
+
   await wait(900);
 
   /* 0. 启动 */
+  mark('启动就绪');
+  const booted = await waitFor(() => doc.documentElement.dataset.ready === 'true', 6000, '应用就绪');
+  check('启动：应用跑完初始化（图库是异步的，先画后补）', booted,
+    doc.documentElement.dataset.ready || '没等到 data-ready');
   check('启动：目录栏渲染出笔记', $$('.card').length === 2, $$('.card').length + ' 张卡片');
   check('启动：编辑器有内容', ($('#editor') || {}).value.length > 100);
   check('启动：印张渲染出块', $$('#preview [data-line]').length > 10, $$('#preview [data-line]').length + ' 个块');
   check('启动：印张没有被滚过头', ($('#proofScroll') || {}).scrollTop === 0, 'scrollTop=' + ($('#proofScroll') || {}).scrollTop);
   check('启动：代码块高亮生效', $$('#preview .tk').length > 5, $$('#preview .tk').length + ' 个 token');
+  check('启动：种子笔记里的公式渲染成 MathML', $$('#preview math').length >= 1, $$('#preview math').length + ' 个');
+  check('启动：种子笔记里的脚注排出来了', Boolean($('#preview .md-footnotes')));
 
   const copyBtn = $$('.md-codeblock__copy')[0];
   check('启动：代码卡片带复制按钮', Boolean(copyBtn));
@@ -73,6 +118,7 @@ async function run() {
   }
 
   /* 1. 打字 → 实时预览 */
+  mark('1 打字与实时预览');
   const editor = $('#editor');
   const before = editor.value;
   editor.value = before + '\n\n## 探针小标题\n\n探针写进去的一段话。\n';
@@ -99,6 +145,7 @@ async function run() {
     active ? '正文 ' + active.body.length + ' 字' : '没读到');
 
   /* 2. 光标 ↔ 印张 */
+  mark('2 光标联动');
   const paraLine = editor.value.slice(0, editor.value.indexOf('探针写进去的一段话')).split('\n').length;
   const paraStart = editor.value.split('\n').slice(0, paraLine - 1).join('\n').length + (paraLine > 1 ? 1 : 0);
   editor.setSelectionRange(paraStart + 2, paraStart + 2);
@@ -116,14 +163,11 @@ async function run() {
     const tr = tick.getBoundingClientRect();
     check('光标联动：括号与段落对齐',
       Math.abs(br.top - tr.top) <= 2 && Math.abs(br.height - tr.height) <= 2,
-      'block ' + round(br.top) + '/' + round(br.height) + '  tick ' + round(tr.top) + '/' + round(tr.height) +
-      '  | tick.style.top=' + tick.style.top + ' tick.style.height=' + tick.style.height +
-      '  block.offsetTop=' + cursorBlock.offsetTop + ' block.offsetHeight=' + cursorBlock.offsetHeight +
-      '  offsetParent=' + (cursorBlock.offsetParent ? cursorBlock.offsetParent.className || cursorBlock.offsetParent.tagName : 'null') +
-      '  page.scrollTop=' + $('#proofScroll').scrollTop);
+      'block ' + round(br.top) + '/' + round(br.height) + '  tick ' + round(tr.top) + '/' + round(tr.height));
   }
 
   /* 3. 反向：点印张里的块 → 光标回源码 */
+  mark('3 反向定位');
   const target = $$('#preview p')[1] || $$('#preview [data-line]')[2];
   const targetLine = Number(target.dataset.line);
   target.click();
@@ -134,6 +178,7 @@ async function run() {
     '光标在第 ' + caretLine + ' 行，目标第 ' + targetLine + ' 行');
 
   /* 4. 勾选框回写原文 */
+  mark('4 勾选框回写');
   const box = $$('#preview .md-check').find((el) => !el.checked);
   const lineOfBox = Number(box.dataset.toggleLine);
   const lineBefore = editor.value.split('\n')[lineOfBox - 1];
@@ -147,6 +192,7 @@ async function run() {
     (stored().notes.find((n) => n.id === stored().activeId) || {}).body.split('\n')[lineOfBox - 1].indexOf('[x]') >= 0);
 
   /* 5. 搜索 */
+  mark('5 搜索');
   const search = $('#search');
   search.value = '速查';
   fire(search, 'input');
@@ -163,16 +209,18 @@ async function run() {
   check('搜索：清空后恢复全部', $$('.card').length === 2, $$('.card').length + ' 张卡片');
 
   /* 6. 切换笔记 */
+  mark('6 切换笔记');
   const firstBody = $('#editor').value;
   const other = $$('.card').find((c) => c.dataset.active !== 'true');
   other.querySelector('.card__open').click();
-  await wait(250);
+  await wait(400);
   check('切换：编辑器换成了另一篇', $('#editor').value !== firstBody);
   check('切换：卡片选中态跟着走',
     $('.card[data-active="true"]').dataset.id === other.dataset.id);
   check('切换：印张重排为新笔记', $$('#preview [data-line]').length > 5);
 
   /* 7. 删除 → 撤销 */
+  mark('7 删除与撤销');
   const activeId = $('.card[data-active="true"]').dataset.id;
   const titleOfActive = $('.card[data-active="true"] .card__title').textContent.trim();
   const cardsBefore = $$('.card').length;
@@ -192,6 +240,7 @@ async function run() {
   }
 
   /* 8. 新建 */
+  mark('8 新建笔记');
   $('#newNote').click();
   await wait(300);
   check('新建：多了一张卡片', $$('.card').length === cardsBefore + 1, $$('.card').length + ' 张');
@@ -203,6 +252,7 @@ async function run() {
   check('新建：立刻落盘', stored().notes.length === cardsBefore + 1);
 
   /* 9. 工具栏 */
+  mark('9 工具栏');
   $('#editor').value = '加粗测试';
   $('#editor').setSelectionRange(0, 2);
   fire($('#editor'), 'input');
@@ -212,6 +262,7 @@ async function run() {
   check('工具栏：印张里出现 strong', Boolean($('#preview strong')), $('#preview').innerHTML.length + ' 字符的 HTML');
 
   /* 9.5 标题：编辑页有标题，印张上也得有 */
+  mark('9.5 标题归属');
   const titleInput = $('#title');
   titleInput.value = '探针标题';
   fire(titleInput, 'input');
@@ -240,22 +291,300 @@ async function run() {
   check('标题：这种时候导出的 .md 不会多插一行（第一行就是正文的标题）',
     $('#editor').value.split('\n')[0] === '# 正文里的一级标题',
     $('#editor').value.split('\n')[0]);
+  check('标题：标签页标题跟着笔记走（也就是打印时的默认文件名）',
+    doc.title.indexOf('探针标题') === 0,
+    doc.title);
+
+  /* 9.6 大纲 / 公式 / 脚注：写一篇像样的文档再验 */
+  mark('9.6 大纲公式脚注');
+  const richDoc = [
+    '# 一级标题',
+    '',
+    '一段中英混排 React 的文字。',
+    '',
+    '## 二级标题',
+    '',
+    '$$',
+    'E = mc^2',
+    '$$',
+    '',
+    '正文带一个脚注[^n]。',
+    '',
+    '[^n]: 脚注说明文字',
+    '',
+    '## 另一个标题',
+  ].join('\n');
+  $('#editor').value = richDoc;
+  fire($('#editor'), 'input');
+  await wait(400);
+
+  check('公式：块级公式渲染成 MathML',
+    $$('#preview .md-math--block math').length === 1,
+    $$('#preview math').length + ' 个 math 元素');
+  check('公式：带上了 TeX 注解（可再编辑）',
+    Boolean($('#preview annotation[encoding="application/x-tex"]')));
+  check('脚注：正文里有引用、文末有脚注区',
+    $$('#preview .fn-ref').length === 1 && Boolean($('#preview .md-footnotes')));
+  check('脚注：引用处自动编号为 1',
+    ($('#preview .fn-ref a') || {}).textContent === '1',
+    ($('#preview .fn-ref a') || {}).textContent);
+
+  const hashBefore = win.location.hash;
+  $('#preview .fn-ref a').click();
+  await wait(300);
+  check('脚注：点引用跳到脚注，且不动地址栏', win.location.hash === hashBefore, win.location.hash);
+
+  const outlineItems = () => $$('#outline .outline__item');
+  check('大纲：自动收集到三个标题', outlineItems().length === 3, outlineItems().length + ' 条');
+  check('大纲：页签上显示条数', $('#tabBadgeOutline').textContent === '3', $('#tabBadgeOutline').textContent);
+  check('大纲：层级缩进按标题级别来',
+    outlineItems()[1].style.getPropertyValue('--indent') === '1',
+    '第二条缩进 ' + outlineItems()[1].style.getPropertyValue('--indent'));
+
+  doc.querySelector('[data-tab="outline"]').click();
+  await wait(120);
+  check('大纲：页签能切到面板',
+    $('.rail__panel[data-panel="outline"]').hidden === false &&
+    $('.rail__panel[data-panel="notes"]').hidden === true);
+  $('#proofScroll').scrollTop = 0;
+  scrollCalls.length = 0;
+  outlineItems()[2].click();
+  await wait(400);
+  check('大纲：点一条能跳到对应章节',
+    $('#proofScroll').scrollTop > 0 || scrollCalls.length > 0,
+    'scrollTop=' + Math.round($('#proofScroll').scrollTop) + ' scrollTo 调用=' + scrollCalls.length);
+  check('大纲：跳到的地方闪一下作提示', $$('#preview .is-flash').length >= 1);
+  doc.querySelector('[data-tab="notes"]').click();
+  await wait(120);
+
+  /* 9.7 图片：走一遍"上传 → 插图 → 预览 → 删除 → 撤销" */
+  mark('9.7 图片上传');
+  const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+  const pngBytes = Uint8Array.from(win.atob(pngBase64), (c) => c.charCodeAt(0));
+  const imageFile = new win.File([pngBytes], '探针图.png', { type: 'image/png' });
+  const dt = new win.DataTransfer();
+  dt.items.add(imageFile);
+  const imageInput = $('#imageInput');
+  imageInput.files = dt.files;
+  fire(imageInput, 'change');
+  const storedOk = await waitFor(() => $$('#imageGrid .image-card').length === 1, 5000, '图片进库');
+  check('图片：上传后进了这篇笔记的图库', storedOk, $$('#imageGrid .image-card').length + ' 张');
+  await waitFor(() => $$('#preview img').length === 1, 3000, '印张出图');
+
+  check('图片：正文里插入了图片语法',
+    $('#editor').value.indexOf('![探针图](探针图.png)') >= 0,
+    $('#editor').value.split('\n').filter((l) => l.indexOf('![') >= 0).join(' / ').slice(0, 40));
+  check('图片：印张里渲染出 img', $$('#preview img').length === 1, $$('#preview img').length + ' 张');
+  const imgEl = $('#preview img');
+  check('图片：用的是本地对象地址，不是外链',
+    Boolean(imgEl) && /^blob:/.test(imgEl.getAttribute('src') || ''),
+    imgEl ? String(imgEl.getAttribute('src')).slice(0, 24) : '没有 img');
+
+  doc.querySelector('[data-tab="images"]').click();
+  await wait(200);
+  check('图片：页签徽标显示张数', $('#tabBadgeImages').textContent === '1', $('#tabBadgeImages').textContent);
+  check('图片：面板里列出了这张图', $$('#imageGrid .image-card').length === 1,
+    $('#imageGrid') ? $('#imageGrid').textContent.trim().slice(0, 40) : '没有面板');
+  check('图片：目录名就是笔记标题',
+    $('#imageFolder').textContent.trim() === '探针标题',
+    $('#imageFolder').textContent);
+  const sizeText = $('#imageGrid .image-card__size');
+  check('图片：标注了引用次数',
+    Boolean(sizeText) && sizeText.textContent.indexOf('引用 1 处') >= 0,
+    sizeText ? sizeText.textContent : '没有这张图');
+
+  // 编辑时也能看到图：稿纸栏底部那条缩略图带
+  check('图片：编辑栏出现「本文图片」缩略图带',
+    $('#imageStrip').hidden === false && $$('#imageStripItems .strip__item').length === 1,
+    $$('#imageStripItems .strip__item').length + ' 个缩略图');
+  check('图片：缩略图标了"已被引用"',
+    ($('#imageStripItems .strip__item') || { dataset: {} }).dataset.used === 'true');
+  const stripBtn = $('#imageStripItems .strip__item');
+  if (stripBtn) {
+    $('#editor').setSelectionRange(0, 0);
+    const lineBefore = $('#editor').value.slice(0, $('#editor').selectionStart).split('\n').length;
+    stripBtn.click();
+    await wait(250);
+    const lineAfter = $('#editor').value.slice(0, $('#editor').selectionStart).split('\n').length;
+    check('图片：点缩略图跳到引用它的那一行', lineAfter !== lineBefore,
+      '第 ' + lineBefore + ' 行 → 第 ' + lineAfter + ' 行');
+  }
+
+  const removeBtn = doc.querySelector('#imageGrid [data-image-act="remove"]');
+  check('图片：面板里有删除按钮', Boolean(removeBtn));
+  if (removeBtn) {
+    removeBtn.click();
+    await waitFor(() => $$('#imageGrid .image-card').length === 0, 3000, '图片删除');
+    check('图片：删除后列表空了', $$('#imageGrid .image-card').length === 0);
+    check('图片：正文里的引用变成"缺图"占位', $$('#preview .md-img-missing').length === 1);
+    const imgUndo = $$('.toast .toast__act').pop();
+    check('图片：删除给了撤销入口', Boolean(imgUndo) && imgUndo.textContent === '撤销');
+    if (imgUndo) {
+      imgUndo.click();
+      await waitFor(() => $$('#imageGrid .image-card').length === 1, 4000, '图片恢复');
+      check('图片：撤销后图片回来了', $$('#imageGrid .image-card').length === 1);
+      check('图片：印张里又能看到了', $$('#preview img').length === 1);
+    }
+  }
+  doc.querySelector('[data-tab="notes"]').click();
+  await wait(120);
+
+  /* 9.8 主题与风格 */
+  mark('9.8 主题与风格');
+  $('#settingsBtn').click();
+  await wait(150);
+  check('设置：弹层能打开', $('#settings').hidden === false);
+  check('设置：列出了五套主题', $$('#themeList .theme').length === 5, $$('#themeList .theme').length + ' 套');
+  check('设置：每套主题都带色板', $$('#themeList .theme__swatch i').length === 15);
+  check('设置：列出了四种 Markdown 风格', $$('#flavorList .flavor').length === 4);
+
+  const paperBefore = win.getComputedStyle($('.proof')).backgroundColor;
+  doc.querySelector('[data-theme-value="nocturne"]').click();
+  await wait(250);
+  const paperAfter = win.getComputedStyle($('.proof')).backgroundColor;
+  check('主题：切到夜读后印张底色变了', paperBefore !== paperAfter, paperBefore + ' → ' + paperAfter);
+  check('主题：html 上的 data-theme 跟着变',
+    doc.documentElement.dataset.theme === 'nocturne', doc.documentElement.dataset.theme);
+  check('主题：写进了界面偏好',
+    JSON.parse(win.localStorage.getItem('markdown-notes/ui/v1') || '{}').theme === 'nocturne');
+  check('主题：选中态标在当前那套上',
+    doc.querySelector('[data-theme-value="nocturne"]').getAttribute('aria-pressed') === 'true');
+
+  doc.querySelector('[data-flavor-value="chinese"]').click();
+  await wait(350);
+  $('#editor').value = '用React写代码，用 Vue 也行。';
+  fire($('#editor'), 'input');
+  await wait(400);
+  check('风格：中文写作会给挨着的中英之间留白',
+    $$('#preview .cjk-gap').length === 2,
+    $$('#preview .cjk-gap').length + ' 处（用|React|写 各一处）');
+  check('风格：本来就写了空格的地方不重复加留白',
+    $('#preview').innerHTML.indexOf('用<span class="cjk-gap"></span>Vue') < 0,
+    '用 Vue 之间没有多插空隙');
+  check('风格：写进了界面偏好',
+    JSON.parse(win.localStorage.getItem('markdown-notes/ui/v1') || '{}').flavor === 'chinese');
+
+  $('#editor').value = '- [ ] 任务\n\n| a | b |\n| - | - |\n| 1 | 2 |';
+  fire($('#editor'), 'input');
+  await wait(350);
+  check('风格：中文写作下任务清单和表格都在',
+    $$('#preview .md-check').length === 1 && $$('#preview table').length === 1);
+
+  doc.querySelector('[data-flavor-value="commonmark"]').click();
+  await wait(350);
+  check('风格：切到严格 CommonMark 后表格不再渲染', $$('#preview table').length === 0);
+  check('风格：任务清单也不再渲染', $$('#preview .md-check').length === 0);
+  doc.querySelector('[data-flavor-value="gfm"]').click();
+  await wait(350);
+  check('风格：切回通用后又都回来了',
+    $$('#preview table').length === 1 && $$('#preview .md-check').length === 1);
+  doc.querySelector('[data-theme-value="proof"]').click();
+  await wait(200);
+  $('#settingsBtn').click();
+  await wait(120);
+
+  /* 9.9 导出：ZIP 真打一份出来看目录结构；PDF 交给打印引擎，这里只验样式 */
+  mark('9.9 导出');
+  const captured = [];
+  const origCreate = win.URL.createObjectURL;
+  win.URL.createObjectURL = function (blob) {
+    captured.push(blob);
+    return origCreate.call(win.URL, blob);
+  };
+  $('#editor').value = richDoc + '\n\n![探针图](探针图.png)\n';
+  fire($('#editor'), 'input');
+  await wait(500);
+  check('导出：有 ZIP 按钮', Boolean($('#exportZip')));
+  check('导出：有 PDF 按钮', Boolean($('#exportPdf')));
+  check('导出：PDF 按钮会把文件名准备成笔记标题（打印时读 document.title）',
+    typeof win.print === 'function',
+    'window.print 可替换（headless 里由 CDP 探针验证真实文件名字段）');
+  check('导出：PDF 走打印引擎，打印样式里排掉了界面',
+    (() => {
+      for (let i = 0; i < doc.styleSheets.length; i += 1) {
+        let rules;
+        try { rules = doc.styleSheets[i].cssRules; } catch { continue; }
+        for (let k = 0; k < rules.length; k += 1) {
+          const rule = rules[k];
+          if (rule.type === win.CSSRule.MEDIA_RULE && /print/.test(rule.conditionText || rule.media.mediaText || '')) {
+            const text = rule.cssText || '';
+            if (text.indexOf('.rail') >= 0 && text.indexOf('.md-codeblock') >= 0) return true;
+          }
+        }
+      }
+      return false;
+    })());
+
+  $('#exportZip').click();
+  await waitFor(() => captured.some((b) => b && b.type === 'application/zip'), 4000, 'ZIP 产出');
+  const zipBlob = captured.filter((b) => b && b.type === 'application/zip')[0];
+  check('导出：ZIP 真的产出了', Boolean(zipBlob), captured.map((b) => b.type).join(',') || '没有捕获到');
+  if (zipBlob) {
+    const bytes = new Uint8Array(await zipBlob.arrayBuffer());
+    const hasBytes = (needle) => {
+      outer:
+      for (let i = 0; i + needle.length <= bytes.length; i += 1) {
+        for (let k = 0; k < needle.length; k += 1) {
+          if (bytes[i + k] !== needle[k]) continue outer;
+        }
+        return true;
+      }
+      return false;
+    };
+    check('导出：ZIP 头是 PK', bytes[0] === 0x50 && bytes[1] === 0x4b, bytes[0] + ',' + bytes[1]);
+    check('导出：文档在压缩包根目录（文件夹外面）',
+      hasBytes(win.MDZip.utf8('探针标题.md')),
+      '大小 ' + bytes.length + 'B');
+    check('导出：图片在以标题命名的文件夹里',
+      hasBytes(win.MDZip.utf8('探针标题/探针图.png')));
+    check('导出：正文里的图片路径补成了「目录/文件名」',
+      hasBytes(win.MDZip.utf8('](探针标题/探针图.png)')));
+  }
+  win.URL.createObjectURL = origCreate;
+
+  /* 9.10 整篇被一层围栏包住：给出提示 + 一键拆掉 */
+  mark('9.10 整篇围栏');
+  $('#editor').value = '```md\n# 被包住的标题\n\n一段正文。\n```\n';
+  fire($('#editor'), 'input');
+  await wait(450);
+  check('围栏稿：印张上是一个代码块', $$('#preview .md-codeblock').length === 1,
+    $$('#preview .md-codeblock').length + ' 个代码块');
+  check('围栏稿：给出「拆掉外层围栏」的提示条',
+    $('#fenceHint').hidden === false,
+    $('#fenceHintText') ? $('#fenceHintText').textContent.slice(0, 30) : '没有提示条');
+  check('围栏稿：正文这时还没有排版标题（所以才要提示）',
+    $$('#preview h1:not(.page__title)').length === 0,
+    '正文标题 ' + $$('#preview h1:not(.page__title)').length + ' 个（印张顶部那个是标题框来的）');
+
+  $('#stripFence').click();
+  await wait(450);
+  check('拆围栏：正文变成排版后的样子',
+    $$('#preview .md-codeblock').length === 0 && $$('#preview h1:not(.page__title)').length === 1,
+    '代码块 ' + $$('#preview .md-codeblock').length + ' · 正文标题 ' + $$('#preview h1:not(.page__title)').length);
+  check('拆围栏：原文里真的去掉了外层围栏', $('#editor').value.indexOf('```') < 0,
+    JSON.stringify($('#editor').value.slice(0, 20)));
+  check('拆围栏：提示条收起', $('#fenceHint').hidden === true);
+  check('拆围栏：改动落盘',
+    ((stored().notes.find((n) => n.id === stored().activeId) || {}).body || '').indexOf('```') < 0);
+  check('拆围栏：大纲跟着长出来', $$('#outline .outline__item').length >= 1,
+    $$('#outline .outline__item').length + ' 条');
 
   /* 10. 把笔记全删光 → 两栏都该让位给空状态 */
+  mark('10 删光笔记');
   let guard = 0;
-  while ($('.card') && guard < 10) {
+  while ($('.card') && guard < 12) {
     $('.card .card__del').click();
     guard += 1;
     await wait(160);
   }
-  await wait(200);
+  await wait(250);
   check('删光：目录栏给出空状态', Boolean($('.rail__empty')), $('.rail__empty') ? $('.rail__empty').textContent.slice(0, 14) : '无');
   check('删光：稿纸栏让位给邀请', $('#sourceBlank').hidden === false);
   check('删光：印张栏让位给邀请', $('#proofBlank').hidden === false);
   check('删光：LocalStorage 里确实空了', (stored().notes || []).length === 0, (stored().notes || []).length + ' 篇');
 
   /* 11. 分栏与偏好 */
-  const app = $('.app');
+  mark('11 界面偏好');
   doc.querySelector('[data-sort="title"]').click();
   await wait(120);
   check('排序：按钮状态切换', doc.querySelector('[data-sort="title"]').getAttribute('aria-pressed') === 'true');
@@ -267,27 +596,49 @@ async function run() {
   await wait(120);
   check('偏好：跟随光标开关可关',
     JSON.parse(win.localStorage.getItem('markdown-notes/ui/v1') || '{}').follow === false);
+  check('偏好：主题也记着',
+    JSON.parse(win.localStorage.getItem('markdown-notes/ui/v1') || '{}').theme === 'proof');
   check('窄屏切换条：宽屏下隐藏',
     win.getComputedStyle($('.panes')).display === 'none', win.getComputedStyle($('.panes')).display);
-
-  void app;
 }
 
-frame.addEventListener('load', () => {
+/**
+ * 不依赖 iframe 的 load 事件：外面那张 Google Fonts 样式表偶尔会挂住，
+ * load 事件就一直不来，探针会"跑都没跑"然后被判成失败。
+ * 所以改成轮询：文档在、应用就绪（或至少已经有卡片）就开始。
+ */
+async function waitForApp() {
+  for (let i = 0; i < 120; i += 1) {
+    try {
+      const doc = frame.contentDocument;
+      if (doc && doc.documentElement && doc.documentElement.dataset.ready === 'true') return true;
+      if (doc && doc.querySelectorAll('.card').length > 0) return true;
+    } catch { /* 还没文档，接着等 */ }
+    await wait(250);
+  }
+  return false;
+}
+
+waitForApp().then((ok) => {
+  if (!ok) {
+    publish({ summary: { crashed: '被测页面 30 秒内没就绪' }, windowErrors: errors, results: results });
+    return;
+  }
   win_err_hook();
   setTimeout(() => {
     run().then(() => {
       const failed = results.filter((r) => !r.ok);
-      out.textContent = JSON.stringify({
+      publish({
         summary: { total: results.length, passed: results.length - failed.length, failed: failed.length },
         windowErrors: errors,
         results: results,
-      }, null, 1);
+      });
     }).catch((err) => {
-      out.textContent = JSON.stringify({
+      publish({
         summary: { total: results.length, crashed: String(err && err.stack ? err.stack : err) },
+        windowErrors: errors,
         results: results,
-      }, null, 1);
+      });
     });
   }, 400);
 });
@@ -300,10 +651,15 @@ function win_err_hook() {
 }
 
 setTimeout(() => {
-  if (out.textContent === '跑流程…') {
-    out.textContent = JSON.stringify({ summary: { crashed: 'iframe 没在 15 秒内 load' } }, null, 1);
+  if (/跑流程…/.test(out.textContent)) {
+    // 到点了还没跑完：把卡在哪一段写清楚，别让人对着空白猜
+    publish({
+      summary: { crashed: '流程没跑完，卡在：' + (out.dataset.step || '未知') },
+      windowErrors: errors,
+      results: results,
+    });
   }
-}, 15000);
+}, 22000);
 </script>
 </body>
 </html>

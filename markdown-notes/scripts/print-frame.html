@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<!-- 故意不写 <title>：模拟"应用被嵌在别的页面里"的情况 -->
+<style>html, body { margin: 0; height: 100%; } iframe { width: 100%; height: 100%; border: 0; }</style>
+</head>
+<body>
+<!--
+  开发用：把校样嵌进一个没有标题的外层页面里，
+  用来验证一件事——window.print() 打印的是**最外层文档**，
+  于是打印窗口的默认文件名取的是外层页面的标题（这里是空的）。
+  应用应该在这种情况下提醒用户"请在新标签页打开"。
+-->
+<iframe id="frame" src="../index.html" title="被测页面"></iframe>
+<script>
+'use strict';
+// 供 CDP 探针调用：让 iframe 里的应用去执行"导出 PDF"
+window.exportInsideFrame = function () {
+  const win = document.getElementById('frame').contentWindow;
+  win.print = function () { win.__printed = true; };
+  const btn = win.document.getElementById('exportPdf');
+  if (btn) btn.click();
+  return win.document.title;
+};
+</script>
+</body>
+</html>

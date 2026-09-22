@@ -105,8 +105,8 @@ group('行内语法', () => {
 /* -------------------------------------------------------------- 块级语法 */
 
 group('标题', () => {
-  eq(md.render('# 标题'), '<h1 data-line="1" data-end="1">标题</h1>', '一级标题');
-  eq(md.render('### 三级'), '<h3 data-line="1" data-end="1">三级</h3>', '三级标题');
+  eq(md.render('# 标题'), '<h1 id="sec-1" data-line="1" data-end="1">标题</h1>', '一级标题');
+  eq(md.render('### 三级'), '<h3 id="sec-1" data-line="1" data-end="1">三级</h3>', '三级标题');
   has(md.render('#标题'), '>标题<', '中文习惯：井号后不空格也认');
   has(md.render('## 标题 ##'), '>标题<', '收尾井号被剥掉');
   has(md.render('####### 七个井号'), '<p ', '七个井号不是标题');
@@ -207,7 +207,7 @@ group('段落与行号', () => {
   has(html, '<p data-line="4" data-end="4">', '第二段行号正确（跳过空行）');
 
   const doc = md.render('# 标题\n\n正文\n\n```js\nlet a = 1;\n```\n\n> 引用\n\n- 项');
-  has(doc, '<h1 data-line="1"', '标题行号');
+  has(doc, '<h1 id="sec-1" data-line="1"', '标题行号');
   has(doc, '<p data-line="3"', '正文行号');
   has(doc, 'data-line="5" data-end="7"', '代码块行号区间');
   has(doc, '<blockquote data-line="9"', '引用行号');
@@ -281,6 +281,261 @@ group('统计与纯文本', () => {
 
   eq(md.plainText('# 标题\n\n- 项 **粗** `x`'), '标题\n\n项 粗 x', '去掉标记保留文字');
   eq(md.plainText('```js\nconst a = 1;\n```'), ' \nconst a = 1;\n ', '代码围栏标记被抹掉');
+});
+
+/* ------------------------------------------------------------ 风格（flavor） */
+
+group('风格：严格 CommonMark', () => {
+  const strict = { flavor: 'commonmark' };
+
+  lacks(md.render('- [ ] 任务', strict), 'md-check', '严格模式没有任务清单');
+  has(md.render('- [ ] 任务', strict), '[ ] 任务', '但原文照样看得见');
+
+  lacks(md.render('~~删~~', strict), '<del>', '严格模式没有删除线');
+  has(md.render('~~删~~', strict), '~~删~~', '删除线标记原样保留');
+
+  lacks(md.render('| a | b |\n| - | - |\n| 1 | 2 |', strict), '<table>', '严格模式没有表格');
+
+  lacks(md.render('#标题', strict), '<h1', '严格模式要求井号后有空格');
+  has(md.render('# 标题', strict), '<h1', '有空格就是标题');
+
+  lacks(md.render('见 https://a.dev', strict), '<a ', '严格模式不做裸链接');
+  has(md.render('<https://a.dev>', strict), '<a ', '尖括号自动链接属于核心语法，保留');
+
+  lacks(md.render('正文[^1]\n\n[^1]: 注解', strict), 'fn-ref', '严格模式没有脚注');
+  has(md.render('正文[^1]\n\n[^1]: 注解', strict), '[^1]: 注解', '脚注定义当普通文字显示，不吞内容');
+
+  lacks(md.render('公式 $x^2$ 在这里', strict), '<math', '严格模式没有公式');
+
+  has(md.render('**粗** 和 `代码`', strict), '<strong>', '核心强调语法不受影响');
+});
+
+group('风格：通用（默认）', () => {
+  ok(md.render('- [x] 好').indexOf('md-check') >= 0, '默认有任务清单');
+  ok(md.render('~~删~~').indexOf('<del>') >= 0, '默认有删除线');
+  ok(md.render('| a |\n| - |\n| 1 |').indexOf('<table>') >= 0, '默认有表格');
+  ok(md.render('正文[^1]\n\n[^1]: 注').indexOf('fn-ref') >= 0, '默认有脚注');
+  ok(md.render('$x$').indexOf('<math') >= 0, '默认有公式');
+  eq(md.DEFAULT_FLAVOR, 'gfm', '默认风格是通用');
+  ok(md.flavors().length >= 4, '风格列表至少四种');
+  eq(md.flavors().map((f) => f.value), ['commonmark', 'gfm', 'chinese', 'extended'], '风格顺序');
+});
+
+group('风格：中文写作', () => {
+  const cn = { flavor: 'chinese' };
+
+  has(md.render('用React写代码', cn), '用<span class="cjk-gap"></span>React', '中英挨着时补空隙');
+  lacks(md.render('用React写代码', { flavor: 'gfm' }), 'cjk-gap', '通用风格不补');
+  eq(md.render('用 React 写代码', cn), md.render('用 React 写代码', { flavor: 'gfm' }),
+    '本来就写了空格的地方不再重复加');
+  has(md.render('第3章', cn), 'cjk-gap', '中文与数字挨着也补');
+  lacks(md.render('`用React写`', cn).split('<code')[1].split('</code>')[0], 'cjk-gap', '代码里不插空隙');
+  has(md.render('用React写代码', cn), 'React', '文字本身没被破坏');
+
+  has(md.render('第一行\n第二行', cn), '<br>', '单换行即换行');
+  lacks(md.render('第一行\n第二行', { flavor: 'gfm' }), '<br>', '通用风格把单换行当空格');
+});
+
+group('风格：全扩展', () => {
+  const ext = { flavor: 'extended' };
+
+  has(md.render('==重点==', ext), '<mark class="md-mark">重点</mark>', '高亮');
+  lacks(md.render('==重点==', { flavor: 'gfm' }), '<mark', '通用风格没有高亮');
+
+  has(md.render('H~2~O', ext), '<sub class="md-sub">2</sub>', '下标');
+  has(md.render('x^2^', ext), '<sup class="md-sup">2</sup>', '上标');
+  has(md.render('~~删~~ x~1~', ext), '<del>', '删除线与下标能共存');
+  has(md.render('a~i~ + b', ext), '<sub class="md-sub">i</sub>', '字母下标');
+  lacks(md.render('5~10个', ext), '<sub', '数值区间不会被当成下标');
+  has(md.render('5~10个', ext), '5~10个', '数值区间原样保留');
+
+  const dl = md.render('术语\n: 解释内容', ext);
+  has(dl, '<dl class="md-dl"', '定义列表');
+  has(dl, '<dt>术语</dt>', '定义项');
+  has(dl, '<dd data-line="2"', '定义内容带行号');
+  lacks(md.render('术语\n: 解释内容', { flavor: 'gfm' }), '<dl', '通用风格没有定义列表');
+});
+
+/* ---------------------------------------------------------------- 脚注 */
+
+group('脚注', () => {
+  const html = md.render('第一处[^a] 和第二处[^b]\n\n[^a]: 甲注\n[^b]: 乙注');
+
+  has(html, '<section class="md-footnotes"', '脚注区');
+  has(html, '<div class="md-footnotes__label">脚注</div>', '脚注标题不是标题元素（不污染大纲）');
+  lacks(html, '<h2', '脚注标题不能用 heading');
+  has(html, 'id="fnref-a"', '正文里的引用锚点');
+  has(html, 'id="fn-a"', '脚注条目锚点');
+  has(html, '>1</a>', '第一条编号是 1');
+  has(html, '>2</a>', '第二条编号是 2');
+  has(html, 'class="fn-back"', '回到正文的回跳链接');
+  has(html, 'data-line="3"', '脚注区记住定义所在行（光标联动要用）');
+
+  // 编号按"引用的先后"给，不是按定义的先后
+  const order = md.render('先引乙[^b] 再引甲[^a]\n\n[^a]: 甲\n[^b]: 乙');
+  has(order, 'id="fnref-b"', '先出现的引用');
+  has(order, 'href="#fn-b" data-footnote="b">1<', '先引用的编号是 1');
+
+  // 定义不能漏进正文
+  lacks(html, '[^a]: 甲注', '定义行不会当成正文显示');
+  eq((html.match(/<p data-line/g) || []).length, 1, '正文只有一个段落');
+
+  const unused = md.render('正文\n\n[^x]: 没人引用我');
+  has(unused, 'is-unused', '没被引用的定义也排出来');
+  has(unused, '未引用', '并标出来');
+  has(unused, '没人引用我', '内容不丢');
+
+  const missing = md.render('正文[^没有]');
+  has(missing, 'is-missing', '引用不存在的脚注要标出来');
+  lacks(missing, 'md-footnotes', '没有定义就不排脚注区');
+
+  const multi = md.render('正文[^m]\n\n[^m]: 第一段\n\n    第二段');
+  eq((multi.match(/<p /g) || []).length, 3, '多段脚注：正文一段 + 脚注两段');
+  has(multi, '第二段', '第二段内容在');
+
+  const onlyDefs = md.render('[^only]: 只有定义');
+  has(onlyDefs, 'md-footnotes', '只有定义也能渲染出脚注区');
+
+  // 脚注里的行内语法照样解析
+  has(md.render('正文[^s]\n\n[^s]: 带 **粗体** 的注'), '<strong>粗体</strong>', '脚注内容支持行内语法');
+});
+
+/* ---------------------------------------------------------------- 公式 */
+
+group('数学公式', () => {
+  const inline = md.render('质能方程 $E = mc^2$ 很重要');
+  has(inline, '<math', '行内公式渲染成 MathML');
+  has(inline, 'display="inline"', '行内模式');
+  has(inline, '<msup>', '上标结构');
+  has(inline, '很重要', '公式前后的文字都在');
+  has(inline, 'application/x-tex', '带 TeX 注解，方便再编辑');
+
+  const display = md.render('$$\n\\frac{a}{b}\n$$');
+  has(display, 'class="md-math md-math--block"', '块级公式');
+  has(display, 'display="block"', '块级模式');
+  has(display, '<mfrac>', '分数结构');
+  has(display, 'data-line="1" data-end="3"', '块级公式带行号区间');
+
+  const oneLine = md.render('$$x^2$$');
+  has(oneLine, 'md-math--block', '同一行的 $$ 也是块级');
+
+  // 别把价格当公式
+  lacks(md.render('这件 $5 那件 $6'), '<math', '美元符号不误判成公式');
+  lacks(md.render('价格 $5.00'), '<math', '单个美元符号不误判');
+  has(md.render('价格 \\$5'), '$5', '转义的美元符号显示成 $5');
+  lacks(md.render('价格 \\$5 和 \\$6'), '<math', '转义后更不该误判');
+
+  // 代码里的 $ 不算公式
+  has(md.render('`$x$`'), '<code class="md-code">$x$</code>', '行内代码里的 $ 不算公式');
+  lacks(md.render('`$x$`'), '<math', '行内代码里的 $ 不算公式（不产生 math）');
+  lacks(md.render('```bash\necho $HOME\n```'), '<math', '代码块里的 $ 不算公式');
+
+  // 写坏了要退回原文，不能装作渲染成功
+  const bad = md.render('$$\n\\frac{1}{2\n$$');
+  has(bad, 'md-math-bad', '解析失败的公式有醒目标记');
+  has(bad, '\\frac{1}{2', '并把原文显示出来');
+
+  const unknown = md.render('$\\foobar x$');
+  has(unknown, 'data-unknown="foobar"', '没认出来的命令记在属性上');
+
+  lacks(md.render('$x$', { flavor: 'commonmark' }), '<math', '严格风格没有公式');
+  ok(md.mathAvailable, '公式模块已接入');
+});
+
+/* ------------------------------------------------------------ 图片与图库 */
+
+group('图片与图库解析', () => {
+  const gallery = { '照片.png': 'blob:local-1', '子目录/图.png': 'blob:local-2' };
+
+  const found = md.render('![假期](照片.png)', {
+    resolveImage: (src) => gallery[src] || null,
+  });
+  has(found, 'src="blob:local-1"', '图库里的图用本地地址');
+  has(found, 'data-src="照片.png"', '原文路径记在 data-src 上');
+  has(found, 'alt="假期"', 'alt 保留');
+
+  const inFolder = md.render('![](子目录/图.png)', { resolveImage: (src) => gallery[src] || null });
+  has(inFolder, 'src="blob:local-2"', '带目录的路径也能命中');
+
+  const missingImg = md.render('![缺失](没有的图.png)', { resolveImage: () => null });
+  has(missingImg, 'class="md-img-missing"', '找不到就渲染成明确的缺失占位');
+  has(missingImg, '没有的图.png', '把文件名显示出来');
+  has(missingImg, '图库里没有这张图', '并说明原因');
+
+  const external = md.render('![远程](https://a.dev/x.png)');
+  has(external, 'src="https://a.dev/x.png"', '外链图片直接用');
+  has(external, 'referrerpolicy="no-referrer"', '外链不带 referrer');
+
+  const dataUrl = md.render('![内联](data:image/png;base64,AAAA)');
+  has(dataUrl, 'src="data:image/png;base64,AAAA"', 'data:image 允许');
+
+  lacks(md.render('![坏](javascript:alert(1))'), '<img', '图片不认 javascript:');
+
+  const calls = [];
+  md.render('![a](https://a.dev/x.png) ![b](本地.png)', {
+    resolveImage: (src) => { calls.push(src); return null; },
+  });
+  eq(calls, ['本地.png'], '绝对地址不查图库，只有相对路径才查');
+
+  lacks(md.render('![x](某图.png)'), '<img', '没有图库回调时不假装有图');
+});
+
+/* ------------------------------------------------------------ 标题锚点 */
+
+group('标题锚点（目录导航要用）', () => {
+  const doc = md.render('# 一\n\n## 二\n\n### 三\n\n#### 四\n\n##### 五\n\n###### 六');
+  ['sec-1', 'sec-2', 'sec-3', 'sec-4', 'sec-5', 'sec-6'].forEach((id, idx) => {
+    has(doc, 'id="' + id + '"', `第 ${idx + 1} 个标题有锚点`);
+  });
+
+  const custom = md.render('## 安装说明 {#install}');
+  has(custom, 'id="install"', '自定义锚点生效');
+  has(custom, '>安装说明<', '锚点标记不出现在标题文字里');
+  lacks(custom, '{#install}', '锚点标记被剥掉');
+
+  const dup = md.render('## 甲 {#same}\n\n## 乙 {#same}');
+  has(dup, 'id="same"', '第一个用原锚点');
+  has(dup, 'id="same-2"', '重复的自动改名');
+
+  const strict = md.render('## 标题 {#x}', { flavor: 'commonmark' });
+  lacks(strict, 'id="x"', '严格风格不认自定义锚点');
+  has(strict, '{#x}', '那就当普通文字显示');
+
+  const bad = md.render('## 标题 {#不合法!}');
+  lacks(bad, 'id="不合法', '锚点只允许字母数字连字符，避免注入属性');
+
+  const link = md.render('跳到[安装](#install)');
+  has(link, 'href="#install"', '站内锚点链接');
+  lacks(link, 'target="_blank"', '站内锚点不要新开标签页');
+  has(md.render('[外链](https://a.dev)'), 'target="_blank"', '外链才新开标签页');
+});
+
+/* -------------------------------------------------- 整篇被围栏包住 */
+
+group('识别"整篇被一层围栏包住"', () => {
+  const a = md.detectWrappingFence('```md\n# 标题\n\n正文\n```');
+  ok(a, '三反引号包住能认出来');
+  eq(a.fence, '```', '记住围栏符号');
+  eq(a.info, 'md', '记住语言标注');
+  eq(a.inner, '# 标题\n\n正文', '取出里面的原文');
+
+  eq(md.detectWrappingFence('~~~\n内容\n~~~').fence, '~~~', '波浪号围栏');
+  eq(md.detectWrappingFence('```\n内容\n```\n').inner, '内容', '结尾有换行也算');
+  eq(md.detectWrappingFence('````\n里面的 ``` 不算一层\n````').fence, '````', '四个反引号时里面三个不算内层');
+
+  eq(md.detectWrappingFence('```md\n没收口'), null, '没闭合不算');
+  eq(md.detectWrappingFence('普通正文而已'), null, '没围栏不算');
+  eq(md.detectWrappingFence('```md\n内容\n```\n\n后面还有一段'), null, '围栏后面还有内容就不算"整篇"');
+  eq(md.detectWrappingFence(''), null, '空正文不算');
+  eq(md.detectWrappingFence(null), null, 'null 不算');
+  eq(md.detectWrappingFence('```\n```js\nconst a = 1;\n```\n```'), null, '里面还套着同长度的围栏就不拆');
+
+  // 拆出来之后应该是能正常排版的
+  const wrapped = md.detectWrappingFence('```md\n# 标题\n\n- 列表\n```');
+  const rendered = md.render(wrapped.inner);
+  has(rendered, '<h1', '拆出来的内容能当标题渲染');
+  has(rendered, '<ul', '拆出来的内容能当列表渲染');
+  lacks(rendered, 'md-codeblock', '拆出来后不再是代码块');
 });
 
 /* ---------------------------------------------------------------- 汇总 */

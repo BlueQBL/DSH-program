@@ -2,19 +2,24 @@
   "name": "markdown-notes",
   "version": "1.0.0",
   "private": true,
-  "description": "校样 · Markdown 笔记台（左写右排、代码高亮、LocalStorage 落盘，零依赖）",
+  "description": "校样 · Markdown 笔记台（左写右排、图片目录、公式脚注、大纲、多主题、LocalStorage 落盘，零依赖）",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/markdown.test.js && node test/store.test.js",
+    "test": "node test/markdown.test.js && node test/mathml.test.js && node test/zip.test.js && node test/images.test.js && node test/store.test.js",
     "test:markdown": "node test/markdown.test.js",
+    "test:mathml": "node test/mathml.test.js",
+    "test:zip": "node test/zip.test.js",
+    "test:images": "node test/images.test.js",
     "test:store": "node test/store.test.js"
   },
   "keywords": [
     "markdown",
     "notes",
     "localstorage",
+    "indexeddb",
     "syntax-highlight",
+    "mathml",
     "vanilla-js",
     "zero-dependency"
   ],

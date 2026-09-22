@@ -508,7 +508,18 @@
     };
   }
 
-  const DEFAULT_UI = { rail: 280, seam: 0.5, pane: 'write', sort: 'updated', follow: true };
+  const DEFAULT_UI = {
+    rail: 280,
+    seam: 0.5,
+    pane: 'write',
+    sort: 'updated',
+    follow: true,
+    theme: 'proof',
+    flavor: 'gfm',
+    tab: 'notes',
+  };
+
+  const SLUG = /^[a-z][\w-]{0,31}$/;
 
   function loadUI(storage) {
     const store = storage || createStorage();
@@ -521,6 +532,10 @@
         pane: ['notes', 'write', 'read'].indexOf(data.pane) >= 0 ? data.pane : DEFAULT_UI.pane,
         sort: SORTS.some(function (s) { return s.value === data.sort; }) ? data.sort : DEFAULT_UI.sort,
         follow: data.follow !== false,
+        // 主题与风格只校验形状（是不是个 slug），具体有没有这套主题由界面那边兜底
+        theme: typeof data.theme === 'string' && SLUG.test(data.theme) ? data.theme : DEFAULT_UI.theme,
+        flavor: typeof data.flavor === 'string' && SLUG.test(data.flavor) ? data.flavor : DEFAULT_UI.flavor,
+        tab: ['notes', 'outline', 'images'].indexOf(data.tab) >= 0 ? data.tab : DEFAULT_UI.tab,
       };
     } catch {
       return Object.assign({}, DEFAULT_UI);
@@ -577,8 +592,25 @@
           '',
           '```bash',
           'npm start        # 起本地静态服务',
-          'npm test         # 跑解析层测试',
+          'npm test         # 跑解析层、公式层、打包层、图片层测试',
           '```',
+          '',
+          '## 图片、公式、脚注',
+          '',
+          '图片可以直接**粘贴**（截图之后 Ctrl/Cmd+V）或拖进稿纸；',
+          '每篇笔记的图片都归到以标题命名的目录里，导出 ZIP 时就是真目录。',
+          '',
+          '行内公式写成 $E = mc^2$，块级公式单独一段：',
+          '',
+          '$$',
+          '\\int_{0}^{\\infty} e^{-x^2}\\,dx = \\frac{\\sqrt{\\pi}}{2}',
+          '$$',
+          '',
+          '公式会渲染成 MathML——不用加载任何字体或库，复制出去还是文字。',
+          '',
+          '需要补充说明的地方可以加脚注[^why]，引用处会自动编号，文末自动成列。',
+          '',
+          '[^why]: 脚注就是这么写的：正文里放 `[^why]`，文末写 `[^why]: 说明`。',
           '',
           '写完不用保存：停手 0.4 秒自动落盘，左下角会显示"已保存"。',
         ].join('\n'),
@@ -601,6 +633,17 @@
           '| 列表 | `- 项` / `1. 项` | 缩进两格即嵌套 |',
           '| 引用 | `> 引用` | 可嵌套 |',
           '| 分隔线 | `---` | 三个以上 |',
+          '| 图片 | `![说明](图.png)` | 粘贴或拖进来更省事 |',
+          '| 脚注 | `文字[^1]` | 文末写 `[^1]: 说明` |',
+          '| 行内公式 | `$e^{i\\pi}$` | 渲染成 MathML |',
+          '| 块级公式 | `$$ … $$` | 单独占一行起 |',
+          '',
+          '## 大纲、主题、导出',
+          '',
+          '- 左栏「大纲」页签会根据正文标题自动生成目录，点了就跳过去；',
+          '- 左栏「图片」页签是这篇笔记的图片目录，目录名跟着标题走；',
+          '- 「设置」里能换主题（校样 / 石墨 / 夜读 / 蓝图 / 苔原）和 Markdown 风格；',
+          '- 「导出 PDF」走浏览器打印，中文字体和公式都是矢量，能选中能搜索。',
           '',
           '## 常用代码块标注',
           '',
@@ -619,9 +662,10 @@
           '',
           '1. 笔记正文（Markdown 原文，不经任何加工）',
           '2. 标题、创建时间、最后修改时间',
-          '3. 界面偏好：侧栏宽度、左右分栏比例、排序方式',
+          '3. 界面偏好：侧栏宽度、分栏比例、排序方式、主题、Markdown 风格',
+          '4. 图片本体（存在 IndexedDB 里，不占 LocalStorage 的额度）',
           '',
-          '右上角可以导出成 `.md` 文件，或在侧栏底部整包备份成 JSON。',
+          '右上角可以导出成 `.md`；带图片的用旁边那个 ZIP。',
         ].join('\n'),
       },
     ];

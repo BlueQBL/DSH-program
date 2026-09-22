@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="proof">
+<head>
+<meta charset="utf-8">
+<title>打印金丝雀 · 校样</title>
+<link rel="stylesheet" href="../styles.css">
+</head>
+<body>
+<!--
+  开发用：不跑 JS，只用 styles.css 搭出和印张一样的那层结构。
+  用来分清"打印空白"到底是样式的问题还是应用脚本的问题：
+  这一页在窄窗口下能印出字，就说明样式没问题，问题在别处。
+-->
+<div class="app" data-pane="write">
+  <div class="workbench">
+    <section class="proof">
+      <div class="proof__head"><span class="label">印张</span></div>
+      <div class="proof__scroll">
+        <div class="page">
+          <span class="page__rule"></span>
+          <article class="page__body">
+            <h1 class="page__title">CANARY-TITLE</h1>
+            <p>CANARY-CONTENT 这一行应该出现在打印出来的 PDF 里。</p>
+            <pre class="md-codeblock"><code>CANARY-CODE const x = 1;</code></pre>
+          </article>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>读取探针报告 · 校样</title>
+<style>
+  body { margin: 0; background: #0d1117; color: #e4e8ef;
+         font: 12px/1.65 "IBM Plex Mono", Consolas, monospace; }
+  pre { margin: 0; padding: 16px 20px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<!--
+  开发用的小工具：把探针写进 localStorage 的报告读出来打进 DOM，
+  这样 shots.js 用 --dump-dom 就能取到它。
+  默认读流程探针的键，也可以用 ?key=mdprobe:edge 读别的。
+
+  为什么探针要跑真实时钟：IndexedDB、平滑滚动、CSS 过渡在虚拟时钟下都不准，
+  量出来的问题多半是假的（踩过：虚拟时钟下"页边括号没对齐"其实是过渡没走完）。
+-->
+<pre id="out">(空)</pre>
+<script>
+'use strict';
+var out = document.getElementById('out');
+var key = 'mdprobe:flow';
+try {
+  var m = /[?&]key=([^&]+)/.exec(location.search);
+  if (m) key = decodeURIComponent(m[1]);
+  out.textContent = localStorage.getItem(key) || '(空)';
+} catch (err) {
+  out.textContent = JSON.stringify({ summary: { crashed: '读不到报告：' + err.message } });
+}
+</script>
+</body>
+</html>
