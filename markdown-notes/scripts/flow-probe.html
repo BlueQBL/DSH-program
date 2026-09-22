@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>流程探针 · 校样</title>
+<style>
+  body { margin: 0; background: #0d1117; color: #e4e8ef;
+         font: 12px/1.65 "IBM Plex Mono", Consolas, monospace; }
+  pre { margin: 0; padding: 16px 20px; white-space: pre-wrap; }
+  iframe { position: fixed; left: -20000px; top: 0; border: 0; }
+</style>
+</head>
+<body>
+<!--
+  流程探针（开发用，不是应用的一部分）
+  把一个真实的 index.html 塞进 iframe，然后像用户那样动它：
+  打字、切笔记、搜索、点勾选框、点印张里的段落、删除再撤销。
+  每一步都断言，结果写进下面的报告节点（id=out）。
+  跑法见 scripts/shots.js（headless Chrome --dump-dom）。
+-->
+<iframe id="frame" src="../index.html" width="1440" height="900" title="被测页面"></iframe>
+<pre id="out">跑流程…</pre>
+
+<script>
+'use strict';
+
+const frame = document.getElementById('frame');
+const out = document.getElementById('out');
+const results = [];
+const errors = [];
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const round = (n) => Math.round(n * 10) / 10;
+
+function check(label, condition, detail) {
+  results.push({ step: label, ok: Boolean(condition), detail: detail === undefined ? '' : String(detail) });
+}
+
+function fire(el, type) {
+  el.dispatchEvent(new frame.contentWindow.Event(type, { bubbles: true }));
+}
+
+async function run() {
+  const win = frame.contentWindow;
+  const doc = frame.contentDocument;
+  const $ = (sel) => doc.querySelector(sel);
+  const $$ = (sel) => Array.prototype.slice.call(doc.querySelectorAll(sel));
+  const stored = () => JSON.parse(win.localStorage.getItem('markdown-notes/v1') || '{}');
+
+  // 关掉所有过渡/动画：否则量到的是过渡中间态（虚拟时钟下过渡可能根本不动），
+  // 那是探针的问题，不是界面的问题
+  const freeze = doc.createElement('style');
+  freeze.textContent = '*, *::before, *::after { transition: none !important; animation: none !important; }';
+  doc.head.appendChild(freeze);
+
+  await wait(900);
+
+  /* 0. 启动 */
+  check('启动：目录栏渲染出笔记', $$('.card').length === 2, $$('.card').length + ' 张卡片');
+  check('启动：编辑器有内容', ($('#editor') || {}).value.length > 100);
+  check('启动：印张渲染出块', $$('#preview [data-line]').length > 10, $$('#preview [data-line]').length + ' 个块');
+  check('启动：印张没有被滚过头', ($('#proofScroll') || {}).scrollTop === 0, 'scrollTop=' + ($('#proofScroll') || {}).scrollTop);
+  check('启动：代码块高亮生效', $$('#preview .tk').length > 5, $$('#preview .tk').length + ' 个 token');
+
+  const copyBtn = $$('.md-codeblock__copy')[0];
+  check('启动：代码卡片带复制按钮', Boolean(copyBtn));
+  if (copyBtn) {
+    copyBtn.click();
+    // 剪贴板 API 没响应时有 800ms 兜底判决，所以这里要等够
+    await wait(1400);
+    check('代码卡片：点复制给出反馈', $$('.toast').length > 0,
+      $$('.toast').map((t) => t.textContent).join(' / ').slice(0, 40));
+  }
+
+  /* 1. 打字 → 实时预览 */
+  const editor = $('#editor');
+  const before = editor.value;
+  editor.value = before + '\n\n## 探针小标题\n\n探针写进去的一段话。\n';
+  fire(editor, 'input');
+
+  check('打字后：状态栏给出保存反馈',
+    /待保存|已保存/.test($('#saveState').textContent),
+    $('#saveState').textContent);
+
+  await wait(300);
+  const h2 = $$('#preview h2').find((el) => el.textContent.indexOf('探针小标题') >= 0);
+  check('实时预览：新标题出现在印张上', Boolean(h2));
+  const wantLine = editor.value.slice(0, editor.value.indexOf('## 探针小标题')).split('\n').length;
+  check('实时预览：行号映射正确（光标联动的前提）',
+    h2 && Number(h2.dataset.line) === wantLine,
+    h2 ? 'data-line=' + h2.dataset.line + ' 期望 ' + wantLine : '没找到');
+
+  await wait(700);
+  check('落盘：状态变成已保存', ($('#saveState').textContent || '').indexOf('已保存') >= 0, $('#saveState').textContent);
+  const saved = stored();
+  const active = (saved.notes || []).find((n) => n.id === saved.activeId);
+  check('落盘：LocalStorage 里真的有这段话',
+    active && active.body.indexOf('探针小标题') >= 0,
+    active ? '正文 ' + active.body.length + ' 字' : '没读到');
+
+  /* 2. 光标 ↔ 印张 */
+  const paraLine = editor.value.slice(0, editor.value.indexOf('探针写进去的一段话')).split('\n').length;
+  const paraStart = editor.value.split('\n').slice(0, paraLine - 1).join('\n').length + (paraLine > 1 ? 1 : 0);
+  editor.setSelectionRange(paraStart + 2, paraStart + 2);
+  fire(editor, 'click');
+  await wait(250);
+
+  const cursorBlock = $('#preview .is-cursor');
+  const tick = $('#tickCursor');
+  check('光标联动：印张里点亮了对应段落',
+    cursorBlock && Number(cursorBlock.dataset.line) === paraLine,
+    cursorBlock ? cursorBlock.tagName + ' data-line=' + cursorBlock.dataset.line + ' 期望 ' + paraLine : '没有点亮的块');
+  check('光标联动：页边红括号显示', tick && tick.className.indexOf('is-on') >= 0);
+  if (cursorBlock) {
+    const br = cursorBlock.getBoundingClientRect();
+    const tr = tick.getBoundingClientRect();
+    check('光标联动：括号与段落对齐',
+      Math.abs(br.top - tr.top) <= 2 && Math.abs(br.height - tr.height) <= 2,
+      'block ' + round(br.top) + '/' + round(br.height) + '  tick ' + round(tr.top) + '/' + round(tr.height) +
+      '  | tick.style.top=' + tick.style.top + ' tick.style.height=' + tick.style.height +
+      '  block.offsetTop=' + cursorBlock.offsetTop + ' block.offsetHeight=' + cursorBlock.offsetHeight +
+      '  offsetParent=' + (cursorBlock.offsetParent ? cursorBlock.offsetParent.className || cursorBlock.offsetParent.tagName : 'null') +
+      '  page.scrollTop=' + $('#proofScroll').scrollTop);
+  }
+
+  /* 3. 反向：点印张里的块 → 光标回源码 */
+  const target = $$('#preview p')[1] || $$('#preview [data-line]')[2];
+  const targetLine = Number(target.dataset.line);
+  target.click();
+  await wait(120);
+  const caretLine = editor.value.slice(0, editor.selectionStart).split('\n').length;
+  check('反向定位：点印张的块，光标跳到那一行',
+    caretLine === targetLine && doc.activeElement === editor,
+    '光标在第 ' + caretLine + ' 行，目标第 ' + targetLine + ' 行');
+
+  /* 4. 勾选框回写原文 */
+  const box = $$('#preview .md-check').find((el) => !el.checked);
+  const lineOfBox = Number(box.dataset.toggleLine);
+  const lineBefore = editor.value.split('\n')[lineOfBox - 1];
+  box.click();
+  await wait(200);
+  const lineAfter = $('#editor').value.split('\n')[lineOfBox - 1];
+  check('勾选框：点印张的勾会改回左边原文',
+    /\[[xX]\]/.test(lineAfter) && /\[ \]/.test(lineBefore),
+    '"' + lineBefore.trim() + '" → "' + lineAfter.trim() + '"');
+  check('勾选框：改完立刻落盘',
+    (stored().notes.find((n) => n.id === stored().activeId) || {}).body.split('\n')[lineOfBox - 1].indexOf('[x]') >= 0);
+
+  /* 5. 搜索 */
+  const search = $('#search');
+  search.value = '速查';
+  fire(search, 'input');
+  await wait(150);
+  check('搜索：筛出命中项', $$('.card').length === 1, $$('.card').length + ' 张卡片');
+  check('搜索：关键词被标出来', $$('.card mark').length >= 1, $$('.card mark').length + ' 处标记');
+  const miss = $('#search');
+  miss.value = '压根不存在的词';
+  fire(miss, 'input');
+  await wait(150);
+  check('搜索：查不到时给出空状态', Boolean($('.rail__empty')), $('.rail__empty') ? $('.rail__empty').textContent.slice(0, 18) : '没有空状态');
+  $('#searchClear').click();
+  await wait(150);
+  check('搜索：清空后恢复全部', $$('.card').length === 2, $$('.card').length + ' 张卡片');
+
+  /* 6. 切换笔记 */
+  const firstBody = $('#editor').value;
+  const other = $$('.card').find((c) => c.dataset.active !== 'true');
+  other.querySelector('.card__open').click();
+  await wait(250);
+  check('切换：编辑器换成了另一篇', $('#editor').value !== firstBody);
+  check('切换：卡片选中态跟着走',
+    $('.card[data-active="true"]').dataset.id === other.dataset.id);
+  check('切换：印张重排为新笔记', $$('#preview [data-line]').length > 5);
+
+  /* 7. 删除 → 撤销 */
+  const activeId = $('.card[data-active="true"]').dataset.id;
+  const titleOfActive = $('.card[data-active="true"] .card__title').textContent.trim();
+  const cardsBefore = $$('.card').length;
+  $('.card[data-active="true"] .card__del').click();
+  await wait(250);
+  check('删除：卡片少一张', $$('.card').length === cardsBefore - 1, $$('.card').length + ' 张');
+  check('删除：LocalStorage 里也没了',
+    !stored().notes.some((n) => n.id === activeId));
+  const undo = $('.toast .toast__act');
+  check('删除：给出撤销入口', Boolean(undo), undo ? undo.textContent : '没有撤销按钮');
+  if (undo) {
+    undo.click();
+    await wait(250);
+    check('撤销：笔记回来了', $$('.card').length === cardsBefore && stored().notes.some((n) => n.id === activeId));
+    check('撤销：标题还是原来那篇',
+      $$('.card').some((c) => c.querySelector('.card__title').textContent.trim() === titleOfActive));
+  }
+
+  /* 8. 新建 */
+  $('#newNote').click();
+  await wait(300);
+  check('新建：多了一张卡片', $$('.card').length === cardsBefore + 1, $$('.card').length + ' 张');
+  check('新建：标题输入框拿到焦点', doc.activeElement === $('#title'));
+  check('新建：正文是空的', $('#editor').value === '');
+  check('新建：印张给出"还没写"的提示',
+    Boolean($('#preview .page__hint')) && $$('#preview [data-line]').length === 0,
+    $('#preview').textContent.trim().slice(0, 20));
+  check('新建：立刻落盘', stored().notes.length === cardsBefore + 1);
+
+  /* 9. 工具栏 */
+  $('#editor').value = '加粗测试';
+  $('#editor').setSelectionRange(0, 2);
+  fire($('#editor'), 'input');
+  doc.querySelector('[data-md="bold"]').click();
+  await wait(300);
+  check('工具栏：选中文字加粗', $('#editor').value === '**加粗**测试', $('#editor').value);
+  check('工具栏：印张里出现 strong', Boolean($('#preview strong')), $('#preview').innerHTML.length + ' 字符的 HTML');
+
+  /* 10. 把笔记全删光 → 两栏都该让位给空状态 */
+  let guard = 0;
+  while ($('.card') && guard < 10) {
+    $('.card .card__del').click();
+    guard += 1;
+    await wait(160);
+  }
+  await wait(200);
+  check('删光：目录栏给出空状态', Boolean($('.rail__empty')), $('.rail__empty') ? $('.rail__empty').textContent.slice(0, 14) : '无');
+  check('删光：稿纸栏让位给邀请', $('#sourceBlank').hidden === false);
+  check('删光：印张栏让位给邀请', $('#proofBlank').hidden === false);
+  check('删光：LocalStorage 里确实空了', (stored().notes || []).length === 0, (stored().notes || []).length + ' 篇');
+
+  /* 11. 分栏与偏好 */
+  const app = $('.app');
+  doc.querySelector('[data-sort="title"]').click();
+  await wait(120);
+  check('排序：按钮状态切换', doc.querySelector('[data-sort="title"]').getAttribute('aria-pressed') === 'true');
+  const ui = JSON.parse(win.localStorage.getItem('markdown-notes/ui/v1') || '{}');
+  check('偏好：排序方式写进 LocalStorage', ui.sort === 'title', JSON.stringify(ui));
+  const follow = $('#follow');
+  follow.checked = false;
+  follow.dispatchEvent(new win.Event('change', { bubbles: true }));
+  await wait(120);
+  check('偏好：跟随光标开关可关',
+    JSON.parse(win.localStorage.getItem('markdown-notes/ui/v1') || '{}').follow === false);
+  check('窄屏切换条：宽屏下隐藏',
+    win.getComputedStyle($('.panes')).display === 'none', win.getComputedStyle($('.panes')).display);
+
+  void app;
+}
+
+frame.addEventListener('load', () => {
+  win_err_hook();
+  setTimeout(() => {
+    run().then(() => {
+      const failed = results.filter((r) => !r.ok);
+      out.textContent = JSON.stringify({
+        summary: { total: results.length, passed: results.length - failed.length, failed: failed.length },
+        windowErrors: errors,
+        results: results,
+      }, null, 1);
+    }).catch((err) => {
+      out.textContent = JSON.stringify({
+        summary: { total: results.length, crashed: String(err && err.stack ? err.stack : err) },
+        results: results,
+      }, null, 1);
+    });
+  }, 400);
+});
+
+function win_err_hook() {
+  try {
+    frame.contentWindow.addEventListener('error', (e) => errors.push(String(e.message)));
+    frame.contentWindow.addEventListener('unhandledrejection', (e) => errors.push('promise: ' + e.reason));
+  } catch { /* 挂不上就算了 */ }
+}
+
+setTimeout(() => {
+  if (out.textContent === '跑流程…') {
+    out.textContent = JSON.stringify({ summary: { crashed: 'iframe 没在 15 秒内 load' } }, null, 1);
+  }
+}, 15000);
+</script>
+</body>
+</html>

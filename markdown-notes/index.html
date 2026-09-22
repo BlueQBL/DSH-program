@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>校样 · Markdown 笔记台</title>
+<meta name="description" content="左边写 Markdown，右边实时看到版面。笔记存在浏览器本地，代码块带语法高亮。">
+<meta name="color-scheme" content="dark light">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23141922'/%3E%3Cpath d='M12 8v16M12 8h9M12 16h6M12 24h9' stroke='%23D93F2B' stroke-width='2.6' stroke-linecap='round' fill='none'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="app" id="app" data-pane="write">
+
+  <!-- 窄屏时的窗格切换；宽屏隐藏 -->
+  <nav class="panes" aria-label="切换窗格">
+    <button type="button" class="panes__btn" data-pane-btn="notes">
+      笔记<span class="panes__count" id="paneCount">0</span>
+    </button>
+    <button type="button" class="panes__btn" data-pane-btn="write">编写</button>
+    <button type="button" class="panes__btn" data-pane-btn="read">阅读</button>
+  </nav>
+
+  <div class="workbench" id="workbench">
+
+    <!-- ① 目录栏 ------------------------------------------------------- -->
+    <aside class="rail" aria-label="笔记列表">
+      <div class="rail__head">
+        <div class="mark">
+          <span class="mark__tick" aria-hidden="true"></span>
+          <span class="mark__name">校样</span>
+          <span class="mark__sub">Markdown 笔记台</span>
+        </div>
+        <button type="button" class="btn btn--key" id="newNote" title="新建笔记（Ctrl/Cmd + N）">
+          <span aria-hidden="true">＋</span> 新建
+        </button>
+      </div>
+
+      <div class="rail__search">
+        <label class="sr-only" for="search">搜索笔记</label>
+        <input id="search" class="search" type="search" autocomplete="off" spellcheck="false"
+               placeholder="搜索标题与正文…" title="搜索（Ctrl/Cmd + K）">
+        <button type="button" class="search__clear" id="searchClear" aria-label="清除搜索" hidden>×</button>
+      </div>
+
+      <div class="rail__meta">
+        <span class="rail__count" id="railCount">0 篇</span>
+        <div class="sorts" role="group" aria-label="排序方式">
+          <button type="button" class="sort" data-sort="updated">最近修改</button>
+          <button type="button" class="sort" data-sort="created">创建时间</button>
+          <button type="button" class="sort" data-sort="title">标题</button>
+        </div>
+      </div>
+
+      <ul class="cards" id="cards"></ul>
+
+      <div class="rail__foot">
+        <span class="store" id="storeInfo">—</span>
+        <span class="rail__acts">
+          <button type="button" class="linkbtn" id="exportAll">备份</button>
+          <button type="button" class="linkbtn" id="importBtn">导入</button>
+        </span>
+      </div>
+    </aside>
+
+    <!-- ② 稿纸：写 Markdown -------------------------------------------- -->
+    <section class="source" aria-label="Markdown 编辑器">
+      <div class="source__head">
+        <label class="sr-only" for="title">笔记标题</label>
+        <input id="title" class="title" type="text" placeholder="未命名笔记" autocomplete="off"
+               spellcheck="false" maxlength="120">
+        <div class="source__meta">
+          <span class="source__stamp" id="stamp">—</span>
+          <span class="source__acts">
+            <button type="button" class="linkbtn" id="copyNote" title="复制 Markdown 原文">复制</button>
+            <button type="button" class="linkbtn" id="exportNote" title="导出为 .md 文件">导出 .md</button>
+            <button type="button" class="linkbtn linkbtn--danger" id="deleteNote"
+                    title="删除这篇笔记（可撤销）">删除</button>
+          </span>
+        </div>
+      </div>
+
+      <div class="tools" role="toolbar" aria-label="插入 Markdown 语法">
+        <button type="button" class="tool" data-md="h2" title="二级标题">H2</button>
+        <button type="button" class="tool" data-md="bold" title="加粗（Ctrl/Cmd + B）">B</button>
+        <button type="button" class="tool" data-md="italic" title="斜体（Ctrl/Cmd + I）">I</button>
+        <button type="button" class="tool" data-md="code" title="行内代码（Ctrl/Cmd + E）">&lt;/&gt;</button>
+        <button type="button" class="tool" data-md="fence" title="代码块（带语法高亮）">代码块</button>
+        <button type="button" class="tool" data-md="link" title="链接">链接</button>
+        <button type="button" class="tool" data-md="list" title="无序列表">列表</button>
+        <button type="button" class="tool" data-md="quote" title="引用">引用</button>
+        <button type="button" class="tool" data-md="table" title="表格">表格</button>
+      </div>
+
+      <label class="sr-only" for="editor">Markdown 正文</label>
+      <textarea id="editor" class="editor" spellcheck="false" wrap="soft"
+                placeholder="从这里开始写。&#10;&#10;# 标题&#10;- 列表&#10;```js 代码块会高亮```"></textarea>
+
+      <div class="status">
+        <span class="status__save" id="saveState" role="status" aria-live="polite">—</span>
+        <span class="status__gap"></span>
+        <span class="status__cell" id="caretState">行 1 · 列 1</span>
+        <span class="status__cell" id="countState">0 字</span>
+      </div>
+
+      <div class="blank" id="sourceBlank" hidden>
+        <p class="blank__title">还没有打开任何笔记</p>
+        <p class="blank__hint">新建一篇，或者从左边的目录里挑一篇。</p>
+        <button type="button" class="btn btn--key" id="blankNew">＋ 新建笔记</button>
+      </div>
+    </section>
+
+    <!-- ③ 中缝：可拖动分隔 -------------------------------------------- -->
+    <div class="seam" id="seam" role="separator" aria-orientation="vertical" tabindex="0"
+         aria-label="调整稿纸与印张的宽度" title="拖动调整宽度，双击回到对半">
+      <span class="seam__grip" aria-hidden="true"></span>
+    </div>
+
+    <!-- ④ 印张：渲染预览 ---------------------------------------------- -->
+    <section class="proof" aria-label="预览">
+      <div class="proof__head">
+        <span class="label">印张</span>
+        <label class="switch" title="打字时让印张跟着光标走">
+          <input type="checkbox" id="follow" checked>
+          <span>跟随光标</span>
+        </label>
+      </div>
+      <div class="proof__scroll" id="proofScroll">
+        <div class="page" id="page">
+          <span class="page__rule" aria-hidden="true"></span>
+          <span class="tick tick--hover" id="tickHover" aria-hidden="true"></span>
+          <span class="tick tick--cursor" id="tickCursor" aria-hidden="true"></span>
+          <article class="page__body" id="preview"></article>
+        </div>
+      </div>
+      <div class="blank" id="proofBlank" hidden>
+        <p class="blank__title">印张还空着</p>
+        <p class="blank__hint">左边写下第一行，这里就会排出版面。</p>
+      </div>
+    </section>
+
+  </div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+<input type="file" id="fileInput" accept=".json,.md,.markdown,.txt,application/json,text/markdown,text/plain" hidden>
+
+<noscript>
+  <p class="noscript">这个应用需要 JavaScript 才能实时渲染 Markdown。</p>
+</noscript>
+
+<script src="js/markdown.js"></script>
+<script src="js/store.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

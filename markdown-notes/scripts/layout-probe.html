@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>版面探针 · 校样</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { margin: 0; background: #0d1117; color: #e4e8ef;
+         font: 12px/1.65 "IBM Plex Mono", Consolas, monospace; }
+  pre { margin: 0; padding: 16px 20px; white-space: pre-wrap; }
+  iframe { position: fixed; left: -20000px; top: 0; border: 0; }
+</style>
+</head>
+<body>
+<!--
+  版面探针（开发用，不是应用的一部分）
+  把 index.html 塞进一个 1600×1000 的 iframe 里，等它渲染完，
+  然后把三栏的几何、字体、颜色、溢出情况全部量一遍，打进 <pre>。
+  用 headless Chrome 的 --dump-dom 取出来看数字：
+    node scripts/shots.js
+-->
+<iframe id="frame" src="../index.html" width="1600" height="1000" title="被测页面"></iframe>
+<pre id="out">测量中…</pre>
+
+<script>
+'use strict';
+
+const frame = document.getElementById('frame');
+const out = document.getElementById('out');
+
+const round = (n) => Math.round(n * 10) / 10;
+const box = (el) => {
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return { x: round(r.x), y: round(r.y), w: round(r.width), h: round(r.height), right: round(r.right), bottom: round(r.bottom) };
+};
+
+function measure() {
+  const doc = frame.contentDocument;
+  const win = frame.contentWindow;
+  const report = { viewport: { w: win.innerWidth, h: win.innerHeight }, notes: [], problems: [] };
+
+  if (!doc || !doc.body) { out.textContent = 'iframe 读不到内容'; return; }
+  const q = (sel) => doc.querySelector(sel);
+
+  const rail = q('.rail');
+  const source = q('.source');
+  const seam = q('.seam');
+  const proof = q('.proof');
+  const page = q('.page');
+  const preview = q('#preview');
+  const previewH1 = q('#preview h1');
+  const codeblock = q('.md-codeblock');
+  const tk = doc.querySelectorAll('.tk');
+  const status = q('.status');
+  const editor = q('#editor');
+  const tick = q('#tickCursor');
+  const cursorBlock = q('#preview .is-cursor');
+  const proofScroll = q('#proofScroll');
+
+  report.columns = {
+    rail: box(rail), source: box(source), seam: box(seam), proof: box(proof),
+    sum: rail && source && seam && proof
+      ? round(rail.getBoundingClientRect().width + source.getBoundingClientRect().width +
+              seam.getBoundingClientRect().width + proof.getBoundingClientRect().width)
+      : null,
+  };
+
+  report.content = {
+    cards: doc.querySelectorAll('.card').length,
+    activeCard: doc.querySelectorAll('.card[data-active="true"]').length,
+    blocks: preview ? preview.querySelectorAll('[data-line]').length : 0,
+    codeblocks: doc.querySelectorAll('.md-codeblock').length,
+    tokens: tk.length,
+    taskBoxes: doc.querySelectorAll('.md-check').length,
+    tables: doc.querySelectorAll('.md-table table').length,
+    h1: previewH1 ? previewH1.textContent : null,
+    editorChars: editor ? editor.value.length : 0,
+    saveState: q('#saveState') ? q('#saveState').textContent : null,
+    countState: q('#countState') ? q('#countState').textContent : null,
+    storeInfo: q('#storeInfo') ? q('#storeInfo').textContent : null,
+  };
+
+  report.boxes = {
+    page: box(page), preview: box(preview), h1: box(previewH1),
+    codeblock: box(codeblock), status: box(status), editor: box(editor),
+    tick: box(tick), cursorBlock: box(cursorBlock),
+  };
+
+  const cs = (el, prop) => (el ? win.getComputedStyle(el)[prop] : null);
+  report.style = {
+    fontsStatus: doc.fonts ? doc.fonts.status : 'n/a',
+    plexLoaded: doc.fonts ? doc.fonts.check('13px "IBM Plex Mono"') : null,
+    newsreaderLoaded: doc.fonts ? doc.fonts.check('17px "Newsreader"') : null,
+    bodyFont: cs(doc.body, 'fontFamily'),
+    previewFont: cs(preview, 'fontFamily'),
+    previewSize: cs(preview, 'fontSize'),
+    previewLine: cs(preview, 'lineHeight'),
+    railBg: cs(rail, 'backgroundColor'),
+    sourceBg: cs(source, 'backgroundColor'),
+    proofBg: cs(proof, 'backgroundColor'),
+    cursorBlockBg: cs(cursorBlock, 'backgroundColor'),
+    tickOn: tick ? tick.className.indexOf('is-on') >= 0 : null,
+    accent: win.getComputedStyle(doc.documentElement).getPropertyValue('--pencil').trim(),
+  };
+
+  /* 溢出与错位检查：这些是肉眼最容易漏、后果又最难看的问题 */
+  const vw = win.innerWidth;
+  if (rail && proof) {
+    const gap = rail.getBoundingClientRect().width;
+    if (Math.abs(report.columns.sum - vw) > 1.5) {
+      report.problems.push('三栏宽度之和 ' + report.columns.sum + ' ≠ 视口宽 ' + vw);
+    }
+    if (gap < 200) report.problems.push('目录栏太窄：' + round(gap));
+  }
+  if (doc.documentElement.scrollWidth > vw + 1) {
+    report.problems.push('横向溢出：scrollWidth=' + doc.documentElement.scrollWidth + ' > ' + vw);
+  }
+  if (preview && proof) {
+    const pr = preview.getBoundingClientRect();
+    Array.prototype.forEach.call(preview.querySelectorAll('[data-line]'), (el) => {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.right > pr.right + 1) {
+        report.problems.push('块超出印张版心：' + el.tagName + ' right=' + round(r.right) + ' > ' + round(pr.right));
+      }
+      if (r.height === 0) report.problems.push('块高度为 0：' + el.tagName);
+    });
+  }
+  if (codeblock && page) {
+    const cr = codeblock.getBoundingClientRect();
+    const pg = page.getBoundingClientRect();
+    if (cr.left < pg.left) report.problems.push('代码卡片跑到印张左边以外');
+  }
+  if (tick && cursorBlock) {
+    const tr = tick.getBoundingClientRect();
+    const br = cursorBlock.getBoundingClientRect();
+    if (!report.style.tickOn) report.problems.push('光标记号没显示');
+    else if (Math.abs(tr.top - br.top) > 2 || Math.abs(tr.height - br.height) > 2) {
+      report.problems.push('光标记号与块不对齐：tick=' + round(tr.top) + '/' + round(tr.height) +
+        ' block=' + round(br.top) + '/' + round(br.height));
+    }
+  }
+  if (proof && proof.getBoundingClientRect().height <= 0) report.problems.push('印张栏高度为 0');
+  if (!report.content.cards) report.problems.push('目录栏一条笔记都没有');
+
+  // 印张该从版心上沿开始：被"跟随光标"顶到屏幕外就是 bug
+  if (previewH1 && proofScroll) {
+    const hr = previewH1.getBoundingClientRect();
+    const sr = proofScroll.getBoundingClientRect();
+    if (hr.top < sr.top - 1) {
+      report.problems.push('印张顶部被滚过头：h1.top=' + round(hr.top) + ' < 容器 ' + round(sr.top));
+    }
+    if (proofScroll.scrollTop > 1 && !report.content.blocks) {
+      report.problems.push('空文档却滚动了印张');
+    }
+  }
+
+  // 目录栏的标题不该被挤到看不见：内容宽超过可视宽就是截断
+  Array.prototype.forEach.call(doc.querySelectorAll('.card__title, .card__meta, .status__cell'), (el) => {
+    if (el.scrollWidth > el.clientWidth + 2) {
+      report.problems.push('文字被截断：' + el.className + ' (' + el.scrollWidth + ' > ' + el.clientWidth + ')');
+    }
+  });
+
+  out.textContent = JSON.stringify(report, null, 1);
+}
+
+frame.addEventListener('load', () => setTimeout(measure, 800));
+setTimeout(() => {
+  if (out.textContent === '测量中…') out.textContent = JSON.stringify({ problems: ['iframe 没在 8 秒内 load 完成'] });
+}, 8000);
+</script>
+</body>
+</html>
