@@ -337,10 +337,26 @@
     return (base || '未命名笔记').slice(0, 60);
   }
 
+  /**
+   * 正文第一个块就是一级标题吗？
+   *
+   * 这是"标题字段"和"印张上那一行标题"之间唯一的判据，两处都用它：
+   * · 印张要不要在正文前面排出标题字段的字；
+   * · 导出 .md 时要不要把标题补成 `# ...`。
+   * 判据一致，才能保证"印张上看到的第一行标题"和"导出文件里的第一个 H1"永远是同一个。
+   *
+   * 只认一个井号（`## 小标题` 不算），因为只有一级标题才是文档标题；
+   * 井号后不要求空格（照顾中文写法），但必须跟了字。
+   */
+  function bodyStartsWithH1(body) {
+    const first = String(body == null ? '' : body).replace(/^\s+/, '').split('\n')[0];
+    return /^#(?!#)[ \t]*\S/.test(first);
+  }
+
   function toMarkdown(note) {
     const title = (note.title || '').trim() || '未命名笔记';
     const body = note.body || '';
-    const head = body.trimStart().startsWith('#') ? '' : '# ' + title + '\n\n';
+    const head = bodyStartsWithH1(body) ? '' : '# ' + title + '\n\n';
     return head + body.replace(/\s+$/, '') + '\n';
   }
 
@@ -531,9 +547,10 @@
         createdAt: ts - 120000,
         updatedAt: ts - 1000,
         body: [
-          '# 欢迎，这是一张校样',
-          '',
           '左边是**稿纸**，右边是**印张**：你敲下的每一行，右边立刻按版面排好。',
+          '',
+          '标题框里的字就是这篇的标题，它会排成印张最上面那一行——',
+          '所以正文里不必再写一遍；万一写了（开头就是 `# 标题`），印张也不会重复排两次。',
           '',
           '## 它认得这些',
           '',
@@ -650,6 +667,7 @@
     searchNotes: searchNotes,
 
     toMarkdown: toMarkdown,
+    bodyStartsWithH1: bodyStartsWithH1,
     toBackup: toBackup,
     parseBackup: parseBackup,
 

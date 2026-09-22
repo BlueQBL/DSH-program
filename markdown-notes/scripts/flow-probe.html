@@ -211,6 +211,36 @@ async function run() {
   check('工具栏：选中文字加粗', $('#editor').value === '**加粗**测试', $('#editor').value);
   check('工具栏：印张里出现 strong', Boolean($('#preview strong')), $('#preview').innerHTML.length + ' 字符的 HTML');
 
+  /* 9.5 标题：编辑页有标题，印张上也得有 */
+  const titleInput = $('#title');
+  titleInput.value = '探针标题';
+  fire(titleInput, 'input');
+  await wait(300);
+  let pageTitle = $('#preview .page__title');
+  check('标题：正文没写标题时，印张把标题框的字排出来',
+    Boolean(pageTitle) && pageTitle.textContent.trim() === '探针标题',
+    pageTitle ? '「' + pageTitle.textContent.trim() + '」' : '印张上没有标题');
+  check('标题：排在正文最前面',
+    Boolean(pageTitle) && $('#preview').firstElementChild === pageTitle);
+  if (pageTitle) {
+    pageTitle.click();
+    await wait(120);
+    check('标题：点印张上的标题，光标回到标题框',
+      doc.activeElement === titleInput,
+      String(doc.activeElement && doc.activeElement.id));
+  }
+
+  $('#editor').value = '# 正文里的一级标题\n\n正文';
+  fire($('#editor'), 'input');
+  await wait(300);
+  pageTitle = $('#preview .page__title');
+  check('标题：正文自带一级标题时不再重复排一次',
+    !pageTitle && $('#preview h1') && $('#preview h1').textContent.indexOf('正文里的一级标题') >= 0,
+    $('#preview').textContent.trim().slice(0, 24));
+  check('标题：这种时候导出的 .md 不会多插一行（第一行就是正文的标题）',
+    $('#editor').value.split('\n')[0] === '# 正文里的一级标题',
+    $('#editor').value.split('\n')[0]);
+
   /* 10. 把笔记全删光 → 两栏都该让位给空状态 */
   let guard = 0;
   while ($('.card') && guard < 10) {

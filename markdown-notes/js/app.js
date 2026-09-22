@@ -404,6 +404,20 @@
 
   /* -------------------------------------------------------------- 印张 */
 
+  /**
+   * 印张顶部那一行标题。
+   *
+   * 标题是单独一个输入框，不属于正文，所以渲染时要在正文前面排出来——
+   * 否则"编辑页有标题、预览页没有"就成了两套说法。
+   * 正文自己以一级标题开头时就不排，免得同一句话出现两次；
+   * 判据和导出 .md 用的是同一个函数，印张看到什么、导出就是什么。
+   */
+  function titleHeadHtml(note) {
+    const title = (note.title || '').trim();
+    if (!title || store.bodyStartsWithH1(note.body)) return '';
+    return '<h1 class="page__title" data-title="1">' + md.renderInline(title) + '</h1>';
+  }
+
   function renderProof() {
     const note = activeNote();
     const empty = !note;
@@ -418,9 +432,9 @@
       return;
     }
 
-    const html = md.render(note.body);
     // 空笔记给一句提示，但别让它变成"正文"——所以不带 data-line，光标联动会忽略它
-    const next = html || '<p class="page__hint">左边的第一行会排在这里。</p>';
+    const next = (titleHeadHtml(note) + md.render(note.body)) ||
+      '<p class="page__hint">左边的第一行会排在这里。</p>';
     if (dom.preview.innerHTML !== next) dom.preview.innerHTML = next;
     state.cursorEl = null;
     syncCursor(false);
@@ -1026,12 +1040,18 @@
       const box = e.target.closest('[data-toggle-line]');
       if (box) { toggleTask(Number(box.dataset.toggleLine)); return; }
       if (e.target.closest('a')) return; // 链接交给浏览器
+      // 印张上的标题不属于正文，没有源码行可跳，点它就把光标交给标题框
+      if (e.target.closest('[data-title]')) {
+        dom.title.focus();
+        dom.title.select();
+        return;
+      }
       const block = e.target.closest('[data-line]');
       if (block) jumpToLine(Number(block.dataset.line));
     });
 
     dom.preview.addEventListener('mouseover', (e) => {
-      const block = e.target.closest('[data-line]');
+      const block = e.target.closest('[data-line], [data-title]');
       if (!block || block === state.cursorEl) { dom.tickHover.classList.remove('is-on'); return; }
       if (state.hoverEl === block) return;
       state.hoverEl = block;

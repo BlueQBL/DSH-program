@@ -890,6 +890,9 @@ button { cursor: pointer; }
 
 .page__body [data-line] { cursor: text; }
 
+/* 印张顶部那一行标题：来自标题框，不是正文的一部分（点它会把光标交回标题框） */
+.page__title { cursor: text; }
+
 /* 空笔记的邀请：是提示，不是正文 */
 .page__hint {
   margin: 0;

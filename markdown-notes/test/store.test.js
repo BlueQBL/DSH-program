@@ -26,6 +26,10 @@ function ok(value, label) {
   eq(Boolean(value), true, label);
 }
 
+function no(value, label) {
+  eq(Boolean(value), false, label);
+}
+
 function has(text, needle, label) {
   if (String(text).indexOf(needle) >= 0) pass += 1;
   else failures.push(`${label}\n    应包含 ${JSON.stringify(needle)}\n    实际 ${JSON.stringify(text)}`);
@@ -292,8 +296,30 @@ group('导出 Markdown', () => {
   const untitled = store.normalizeNote({ title: '  ', body: '正文' });
   eq(store.toMarkdown(untitled), '# 未命名笔记\n\n正文\n', '无标题时用兜底标题');
 
+  // 二级标题不是文档标题：标题字段不能被悄悄丢掉
+  const h2 = store.normalizeNote({ title: '标题', body: '## 小标题\n\n正文' });
+  eq(store.toMarkdown(h2), '# 标题\n\n## 小标题\n\n正文\n', '正文以二级标题开头时仍要补上标题');
+
   eq(store.slugify('a/b:c*d?e"f<g>h|i'), 'a-b-c-d-e-f-g-h-i', '文件名里的非法字符被替换');
   eq(store.slugify('   '), '未命名笔记', '空标题兜底');
+});
+
+group('标题归属判据（印张与导出共用）', () => {
+  ok(store.bodyStartsWithH1('# 标题'), '一个井号算一级标题');
+  ok(store.bodyStartsWithH1('#标题'), '中文写法：井号后不空格也算');
+  ok(store.bodyStartsWithH1('\n\n# 标题\n正文'), '前面有空行也算');
+  no(store.bodyStartsWithH1('## 小标题'), '两个井号不是文档标题');
+  no(store.bodyStartsWithH1('正文\n# 标题'), '标题不在开头就不算');
+  no(store.bodyStartsWithH1('#'), '光一个井号不算');
+  no(store.bodyStartsWithH1('# \n正文'), '井号后没有字不算');
+  no(store.bodyStartsWithH1(''), '空正文不算');
+  no(store.bodyStartsWithH1(null), 'null 不算');
+
+  // 回归测试："编辑页有标题、印张没有"那个问题——
+  // 正文不以一级标题开头时，导出文件的第一行必须就是标题字段里的字
+  const note = store.normalizeNote({ title: '我的标题', body: '正文而已' });
+  eq(store.toMarkdown(note).split('\n')[0], '# 我的标题', '印张排的标题 = 导出文件的第一行');
+  no(store.bodyStartsWithH1(note.body), '这种正文要让印张自己排标题');
 });
 
 group('备份往返', () => {
