@@ -28,12 +28,22 @@
   const SAVE_MAX_WAIT = 4000;  // 一直在打字也不能超过这么久不落盘
   const MOBILE = '(max-width: 1080px)';
 
+  /**
+   * 主题：命名主题都照各家官方色板来，映射到本应用的角色
+   * （台面 / 稿纸 / 印张 / 一支笔 / 代码 token）。
+   * kind 只用来在设置里分组（深色 / 浅色），配色本身全在 styles.css 里。
+   */
   const THEMES = [
-    { value: 'proof', label: '校样', hint: '墨黑稿纸 + 纸白印张 + 一支红笔' },
-    { value: 'graphite', label: '石墨', hint: '中性灰阶，蓝墨强调' },
-    { value: 'nocturne', label: '夜读', hint: '连纸面也是暗的' },
-    { value: 'blueprint', label: '蓝图', hint: '冷色纸面 + 橙色笔' },
-    { value: 'moss', label: '苔原', hint: '暖绿灰，久读不累' },
+    { value: 'proof', label: '校样', hint: '本应用默认：墨黑稿纸 + 纸白印张 + 一支红笔', kind: 'dark' },
+    { value: 'one-dark', label: 'One Dark', hint: 'Atom 的经典深色', kind: 'dark' },
+    { value: 'dracula', label: 'Dracula', hint: '紫调深色，对比鲜明', kind: 'dark' },
+    { value: 'night-owl', label: 'Night Owl', hint: '深夜蓝，偏护眼', kind: 'dark' },
+    { value: 'monokai', label: 'Monokai', hint: '高饱和经典', kind: 'dark' },
+    { value: 'nord', label: 'Nord', hint: '冷灰蓝，低饱和', kind: 'dark' },
+    { value: 'solarized-dark', label: 'Solarized Dark', hint: '低对比，久看不累', kind: 'dark' },
+    { value: 'github-dark', label: 'GitHub Dark', hint: 'GitHub 的深色', kind: 'dark' },
+    { value: 'solarized-light', label: 'Solarized Light', hint: '暖米色纸，白天用', kind: 'light' },
+    { value: 'github-light', label: 'GitHub Light', hint: '白纸黑字', kind: 'light' },
   ];
 
   const el = (id) => document.getElementById(id);
@@ -767,7 +777,7 @@
 
   function renderSettings() {
     if (!dom.themeList) return;
-    dom.themeList.innerHTML = THEMES.map((theme) => {
+    const themeButton = (theme) => {
       const swatch = themeSwatch(theme.value);
       return (
         '<button type="button" class="theme" data-theme-value="' + theme.value + '"' +
@@ -779,7 +789,16 @@
         '<span class="theme__hint">' + md.escapeHtml(theme.hint) + '</span></span>' +
         '</button>'
       );
-    }).join('');
+    };
+    // 深色浅色分组：十个主题平铺太长，分组后一眼能找到自己要的那一类
+    const groups = [
+      { label: '深色', items: THEMES.filter((t) => t.kind !== 'light') },
+      { label: '浅色', items: THEMES.filter((t) => t.kind === 'light') },
+    ];
+    dom.themeList.innerHTML = groups.map((group) => (
+      '<div class="themes__group">' + md.escapeHtml(group.label) + '</div>' +
+      group.items.map(themeButton).join('')
+    )).join('');
 
     if (!dom.flavorList) return;
     const flavors = md.flavors();
@@ -2029,8 +2048,15 @@
   /* -------------------------------------------------------------- 启动 */
 
   async function init() {
-    const hash = (window.location.hash || '').match(/pane=(notes|write|read)/);
-    if (hash) state.ui.pane = hash[1];
+    // 地址栏可以带上偏好：#pane=read / #theme=dracula / #flavor=paper
+    // （窄屏截某一栏、给别人看某套主题，都用得上；非法值会被 setTheme/setFlavor 挡回默认）
+    const hash = window.location.hash || '';
+    const pane = hash.match(/pane=(notes|write|read)/);
+    if (pane) state.ui.pane = pane[1];
+    const theme = hash.match(/theme=([a-z0-9-]+)/);
+    if (theme) state.ui.theme = theme[1];
+    const flavor = hash.match(/flavor=([a-z]+)/);
+    if (flavor) state.ui.flavor = flavor[1];
 
     applyUI();
     bind();

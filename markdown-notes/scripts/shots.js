@@ -35,6 +35,12 @@ const shots = [
   { name: 'phone-write', w: 390, h: 844, url: BASE + '#pane=write' },
 ];
 
+// THEMES_ONLY=1 时会用这份清单，给每套主题拍一张（想看看十套主题各长什么样时用）
+const THEME_SHOTS = [
+  'proof', 'one-dark', 'dracula', 'night-owl', 'monokai',
+  'nord', 'solarized-dark', 'github-dark', 'solarized-light', 'github-light',
+];
+
 function commonArgs(profile, extra) {
   return [
     '--headless=new',
@@ -136,8 +142,7 @@ function unescapeHtml(text) {
     .replace(/&amp;/g, '&');
 }
 
-async function main() {
-  fs.mkdirSync(OUT, { recursive: true });
+async function main() {  fs.mkdirSync(OUT, { recursive: true });
 
   if (!fs.existsSync(CHROME)) {
     console.error('找不到 Chrome，用 CHROME_PATH 指一个：' + CHROME);
@@ -154,10 +159,32 @@ async function main() {
   }
 }
 
+/** 给每套主题拍一张对照图（app.js 认 #theme=xxx 这种地址） */
+async function themeShots() {
+  fs.mkdirSync(OUT, { recursive: true });
+  for (const value of THEME_SHOTS) {
+    const file = path.join(OUT, 'theme-' + value + '.png');
+    const res = await run(commonArgs(profileDir(), [
+      '--window-size=1600,1000',
+      '--screenshot=' + file,
+      BASE + '#theme=' + value,
+    ]));
+    const size = fs.existsSync(file) ? fs.statSync(file).size : 0;
+    console.log((res.code === 0 && size > 0 ? '✓ ' : '✗ ') + 'theme-' + value.padEnd(16) + size + ' B');
+  }
+  console.log('十套主题的对照图在 .screens/ 里，可以直接打开看。');
+}
+
 async function runAll() {
   // PRINT_ONLY=1 只跑"导出 PDF 实测"这一段（改打印样式时用）
   if (process.env.PRINT_ONLY === '1') {
     await printCheck();
+    return;
+  }
+
+  // THEMES_ONLY=1 只拍十套主题的对照图（改主题配色时用）
+  if (process.env.THEMES_ONLY === '1') {
+    await themeShots();
     return;
   }
 

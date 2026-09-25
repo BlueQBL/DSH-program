@@ -310,15 +310,54 @@ group('风格：严格 CommonMark', () => {
   has(md.render('**粗** 和 `代码`', strict), '<strong>', '核心强调语法不受影响');
 });
 
-group('风格：通用（默认）', () => {
+group('风格：GitHub 风格（默认）', () => {
   ok(md.render('- [x] 好').indexOf('md-check') >= 0, '默认有任务清单');
   ok(md.render('~~删~~').indexOf('<del>') >= 0, '默认有删除线');
   ok(md.render('| a |\n| - |\n| 1 |').indexOf('<table>') >= 0, '默认有表格');
   ok(md.render('正文[^1]\n\n[^1]: 注').indexOf('fn-ref') >= 0, '默认有脚注');
   ok(md.render('$x$').indexOf('<math') >= 0, '默认有公式');
-  eq(md.DEFAULT_FLAVOR, 'gfm', '默认风格是通用');
-  ok(md.flavors().length >= 4, '风格列表至少四种');
-  eq(md.flavors().map((f) => f.value), ['commonmark', 'gfm', 'chinese', 'extended'], '风格顺序');
+  eq(md.DEFAULT_FLAVOR, 'gfm', '默认风格是 GitHub 风格');
+  ok(md.flavors().length >= 5, '风格列表至少五种');
+  eq(md.flavors().map((f) => f.value), ['gfm', 'commonmark', 'paper', 'chinese', 'extended'], '风格顺序');
+  eq(md.flavors().map((f) => f.label),
+    ['GitHub 风格', '标准风格', '论文风格', '中文写作', '全扩展'], '风格用大家熟悉的名字');
+  lacks(md.render('# 标题'), 'sec-num', '默认不给标题编号');
+});
+
+group('风格：论文风格', () => {
+  const paper = { flavor: 'paper' };
+
+  // 标题自动编号：1 / 1.1 / 1.1.1，同级递增、下级归零
+  const doc = ['# 方法', '', '## 数据', '', '### 细节', '', '## 实验', '', '# 结论'].join('\n');
+  const html = md.render(doc, paper);
+  const nums = (html.match(/<span class="sec-num">[\d.]+<\/span>/g) || [])
+    .map((s) => /<span class="sec-num">([\d.]+)<\/span>/.exec(s)[1]);
+  eq(nums, ['1', '1.1', '1.1.1', '1.2', '2'], '章节号按层级递增、下级归零、同级继续');
+
+  // 图片自动编号 + 图注
+  const withImages = { flavor: 'paper', resolveImage: (src) => 'blob:' + src };
+  const figs = md.render('看图：\n\n![架构图](a.png)\n\n![第二张](b.png)\n', withImages);
+  eq((figs.match(/class="md-figure"/g) || []).length, 2, '两张独立成段的图都排成图');
+  has(figs, '<figcaption>图 1　架构图</figcaption>', '第一张图带编号和图注');
+  has(figs, '<figcaption>图 2　第二张</figcaption>', '第二张图编号递增');
+  has(figs, 'data-line="3"', '图也带行号（光标联动要用）');
+
+  has(md.render('![](c.png)\n', withImages), '<figcaption>图 1</figcaption>', '没有说明文字时只写编号');
+  lacks(md.render('句子里的 ![小图](d.png) 不算图。\n', withImages), 'md-figure', '行内的图不排成图注');
+  has(md.render('句子里的 ![小图](d.png) 不算图。\n', withImages), '<img', '但仍然正常显示');
+  lacks(md.render('![缺图](x.png)\n', paper), 'md-figure', '找不到的图不当成图注');
+
+  // 论文风格该有的有、该没有的没有
+  has(md.render('正文[^a]\n\n[^a]: 注', paper), 'fn-ref', '脚注还在');
+  has(md.render('E = $mc^2$', paper), '<math', '公式还在');
+  has(md.render('| a |\n| - |\n| 1 |', paper), '<table>', '表格还在');
+  has(md.render('H~2~O', paper), '<sub', '上下标还在');
+  lacks(md.render('- [ ] 待办', paper), 'md-check', '论文风格不要任务清单');
+  lacks(md.render('~~删~~', paper), '<del>', '论文风格不要删除线');
+
+  lacks(md.render(doc, { flavor: 'gfm' }), 'sec-num', 'GitHub 风格不编号');
+  lacks(md.render('![图](a.png)', { flavor: 'gfm', resolveImage: () => 'blob:x' }), 'md-figure',
+    'GitHub 风格不排图注');
 });
 
 group('风格：中文写作', () => {

@@ -102,28 +102,45 @@
   };
 
   const FLAVORS = {
+    gfm: {
+      label: 'GitHub 风格',
+      hint: 'GFM 那套（表格 / 任务清单 / 删除线 / 裸链接）再加脚注与公式，跟大多数编辑器互通',
+      flags: Object.assign({}, GFM_FLAGS),
+    },
     commonmark: {
-      label: '严格 CommonMark',
-      hint: '只认核心语法，粘到别的严格解析器里不会变形',
+      label: '标准风格',
+      hint: '只认 CommonMark 核心语法：井号后必须有空格，贴到别的严格解析器里不会变形',
       flags: {},
     },
-    gfm: {
-      label: '通用',
-      hint: '表格 / 任务清单 / 删除线 / 裸链接 / 脚注 / 公式，跟大多数编辑器互通',
-      flags: Object.assign({}, GFM_FLAGS),
+    paper: {
+      label: '论文风格',
+      hint: '脚注、公式、表格，标题自动编号、图片自动编号并配图注；不要任务清单那类随手记语法',
+      flags: {
+        tables: true,
+        footnotes: true,
+        math: true,
+        autolinks: true,
+        attrIds: true,
+        lenientHeadings: true,
+        subSup: true,
+        headingNumbering: true,
+        figureNumbering: true,
+      },
     },
     chinese: {
       label: '中文写作',
-      hint: '通用 + 中英之间自动留白、单换行即换行',
+      hint: 'GitHub 风格 + 中英之间自动留白、单换行即换行',
       flags: Object.assign({}, GFM_FLAGS, { cjkSpacing: true, hardWrap: true }),
     },
     extended: {
       label: '全扩展',
-      hint: '通用 + ==高亮==、^上标^ ~下标~、定义列表',
+      hint: 'GitHub 风格 + ==高亮==、^上标^ ~下标~、定义列表、标题与图编号，全都打开',
       flags: Object.assign({}, GFM_FLAGS, {
         highlight: true,
         subSup: true,
         definitionLists: true,
+        headingNumbering: true,
+        figureNumbering: true,
       }),
     },
   };
@@ -137,6 +154,8 @@
     { key: 'math', label: '数学公式', sample: '$e^{i\\pi}$' },
     { key: 'lenientHeadings', label: '井号后可不空格', sample: '#标题' },
     { key: 'attrIds', label: '标题自定义锚点', sample: '## 标题 {#id}' },
+    { key: 'headingNumbering', label: '标题自动编号', sample: '## 1.2 方法' },
+    { key: 'figureNumbering', label: '图片自动编号', sample: '图 1　架构图' },
     { key: 'cjkSpacing', label: '中英之间留白', sample: '用 React 写' },
     { key: 'hardWrap', label: '单换行即换行', sample: '回车就断行' },
     { key: 'highlight', label: '高亮', sample: '==重点==' },
@@ -172,6 +191,8 @@
       resolveImage: typeof o.resolveImage === 'function' ? o.resolveImage : null,
       headingCount: 0,
       usedIds: Object.create(null),
+      sectionCounters: [0, 0, 0, 0, 0, 0], // 论文风格的标题编号（1 / 1.1 / 1.1.1）
+      figureCount: 0,                     // 论文风格的图编号
     };
   }
 
@@ -669,9 +690,17 @@
           id = id + '-' + n;
         }
         OPT.usedIds[id] = true;
+        // 论文风格：标题自动编号（1 / 1.1 / 1.1.1，下级重新计数）
+        let number = '';
+        if (F('headingNumbering')) {
+          const counters = OPT.sectionCounters;
+          counters[level - 1] += 1;
+          for (let d = level; d < 6; d += 1) counters[d] = 0;
+          number = '<span class="sec-num">' + counters.slice(0, level).join('.') + '</span> ';
+        }
         out.push(
           '<h' + level + ' id="' + escapeAttr(id) + '" data-line="' + lineNo + '" data-end="' + lineNo + '">' +
-          renderInline(text) + '</h' + level + '>'
+          number + renderInline(text) + '</h' + level + '>'
         );
         i++;
         continue;
@@ -812,10 +841,23 @@
       }
 
       const joiner = F('hardWrap') ? '  \n' : '\n';
-      out.push(
-        '<p data-line="' + lineNo + '" data-end="' + (offset + i) + '">' +
-        renderInline(buf.join(joiner)) + '</p>'
-      );
+      const inline = renderInline(buf.join(joiner));
+      const span = 'data-line="' + lineNo + '" data-end="' + (offset + i) + '"';
+
+      // 论文风格：整段只有一张图时，排成图 + 自动编号的图注（图 1　说明文字）
+      const onlyImage = F('figureNumbering') ? inline.match(/^<img\b[^>]*>$/) : null;
+      if (onlyImage) {
+        OPT.figureCount += 1;
+        const alt = onlyImage[0].match(/alt="([^"]*)"/);
+        out.push(
+          '<figure class="md-figure" ' + span + '>' + inline +
+          '<figcaption>图 ' + OPT.figureCount +
+          (alt && alt[1] ? '　' + alt[1] : '') + '</figcaption></figure>'
+        );
+        continue;
+      }
+
+      out.push('<p ' + span + '>' + inline + '</p>');
     }
 
     // 脚注区只放在整篇最后（子解析不重复放）

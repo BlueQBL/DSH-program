@@ -324,8 +324,8 @@ button { cursor: pointer; }
 }
 
 .card__snippet mark, .card__title mark {
-  background: rgba(217, 63, 43, .22);
-  color: #fff;
+  background: var(--mark-bg, rgba(217, 63, 43, .22));
+  color: var(--ink-100);
   border-radius: 2px;
   padding: 0 1px;
 }
@@ -1397,8 +1397,9 @@ button { cursor: pointer; }
   justify-content: center;
   border: 2px dashed var(--pencil);
   border-radius: 8px;
-  background: rgba(10, 12, 16, .82);
-  color: var(--ink-100);
+  /* 深色遮罩 + 浅色字：浅色主题下也不会变成"深字压深底" */
+  background: rgba(10, 12, 16, .85);
+  color: #F2F2F0;
   font-size: 12.5px;
   letter-spacing: .05em;
   pointer-events: none;
@@ -1442,6 +1443,17 @@ button { cursor: pointer; }
 .popover__hint { font-size: 9.5px; letter-spacing: .02em; color: var(--ink-400); }
 
 .themes { display: grid; gap: 4px; }
+
+/* 主题按深色 / 浅色分组，十个平铺太长 */
+.themes__group {
+  margin: 8px 0 2px;
+  font-size: 9px;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  color: var(--ink-400);
+}
+
+.themes__group:first-child { margin-top: 0; }
 
 .theme {
   display: flex;
@@ -1591,6 +1603,31 @@ math[data-unknown] { text-decoration: underline dotted var(--pencil); text-under
 .md-dl dt { font-weight: 600; }
 .md-dl dd { margin: .25em 0 .8em 1.5em; color: var(--graphite-soft); }
 
+/* 论文风格：图 + 自动编号的图注（图 1　说明） */
+.md-figure {
+  margin: 1.3em 0 1.7em;
+  text-align: center;
+}
+
+.md-figure img { max-width: 100%; }
+.page__body .md-figure figcaption {
+  margin-top: .6em;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: .06em;
+  color: var(--graphite-soft);
+  text-align: center;
+}
+
+/* 论文风格：标题自动编号（1 / 1.1 / 1.1.1） */
+.sec-num {
+  margin-right: .5em;
+  font-family: var(--mono);
+  font-size: .8em;
+  font-weight: 500;
+  color: var(--graphite-soft);
+}
+
 .md-mark {
   padding: 0 .18em;
   border-radius: 2px;
@@ -1648,64 +1685,151 @@ math[data-unknown] { text-decoration: underline dotted var(--pencil); text-under
 
 /* ==========================================================================
    主题：换的是整套配色——稿纸（墨）、印张（纸）、红笔、代码高亮
-   data-theme 挂在 <html> 上；"校样"就是 :root 里那一套，其余主题只覆盖差异。
+   data-theme 挂在 <html> 上；"校样"就是 :root 里那一套，其余只覆盖差异。
+
+   命名主题都照着各家官方色板来（One Dark / Dracula / Night Owl / Monokai /
+   Nord / Solarized / GitHub），映射到本应用的几个角色上：
+     --ink-1000  最深的台面（目录栏、状态栏、代码卡片、中缝）
+     --ink-900   稿纸（编辑器）底色
+     --paper     印张（排版页）底色——深色主题里它比稿纸亮一档，
+                 浅色主题里它是最亮的那张纸，这样"左边是工作台、右边是纸"始终读得出来
+     --pencil    "当前位置"那一支笔（各主题取自己的红/橙）
+     --tk-*      代码 token（画在 --ink-1000 的卡片上）
    ========================================================================== */
 
-/* 石墨：中性灰阶，蓝墨强调 */
-[data-theme="graphite"] {
-  --ink-1000: #14161A; --ink-900: #191C21; --ink-850: #1E2228; --ink-800: #24282F;
-  --ink-700: #333941; --ink-600: #454C57; --ink-400: #7E8794; --ink-300: #9BA3AE;
-  --ink-100: #E3E6EA;
-  --paper: #F4F4F2; --paper-2: #ECECEA; --paper-3: #E2E2DF; --paper-edge: #D5D5D1;
-  --graphite: #1B1E23; --graphite-soft: #585E68;
-  --pencil: #2F6FB0; --pencil-deep: #23578E; --pencil-wash: rgba(47, 111, 176, .08);
-  --mark-bg: rgba(47, 111, 176, .16);
-  --tk-comment: #6E7682; --tk-string: #7FA76B; --tk-number: #C79A5B; --tk-keyword: #C2643F;
-  --tk-literal: #A47BC4; --tk-function: #4E93A8; --tk-type: #5688C7; --tk-punct: #98A0AB;
-  --tk-meta: #7A828E; --tk-add: #7FA76B; --tk-del: #C2643F;
-}
-
-/* 夜读：连纸面也是暗的，夜里不刺眼 */
-[data-theme="nocturne"] {
+/* One Dark（Atom 的经典） */
+[data-theme="one-dark"] {
   color-scheme: dark;
-  --ink-1000: #0A0B0D; --ink-900: #0F1114; --ink-850: #14161A; --ink-800: #1B1E23;
-  --ink-700: #272B32; --ink-600: #363B44; --ink-400: #6B727E; --ink-300: #8A919D;
-  --ink-100: #DDE1E7;
-  --paper: #14161A; --paper-2: #191C21; --paper-3: #1F2329; --paper-edge: #2A2F36;
-  --graphite: #D8DCE3; --graphite-soft: #8F97A3;
-  --pencil: #E2513A; --pencil-deep: #F0705A; --pencil-wash: rgba(226, 81, 58, .14);
-  --mark-bg: rgba(226, 81, 58, .24);
-  --tk-comment: #6B7280; --tk-string: #9FCF8E; --tk-number: #E2B96A; --tk-keyword: #F0785F;
-  --tk-literal: #C79BE8; --tk-function: #7FC8C0; --tk-type: #8FB8E8; --tk-punct: #8A919D;
-  --tk-meta: #7E8CA3; --tk-add: #9FD8A0; --tk-del: #F0785F;
+  --ink-1000: #1B1F24; --ink-900: #282C34; --ink-850: #2C313A; --ink-800: #3E4451;
+  --ink-700: #4B5263; --ink-600: #5C6370; --ink-400: #7F848E; --ink-300: #9DA5B4;
+  --ink-100: #D7DAE0;
+  --paper: #2C313A; --paper-2: #23272E; --paper-3: #3E4451; --paper-edge: #3E4451;
+  --graphite: #C8CCD4; --graphite-soft: #8B93A1;
+  --pencil: #E06C75; --pencil-deep: #FF8A93; --pencil-wash: rgba(224, 108, 117, .16);
+  --mark-bg: rgba(224, 108, 117, .28);
+  --tk-plain: #ABB2BF; --tk-comment: #5C6370; --tk-string: #98C379; --tk-number: #D19A66;
+  --tk-keyword: #C678DD; --tk-literal: #56B6C2; --tk-function: #61AFEF; --tk-type: #E5C07B;
+  --tk-punct: #ABB2BF; --tk-meta: #7F848E; --tk-add: #98C379; --tk-del: #E06C75;
 }
 
-/* 蓝图：冷色纸 + 橙笔 */
-[data-theme="blueprint"] {
-  --ink-1000: #071320; --ink-900: #0B1B29; --ink-850: #102333; --ink-800: #17303F;
-  --ink-700: #22475C; --ink-600: #35637C; --ink-400: #7C9AAE; --ink-300: #9DB8C8;
-  --ink-100: #E2EDF3;
-  --paper: #EDF3F7; --paper-2: #E3ECF2; --paper-3: #D8E4EC; --paper-edge: #C7D6E0;
-  --graphite: #16222C; --graphite-soft: #55697A;
-  --pencil: #D9541F; --pencil-deep: #A93F14; --pencil-wash: rgba(217, 84, 31, .09);
-  --mark-bg: rgba(217, 84, 31, .18);
-  --tk-comment: #5E7488; --tk-string: #7FA76B; --tk-number: #C79246; --tk-keyword: #E0703A;
-  --tk-literal: #9B7BC4; --tk-function: #3F8FA8; --tk-type: #4A7FB5; --tk-punct: #8FA3B4;
-  --tk-meta: #6D8CA0; --tk-add: #7FA76B; --tk-del: #E0703A;
+/* Dracula */
+[data-theme="dracula"] {
+  color-scheme: dark;
+  --ink-1000: #21222C; --ink-900: #282A36; --ink-850: #343746; --ink-800: #44475A;
+  --ink-700: #565A73; --ink-600: #6272A4; --ink-400: #8494C8; --ink-300: #A6B4DC;
+  --ink-100: #F8F8F2;
+  --paper: #2C2E3A; --paper-2: #23242E; --paper-3: #44475A; --paper-edge: #44475A;
+  --graphite: #F8F8F2; --graphite-soft: #97A3CC;
+  --pencil: #FF5555; --pencil-deep: #FF8A8A; --pencil-wash: rgba(255, 85, 85, .16);
+  --mark-bg: rgba(241, 250, 140, .28);
+  --tk-plain: #F8F8F2; --tk-comment: #6272A4; --tk-string: #F1FA8C; --tk-number: #BD93F9;
+  --tk-keyword: #FF79C6; --tk-literal: #BD93F9; --tk-function: #50FA7B; --tk-type: #8BE9FD;
+  --tk-punct: #F8F8F2; --tk-meta: #6272A4; --tk-add: #50FA7B; --tk-del: #FF5555;
 }
 
-/* 苔原：暖绿灰 + 莓红，长时间读不累 */
-[data-theme="moss"] {
-  --ink-1000: #0F1410; --ink-900: #131A15; --ink-850: #18201A; --ink-800: #1E2820;
-  --ink-700: #2C3A2E; --ink-600: #405243; --ink-400: #7C8C7E; --ink-300: #9BAA9C;
-  --ink-100: #E4E9E2;
-  --paper: #F3F4EC; --paper-2: #EAECE1; --paper-3: #DFE2D5; --paper-edge: #D0D4C4;
-  --graphite: #1E241C; --graphite-soft: #5B6656;
-  --pencil: #A63A56; --pencil-deep: #832C44; --pencil-wash: rgba(166, 58, 86, .08);
-  --mark-bg: rgba(166, 58, 86, .17);
-  --tk-comment: #6B7A66; --tk-string: #8FA85E; --tk-number: #C79A4E; --tk-keyword: #C05A44;
-  --tk-literal: #A87FC4; --tk-function: #4E9E8E; --tk-type: #5C86B8; --tk-punct: #96A38F;
-  --tk-meta: #78886F; --tk-add: #8FA85E; --tk-del: #C05A44;
+/* Night Owl（深夜蓝） */
+[data-theme="night-owl"] {
+  color-scheme: dark;
+  --ink-1000: #01111D; --ink-900: #011627; --ink-850: #0B2942; --ink-800: #1D3B53;
+  --ink-700: #2A4E68; --ink-600: #43677F; --ink-400: #6E8FA5; --ink-300: #94AFC2;
+  --ink-100: #D6DEEB;
+  --paper: #062033; --paper-2: #041B2B; --paper-3: #1D3B53; --paper-edge: #1D3B53;
+  --graphite: #D6DEEB; --graphite-soft: #8CA5B8;
+  --pencil: #EF5350; --pencil-deep: #FF7B78; --pencil-wash: rgba(239, 83, 80, .16);
+  --mark-bg: rgba(127, 219, 202, .26);
+  --tk-plain: #D6DEEB; --tk-comment: #637777; --tk-string: #ECC48D; --tk-number: #F78C6C;
+  --tk-keyword: #C792EA; --tk-literal: #7FDBCA; --tk-function: #82AAFF; --tk-type: #FFCB8B;
+  --tk-punct: #D6DEEB; --tk-meta: #637777; --tk-add: #ADDB67; --tk-del: #EF5350;
+}
+
+/* Monokai */
+[data-theme="monokai"] {
+  color-scheme: dark;
+  --ink-1000: #1E1F1C; --ink-900: #272822; --ink-850: #31322B; --ink-800: #49483E;
+  --ink-700: #5B5A4E; --ink-600: #75715E; --ink-400: #9C9884; --ink-300: #BDB9A6;
+  --ink-100: #F8F8F2;
+  --paper: #30312A; --paper-2: #262720; --paper-3: #49483E; --paper-edge: #49483E;
+  --graphite: #F8F8F2; --graphite-soft: #B0AC98;
+  --pencil: #F92672; --pencil-deep: #FF6BA3; --pencil-wash: rgba(249, 38, 114, .16);
+  --mark-bg: rgba(230, 219, 116, .28);
+  --tk-plain: #F8F8F2; --tk-comment: #75715E; --tk-string: #E6DB74; --tk-number: #AE81FF;
+  --tk-keyword: #F92672; --tk-literal: #AE81FF; --tk-function: #A6E22E; --tk-type: #66D9EF;
+  --tk-punct: #F8F8F2; --tk-meta: #75715E; --tk-add: #A6E22E; --tk-del: #F92672;
+}
+
+/* Nord */
+[data-theme="nord"] {
+  color-scheme: dark;
+  --ink-1000: #272C36; --ink-900: #2E3440; --ink-850: #3B4252; --ink-800: #434C5E;
+  --ink-700: #4C566A; --ink-600: #616E88; --ink-400: #8593AC; --ink-300: #A7B1C2;
+  --ink-100: #E5E9F0;
+  --paper: #343B48; --paper-2: #2A303B; --paper-3: #434C5E; --paper-edge: #434C5E;
+  --graphite: #E5E9F0; --graphite-soft: #9AA6BC;
+  --pencil: #BF616A; --pencil-deep: #D08770; --pencil-wash: rgba(191, 97, 106, .18);
+  --mark-bg: rgba(235, 203, 139, .26);
+  --tk-plain: #D8DEE9; --tk-comment: #616E88; --tk-string: #A3BE8C; --tk-number: #B48EAD;
+  --tk-keyword: #81A1C1; --tk-literal: #88C0D0; --tk-function: #88C0D0; --tk-type: #8FBCBB;
+  --tk-punct: #D8DEE9; --tk-meta: #7B88A1; --tk-add: #A3BE8C; --tk-del: #BF616A;
+}
+
+/* Solarized Dark（低对比经典） */
+[data-theme="solarized-dark"] {
+  color-scheme: dark;
+  --ink-1000: #00212B; --ink-900: #002B36; --ink-850: #073642; --ink-800: #0E4B5A;
+  --ink-700: #17505F; --ink-600: #586E75; --ink-400: #6C838C; --ink-300: #93A1A1;
+  --ink-100: #EEE8D5;
+  --paper: #073642; --paper-2: #04303B; --paper-3: #586E75; --paper-edge: #586E75;
+  --graphite: #EEE8D5; --graphite-soft: #93A1A1;
+  --pencil: #DC322F; --pencil-deep: #F06A66; --pencil-wash: rgba(220, 50, 47, .18);
+  --mark-bg: rgba(181, 137, 0, .3);
+  --tk-plain: #93A1A1; --tk-comment: #586E75; --tk-string: #2AA198; --tk-number: #D33682;
+  --tk-keyword: #859900; --tk-literal: #6C71C4; --tk-function: #268BD2; --tk-type: #B58900;
+  --tk-punct: #839496; --tk-meta: #586E75; --tk-add: #859900; --tk-del: #DC322F;
+}
+
+/* Solarized Light（暖米色纸） */
+[data-theme="solarized-light"] {
+  color-scheme: light;
+  --ink-1000: #EEE8D5; --ink-900: #F5EFDC; --ink-850: #E7E0C9; --ink-800: #DDD6BF;
+  --ink-700: #C9C2AB; --ink-600: #93A1A1; --ink-400: #7C8A8A; --ink-300: #657B83;
+  --ink-100: #073642;
+  --paper: #FDF6E3; --paper-2: #F7F0DC; --paper-3: #EEE8D5; --paper-edge: #DDD6BF;
+  --graphite: #002B36; --graphite-soft: #657B83;
+  --pencil: #DC322F; --pencil-deep: #A62624; --pencil-wash: rgba(220, 50, 47, .08);
+  --mark-bg: rgba(181, 137, 0, .3);
+  --tk-plain: #657B83; --tk-comment: #93A1A1; --tk-string: #2AA198; --tk-number: #D33682;
+  --tk-keyword: #859900; --tk-literal: #6C71C4; --tk-function: #268BD2; --tk-type: #B58900;
+  --tk-punct: #657B83; --tk-meta: #93A1A1; --tk-add: #859900; --tk-del: #DC322F;
+}
+
+/* GitHub Light（白纸黑字） */
+[data-theme="github-light"] {
+  color-scheme: light;
+  --ink-1000: #EAEEF2; --ink-900: #FFFFFF; --ink-850: #F0F3F6; --ink-800: #D8DEE4;
+  --ink-700: #D0D7DE; --ink-600: #AFB8C1; --ink-400: #6E7781; --ink-300: #57606A;
+  --ink-100: #1F2328;
+  --paper: #FCFCFA; --paper-2: #F6F8FA; --paper-3: #EAEEF2; --paper-edge: #D8DEE4;
+  --graphite: #1F2328; --graphite-soft: #59636E;
+  --pencil: #CF222E; --pencil-deep: #A40E26; --pencil-wash: rgba(207, 34, 46, .07);
+  --mark-bg: rgba(255, 212, 0, .38);
+  --tk-plain: #24292F; --tk-comment: #6E7781; --tk-string: #0A3069; --tk-number: #0550AE;
+  --tk-keyword: #CF222E; --tk-literal: #0550AE; --tk-function: #8250DF; --tk-type: #953800;
+  --tk-punct: #57606A; --tk-meta: #6E7781; --tk-add: #116329; --tk-del: #82071E;
+}
+
+/* GitHub Dark */
+[data-theme="github-dark"] {
+  color-scheme: dark;
+  --ink-1000: #010409; --ink-900: #0D1117; --ink-850: #161B22; --ink-800: #21262D;
+  --ink-700: #30363D; --ink-600: #484F58; --ink-400: #7D8590; --ink-300: #A6ADB6;
+  --ink-100: #E6EDF3;
+  --paper: #161B22; --paper-2: #0D1117; --paper-3: #30363D; --paper-edge: #30363D;
+  --graphite: #E6EDF3; --graphite-soft: #8B949E;
+  --pencil: #F85149; --pencil-deep: #FF7B72; --pencil-wash: rgba(248, 81, 73, .16);
+  --mark-bg: rgba(210, 168, 255, .26);
+  --tk-plain: #C9D1D9; --tk-comment: #8B949E; --tk-string: #A5D6FF; --tk-number: #79C0FF;
+  --tk-keyword: #FF7B72; --tk-literal: #79C0FF; --tk-function: #D2A8FF; --tk-type: #FFA657;
+  --tk-punct: #C9D1D9; --tk-meta: #8B949E; --tk-add: #7EE787; --tk-del: #FFA198;
 }
 
 /* ==========================================================================
@@ -1800,7 +1924,7 @@ math[data-unknown] { text-decoration: underline dotted var(--pencil); text-under
   /* 别把一张图、一段公式、一张表劈成两半。
      代码块特意**不**在这里：它可能比一页还高，硬要求"不许断页"时
      浏览器会把它整块挪到下一页，放不下就干脆不画——内容会凭空消失。 */
-  .md-table, .md-math, .md-footnotes__list li, img, blockquote { break-inside: avoid; }
+  .md-table, .md-math, .md-footnotes__list li, img, blockquote, .md-figure { break-inside: avoid; }
   .md-codeblock { break-inside: auto; }
   .md-codeblock__bar { break-after: avoid; }
   .page__body h1, .page__body h2, .page__body h3, .page__body h4 { break-after: avoid; }

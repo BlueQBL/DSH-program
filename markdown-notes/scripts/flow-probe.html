@@ -434,21 +434,70 @@ async function run() {
   $('#settingsBtn').click();
   await wait(150);
   check('设置：弹层能打开', $('#settings').hidden === false);
-  check('设置：列出了五套主题', $$('#themeList .theme').length === 5, $$('#themeList .theme').length + ' 套');
-  check('设置：每套主题都带色板', $$('#themeList .theme__swatch i').length === 15);
-  check('设置：列出了四种 Markdown 风格', $$('#flavorList .flavor').length === 4);
+  check('设置：列出了十套主题', $$('#themeList .theme').length === 10, $$('#themeList .theme').length + ' 套');
+  check('设置：主题按深色/浅色分组', $$('#themeList .themes__group').length === 2,
+    $$('#themeList .themes__group').map((g) => g.textContent).join('/'));
+  check('设置：每套主题都带三格色板', $$('#themeList .theme__swatch i').length === 30,
+    $$('#themeList .theme__swatch i').length + ' 格');
+  check('设置：列出了五种 Markdown 风格', $$('#flavorList .flavor').length === 5,
+    $$('#flavorList .flavor').map((f) => f.querySelector('.flavor__label').textContent).join('/'));
+  const flavorLabels = $$('#flavorList .flavor__label').map((el) => el.textContent);
+  check('设置：风格用大家熟悉的名字',
+    flavorLabels.indexOf('GitHub 风格') >= 0 && flavorLabels.indexOf('论文风格') >= 0 &&
+    flavorLabels.indexOf('标准风格') >= 0, flavorLabels.join('/'));
 
   const paperBefore = win.getComputedStyle($('.proof')).backgroundColor;
-  doc.querySelector('[data-theme-value="nocturne"]').click();
+  const editorBefore = win.getComputedStyle($('.source')).backgroundColor;
+  doc.querySelector('[data-theme-value="dracula"]').click();
   await wait(250);
   const paperAfter = win.getComputedStyle($('.proof')).backgroundColor;
-  check('主题：切到夜读后印张底色变了', paperBefore !== paperAfter, paperBefore + ' → ' + paperAfter);
+  const editorAfter = win.getComputedStyle($('.source')).backgroundColor;
+  check('主题：切到 Dracula 后稿纸与印张底色都变了',
+    paperBefore !== paperAfter && editorBefore !== editorAfter,
+    paperBefore + '→' + paperAfter + ' / ' + editorBefore + '→' + editorAfter);
+  check('主题：Dracula 用的是官方底色 #282A36',
+    editorAfter.replace(/\s/g, '') === 'rgb(40,42,54)', editorAfter);
+  check('主题：代码 token 跟着换（Dracula 的粉）',
+    win.getComputedStyle(doc.documentElement).getPropertyValue('--tk-keyword').trim().toUpperCase() === '#FF79C6',
+    win.getComputedStyle(doc.documentElement).getPropertyValue('--tk-keyword'));
   check('主题：html 上的 data-theme 跟着变',
-    doc.documentElement.dataset.theme === 'nocturne', doc.documentElement.dataset.theme);
+    doc.documentElement.dataset.theme === 'dracula', doc.documentElement.dataset.theme);
   check('主题：写进了界面偏好',
-    JSON.parse(win.localStorage.getItem('markdown-notes/ui/v1') || '{}').theme === 'nocturne');
+    JSON.parse(win.localStorage.getItem('markdown-notes/ui/v1') || '{}').theme === 'dracula');
   check('主题：选中态标在当前那套上',
-    doc.querySelector('[data-theme-value="nocturne"]').getAttribute('aria-pressed') === 'true');
+    doc.querySelector('[data-theme-value="dracula"]').getAttribute('aria-pressed') === 'true');
+
+  doc.querySelector('[data-theme-value="github-light"]').click();
+  await wait(250);
+  check('主题：浅色主题（GitHub Light）稿纸变白',
+    win.getComputedStyle($('.source')).backgroundColor.replace(/\s/g, '') === 'rgb(255,255,255)',
+    win.getComputedStyle($('.source')).backgroundColor);
+  doc.querySelector('[data-theme-value="proof"]').click();
+  await wait(200);
+
+  /* 论文风格：标题自动编号 + 图自动编号 */
+  doc.querySelector('[data-flavor-value="paper"]').click();
+  await wait(350);
+  $('#editor').value = '# 方法\n\n## 数据\n\n看图：\n\n![架构图](探针图.png)\n\n## 实验\n';
+  fire($('#editor'), 'input');
+  await wait(500);
+  const secNums = $$('#preview .sec-num').map((el) => el.textContent);
+  check('论文风格：标题自动编号（1 / 1.1 / 1.2）', secNums.join(',') === '1,1.1,1.2', secNums.join(','));
+  const firstOutline = $('#outline .outline__item');
+  check('论文风格：大纲里也带着编号',
+    Boolean(firstOutline) && firstOutline.textContent.indexOf('1') === 0,
+    firstOutline ? firstOutline.textContent.slice(0, 12) : '没有大纲项');
+  const figCaption = $('#preview .md-figure figcaption');
+  check('论文风格：图片排成图 + 图注编号',
+    Boolean(figCaption) && figCaption.textContent.indexOf('图 1') === 0,
+    figCaption ? figCaption.textContent : '没有图注');
+
+  $('#editor').value = '- [ ] 待办\n\n~~删掉~~';
+  fire($('#editor'), 'input');
+  await wait(450);
+  check('论文风格：不认任务清单与删除线',
+    $$('#preview .md-check').length === 0 && $$('#preview del').length === 0,
+    '复选框 ' + $$('#preview .md-check').length + ' · 删除线 ' + $$('#preview del').length);
 
   doc.querySelector('[data-flavor-value="chinese"]').click();
   await wait(350);
