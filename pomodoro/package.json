@@ -1,0 +1,19 @@
+{
+  "name": "pomodoro",
+  "version": "1.0.0",
+  "private": true,
+  "description": "番茄钟 · 零依赖的专注计时器（表盘式上弦 / 桌面通知 / 提示音 / 每日统计）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/core.test.js"
+  },
+  "keywords": [
+    "pomodoro",
+    "timer",
+    "notifications",
+    "vanilla-js",
+    "zero-dependency"
+  ],
+  "license": "MIT"
+}

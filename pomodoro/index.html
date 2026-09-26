@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>番茄钟 · 专注与休息</title>
+<meta name="description" content="一台桌面上的机械番茄钟：上弦、专注、响铃。25 分钟专注、5 分钟休息，可自定义时长，记录每天完成的番茄。">
+<meta name="theme-color" content="#22322A">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='18' r='11' fill='%23D6402C'/%3E%3Cpath d='M16 8c-2.6-3-6.4-3.6-8.6-3.2 1 2.6 3.4 4.6 6.2 5M16 8c2.6-3 6.4-3.6 8.6-3.2-1 2.6-3.4 4.6-6.2 5' fill='none' stroke='%234A7A46' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=Azeret+Mono:wght@400;500;600&family=Big+Shoulders+Display:wght@500;600;700;800&display=swap">
+<link rel="stylesheet" href="styles.css">
+<script defer src="js/core.js"></script>
+<script defer src="js/app.js"></script>
+</head>
+<body>
+
+<div class="shell">
+
+  <!-- ── 顶栏 ───────────────────────────────────────── -->
+  <header class="topbar">
+    <h1 class="brand">
+      <span class="brand__cn">番茄钟</span>
+      <span class="brand__en">Pomodoro</span>
+    </h1>
+    <p class="topbar__tally" id="topTally">今天还没有番茄</p>
+    <div class="topbar__tools">
+      <button class="tool" type="button" id="soundBtn" aria-pressed="true">提示音</button>
+      <button class="tool" type="button" id="notifyBtn">开启通知</button>
+    </div>
+  </header>
+
+  <main class="layout">
+
+    <!-- ── 仪器：表盘 ────────────────────────────────── -->
+    <section class="instrument" aria-label="计时器">
+      <div class="plate" id="plate">
+        <span class="screw screw--tl" aria-hidden="true"></span>
+        <span class="screw screw--tr" aria-hidden="true"></span>
+        <span class="screw screw--bl" aria-hidden="true"></span>
+        <span class="screw screw--br" aria-hidden="true"></span>
+
+        <p class="plate__label"><b>专注计时器</b><span>Pomodoro · 60 min</span></p>
+
+        <div class="dial" id="dial" role="slider" tabindex="0"
+             aria-label="上弦：设置本轮时长"
+             aria-valuemin="1" aria-valuemax="60" aria-valuenow="25" aria-valuetext="25 分钟">
+          <svg class="dial__svg" viewBox="0 0 420 420" aria-hidden="true">
+            <defs>
+              <radialGradient id="wellShade" cx="50%" cy="38%" r="72%">
+                <stop offset="0%" stop-color="#FFFDF6"/>
+                <stop offset="68%" stop-color="#F1ECDD"/>
+                <stop offset="100%" stop-color="#DCD4C0"/>
+              </radialGradient>
+            </defs>
+            <circle class="dial__well" cx="210" cy="210" r="205"></circle>
+            <circle class="dial__face" cx="210" cy="210" r="188" fill="url(#wellShade)"></circle>
+            <g class="dial__scale" id="dialScale"></g>
+            <path class="dial__band" id="dialBand" d=""></path>
+            <g class="dial__hand" id="dialHand">
+              <polygon class="dial__hand-body" points="210,52 217.5,214 202.5,214"></polygon>
+              <circle class="dial__hand-tail" cx="210" cy="228" r="10"></circle>
+            </g>
+            <circle class="dial__hub" cx="210" cy="210" r="17"></circle>
+            <circle class="dial__hub-pin" cx="210" cy="210" r="6.5"></circle>
+          </svg>
+        </div>
+
+        <div class="counter">
+          <button class="counter__step" type="button" id="stepDown" aria-label="减少一分钟">−</button>
+          <div class="counter__window">
+            <span class="counter__digits" id="clock">25:00</span>
+          </div>
+          <button class="counter__step" type="button" id="stepUp" aria-label="增加一分钟">+</button>
+        </div>
+
+        <p class="counter__meta">
+          <span class="chip" id="phaseChip" data-phase="focus">专注</span>
+          <span class="counter__round" id="roundLine">第 1 / 4 个番茄</span>
+        </p>
+
+        <div class="pushers">
+          <button class="pusher pusher--main" type="button" id="startBtn">开始</button>
+          <button class="pusher" type="button" id="resetBtn">重置</button>
+          <button class="pusher" type="button" id="skipBtn">跳过</button>
+        </div>
+      </div>
+
+      <p class="instrument__hint" id="dialHint">拖动表盘上弦，或选中表盘后按 ↑ ↓ 调整分钟。空格键开始 / 暂停。</p>
+    </section>
+
+    <!-- ── 记录与设置 ────────────────────────────────── -->
+    <div class="column">
+
+      <section class="card card--tape" aria-labelledby="tapeTitle">
+        <div class="card__head">
+          <h2 class="card__title" id="tapeTitle">今日纸带</h2>
+          <span class="card__meta" id="tapeMeta"></span>
+        </div>
+        <ol class="tape" id="tapeList"></ol>
+        <p class="empty" id="tapeEmpty">今天还没有走完一个番茄。上弦，按开始。</p>
+      </section>
+
+      <section class="card" aria-labelledby="chartTitle">
+        <div class="card__head">
+          <h2 class="card__title" id="chartTitle">最近 7 天</h2>
+          <span class="card__meta" id="chartMeta"></span>
+        </div>
+        <div class="chart" id="chart"></div>
+        <ul class="figures" id="figures"></ul>
+      </section>
+
+      <section class="card" aria-labelledby="setTitle">
+        <div class="card__head">
+          <h2 class="card__title" id="setTitle">设置</h2>
+          <span class="card__meta" id="setMeta"></span>
+        </div>
+
+        <div class="fields">
+          <label class="field">
+            <span class="field__label">专注时长</span>
+            <span class="field__box">
+              <input class="field__input" id="setFocus" type="number" inputmode="numeric" min="1" max="60" step="1" data-setting="focus">
+              <span class="field__unit">分钟</span>
+            </span>
+          </label>
+          <label class="field">
+            <span class="field__label">短休时长</span>
+            <span class="field__box">
+              <input class="field__input" id="setShort" type="number" inputmode="numeric" min="1" max="30" step="1" data-setting="short">
+              <span class="field__unit">分钟</span>
+            </span>
+          </label>
+          <label class="field">
+            <span class="field__label">长休时长</span>
+            <span class="field__box">
+              <input class="field__input" id="setLong" type="number" inputmode="numeric" min="1" max="60" step="1" data-setting="long">
+              <span class="field__unit">分钟</span>
+            </span>
+          </label>
+          <label class="field">
+            <span class="field__label">每组番茄</span>
+            <span class="field__box">
+              <input class="field__input" id="setRounds" type="number" inputmode="numeric" min="2" max="8" step="1" data-setting="rounds">
+              <span class="field__unit">个</span>
+            </span>
+          </label>
+          <label class="field">
+            <span class="field__label">每日目标</span>
+            <span class="field__box">
+              <input class="field__input" id="setGoal" type="number" inputmode="numeric" min="1" max="16" step="1" data-setting="goal">
+              <span class="field__unit">个</span>
+            </span>
+          </label>
+        </div>
+
+        <div class="switches">
+          <label class="switch">
+            <input type="checkbox" id="setAutoNext" data-boolean="autoNext">
+            <span class="switch__track" aria-hidden="true"></span>
+            <span class="switch__text">自动进入下一轮</span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="setSound" data-boolean="sound">
+            <span class="switch__track" aria-hidden="true"></span>
+            <span class="switch__text">结束提示音</span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="setTicking" data-boolean="ticking">
+            <span class="switch__track" aria-hidden="true"></span>
+            <span class="switch__text">专注时秒针轻响</span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="setKeepAwake" data-boolean="keepAwake">
+            <span class="switch__track" aria-hidden="true"></span>
+            <span class="switch__text">专注时保持屏幕常亮</span>
+          </label>
+        </div>
+
+        <div class="actions">
+          <button class="btn btn--ghost" type="button" id="testChime">试听提示音</button>
+          <button class="btn btn--ghost btn--danger" type="button" id="clearDay">清空今天的记录</button>
+        </div>
+        <p class="note" id="setHint" role="status"></p>
+      </section>
+
+      <p class="note note--foot">数据只保存在这台浏览器的本地存储里，不会上传。</p>
+    </div>
+  </main>
+</div>
+
+<!-- ── 到点提醒 ──────────────────────────────────────── -->
+<div class="banner" id="banner" role="alert" aria-labelledby="bannerTitle" hidden>
+  <div class="banner__body">
+    <p class="banner__title" id="bannerTitle">这一轮结束了</p>
+    <p class="banner__sub" id="bannerSub"></p>
+  </div>
+  <div class="banner__actions" id="bannerActions"></div>
+</div>
+
+<noscript>
+  <p class="note note--noscript">这个页面需要 JavaScript 才能计时和提醒。</p>
+</noscript>
+
+</body>
+</html>

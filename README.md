@@ -431,6 +431,7 @@ http://localhost:5173
 | **个人作品集网站** | `portfolio/` | 零依赖 HTML + CSS + 原生 JS + Node 服务 | `cd portfolio && node server.js` → http://localhost:5200 |
 | **案头待办** | `todo-app/` | 零依赖 HTML + CSS + 原生 JS + Node 服务 | `cd todo-app && node server.js` → http://127.0.0.1:5210 |
 | **校样 · Markdown 笔记台** | `markdown-notes/` | 零依赖 HTML + CSS + 原生 JS + Node 服务 | `cd markdown-notes && node server.js` → http://127.0.0.1:5220 |
+| **番茄钟 · 专注计时** | `pomodoro/` | 零依赖 HTML + CSS + 原生 JS + Node 服务 | `cd pomodoro && node server.js` → http://127.0.0.1:5230 |
 图片压缩工具实现了图片上传压缩、质量调节、前后对比、批量打包下载的完整前后端闭环，
 并内置端到端冒烟测试（`npm run smoke`），详见 [image-compressor/README.md](image-compressor/README.md)。
 
@@ -529,6 +530,24 @@ token 配色服从整套配色而不是反过来；ZIP 用 store 模式加 UTF-8
 IndexedDB、平滑滚动、CSS 过渡在虚拟时钟下都不准）；导出 PDF 则用 CDP 在真实时钟下**真打一份出来**，
 再解开 PDF 的 ToUnicode CMap 把文字抽出来核对，同时确认打印那一刻的 `document.title`
 就是笔记标题（也就是 PDF 的默认文件名）。详见 [markdown-notes/README.md](markdown-notes/README.md)。
+
+**番茄钟**是一个把番茄工作法做成**一台桌面机械定时器**的专注计时应用。
+视觉母题是**深绿桌面上的一台搪瓷面板定时器**：面板是全页唯一的高亮物体，
+外圈印着 0–60 分钟的刻度，**指针的高度就直接是剩余分钟数**——不用读小字，扫一眼指针指在几就知道还剩几分钟。
+指针扫过的那段扇形带、以及被点亮的刻度，颜色都跟着阶段走：专注是番茄红（果子熟了）、
+短休是嫩芽绿（长叶子）、长休是黄铜（收工），只改 `<body data-phase>` 一个属性，全页跟着换。
+
+上弦动作是这只定时器的签名：**拖动表盘**，指针跟着手指转，每跨过一格响一声"嗒"（Web Audio 现场合成，
+不是音频文件），松手即定；键盘 `↑ ↓` 微调、`Home` / `End` 拉到头。计时中表盘会锁住——
+指针位置就是剩余时间，不能一边走一边改。
+
+质量上，`npm test` 跑 **121 项核心断言**；另外两个真实浏览器探针跑 **95 项端到端 + 34 项版面断言**：
+端到端用假时钟快进，实测倒数、暂停、拖拽上弦、到点结算（铃声、通知正文、横幅、纸带、统计、存档）、
+刷新后续跑；版面探针除了量几何、对比度（全部达 WCAG AA 及以上）和九种宽度下的重排，
+还会**解开截图的 PNG 直接采像素**——因为"属性写着 rotate(150)"不等于"画出来就在 150°"。
+这一条真抓到过 bug：指针同时用了 SVG 的 transform 属性和 CSS 的 `transform-origin`，
+两者叠加导致它绕两倍原点旋转、被推出表盘之外飘在页面右下角，而所有只读属性的断言都显示正常。
+详见 [pomodoro/README.md](pomodoro/README.md)。
 
 后续新增项目会继续追加到本表。
 
