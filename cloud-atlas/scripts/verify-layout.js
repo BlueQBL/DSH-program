@@ -57,12 +57,37 @@ async function waitForServer(timeoutMs) {
 }
 
 /** 打开页面并把标题里的测量结果读回来。stdout 走管道读，Chrome 自己会结束。 */
-function measure(browser, viewport, query) {
+function measure(browser, viewport, query, legacySeed) {
   const profile = path.join(ROOT, '.screens', 'profile');
   fs.mkdirSync(profile, { recursive: true });
 
   const sep = query.includes('?') ? '&' : '?';
-  const url = `http://127.0.0.1:${PORT}/${query}${sep}verify=1`;
+  const appUrl = `http://127.0.0.1:${PORT}/${query}${sep}verify=1`;
+
+  /* 正常情况下直接打开应用页面。
+     只有在需要预置 localStorage（比如测试旧格式的迁移）时，才套一层启动页：
+     它和应用页面同源（都从本机服务取），所以能在应用加载之前写存储，
+     验证到的就是"真实的冷启动"——而不是应用跑起来之后再去改内存状态，
+     那样测不到"读存储"这一步，而 bug 恰恰就在那一步。 */
+  let target = appUrl;
+  if (legacySeed) {
+    const boot = path.join(ROOT, '.screens', 'seed.html');
+    const appPath = `/${query}${sep}verify=1`;
+    fs.writeFileSync(boot, `<!DOCTYPE html><meta charset="utf-8"><title>pending</title>
+<style>html,body{margin:0;height:100%}iframe{border:0;width:100%;height:100%}</style>
+<iframe id="f"></iframe>
+<script>
+  // 同源启动页：先在本地存储里放好旧格式数据，再加载应用
+  try {
+    localStorage.setItem(${JSON.stringify(legacySeed.key)}, ${JSON.stringify(legacySeed.value)});
+    localStorage.setItem('cloud-atlas.saved', ${JSON.stringify(legacySeed.saved || '[]')});
+  } catch (e) { /* 存不了就让后面的断言报出来 */ }
+  const f = document.getElementById('f');
+  f.addEventListener('load', () => { document.title = f.contentDocument.title; });
+  f.src = ${JSON.stringify(appPath)};
+<\/script>`, 'utf8');
+    target = `http://127.0.0.1:${PORT}/.screens/seed.html`;
+  }
 
   const args = [
     '--headless=new',
@@ -74,10 +99,10 @@ function measure(browser, viewport, query) {
     `--user-data-dir=${profile}`,
     `--window-size=${viewport.width},${viewport.height}`,
     '--deny-permission-prompts',
-    // 探针最多等 12 秒，这里给到 20 秒余量（首次取数要打上游）
-    '--virtual-time-budget=20000',
+    // 探针最多等 20 秒，交互自检里还有等地名服务的时间，这里给足余量
+    '--virtual-time-budget=40000',
     '--dump-dom',
-    url,
+    target,
   ];
 
   return new Promise((resolve, reject) => {
@@ -113,6 +138,15 @@ async function main() {
 
   const query = process.argv[2] || '?nolocate=1';
   fs.mkdirSync(path.join(ROOT, '.screens'), { recursive: true });
+
+  /* 每次运行都从干净的浏览器配置开始。
+     为什么必须这样：页面把收藏和对比清单存在 localStorage 里，而五种宽度的检查
+     共用同一个 --user-data-dir。不清的话，第一次运行留下的数据会被后续运行
+     当成"用户自己的选择"读回来——"默认只有 1 个城市"这类断言从第二次起就一直失败，
+     看起来像功能坏了，其实是测试之间在互相污染。
+     代价是每次要重建配置目录（约一秒），换来的是结果可复现。 */
+  const profile = path.join(ROOT, '.screens', 'profile');
+  fs.rmSync(profile, { recursive: true, force: true });
 
   const server = spawn(process.execPath, [path.join(ROOT, 'server.js'), String(PORT)], { cwd: ROOT, stdio: 'ignore' });
 

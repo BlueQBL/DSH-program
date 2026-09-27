@@ -18,8 +18,9 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
-const { UPSTREAM, FORECAST_FIELDS, HOURS_PAST, HOURS_AHEAD, FORECAST_DAYS, MAX_SAVED, normalizePlace } = require('./js/core.js');
+const { UPSTREAM, FORECAST_FIELDS, AIR_FIELDS, AIR_HOURLY_FIELDS, ARCHIVE_FIELDS, HOURS_PAST, HOURS_AHEAD, FORECAST_DAYS, MAX_SAVED, normalizePlace } = require('./js/core.js');
 const geocode = require('./lib/geocode.js');
+const archiveStats = require('./lib/archive.js');
 
 const ROOT = __dirname;
 const BASE_PORT = Number(process.argv[2] || process.env.PORT || 5240);
@@ -29,8 +30,15 @@ const HOST = process.env.HOST || '127.0.0.1';
 const UPSTREAM_TIMEOUT_MS = 9000;
 const CACHE_TTL_MS = 10 * 60 * 1000;      // 观测数据 10 分钟内复用
 const SEARCH_TTL_MS = 60 * 60 * 1000;     // 地名基本不变，缓存一小时（Photon 是公益服务，省着点用）
+const ARCHIVE_TTL_MS = 24 * 60 * 60 * 1000; // 历史数据定版后不再变，缓存一天
 const STALE_TTL_MS = 6 * 60 * 60 * 1000;  // 最长容忍 6 小时前的旧数据兜底
 const MAX_QUERY = 80;
+const MAX_BATCH = 12;                     // 一次批量对比最多几个城市
+
+/* 批量对比只要"画曲线 + 列表格"用得上的几个逐小时字段。
+   刻意不照搬 FORECAST_FIELDS.hourly：12 个城市 × 全员逐小时字段，
+   响应体会大十倍，而对比图只用得到气温，分类信息用 current/daily 就够了。 */
+const BATCH_HOURLY_FIELDS = ['temperature_2m', 'weather_code', 'precipitation_probability'];
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -125,9 +133,11 @@ async function fetchJson(url, label) {
  * 统一的上游调用 + 缓存。
  * fresh 命中直接返回；上游失败时如果有过期的旧数据，就带 stale 标记返回，
  * 让前端照常显示、只在角落里注明数据时间。
+ *
+ * ttl 可传入覆盖默认的 10 分钟：历史档案是定版数据，给一天更划算。
  */
-async function cachedJson(key, label, buildUrl, res, transform) {
-  const fresh = cacheGet(key, CACHE_TTL_MS);
+async function cachedJson(key, label, buildUrl, res, transform, ttl) {
+  const fresh = cacheGet(key, ttl || CACHE_TTL_MS);
   if (fresh) {
     sendJson(res, 200, { ok: true, cached: true, data: transform ? transform(fresh.value) : fresh.value });
     return;
@@ -247,6 +257,152 @@ async function handleForecast(url, res) {
   await cachedJson(key, '天气数据', build, res);
 }
 
+/** 解析一批坐标："30.29,39.90" + "120.16,116.40" → [{lat,lon}, ...] */
+function parseCoordList(latRaw, lonRaw) {
+  if (typeof latRaw !== 'string' || typeof lonRaw !== 'string') return null;
+  const lats = latRaw.split(',');
+  const lons = lonRaw.split(',');
+  if (!lats.length || lats.length !== lons.length) return null;
+  if (lats.length > MAX_BATCH) return null;
+
+  const out = [];
+  for (let i = 0; i < lats.length; i++) {
+    const lat = parseCoord(lats[i], 90);
+    const lon = parseCoord(lons[i], 180);
+    if (lat == null || lon == null) return null;
+    out.push({ lat, lon });
+  }
+  return out;
+}
+
+/**
+ * 多城市批量预报。
+ *
+ * 上游支持一次请求传多组坐标（逗号分隔），返回一个数组。这一点很关键：
+ * 逐个城市发请求的话，对比 12 个城市就是 12 次往返，
+ * 而免费额度是按调用次数算的——批量化之后一次就够。
+ * 缓存按"整批坐标"做键，所以同一组城市的对比视图来回切换不会重复打上游。
+ */
+async function handleBatch(url, res) {
+  const list = parseCoordList(url.searchParams.get('lat'), url.searchParams.get('lon'));
+  if (!list) return fail(res, 400, `坐标列表无效（最多 ${MAX_BATCH} 个，经纬度数量要一致）`);
+
+  const key = 'batch:' + list.map((p) => `${p.lat.toFixed(2)},${p.lon.toFixed(2)}`).join(';');
+  const build = () => {
+    const u = new URL(UPSTREAM.forecast);
+    u.searchParams.set('latitude', list.map((p) => p.lat.toFixed(4)).join(','));
+    u.searchParams.set('longitude', list.map((p) => p.lon.toFixed(4)).join(','));
+    u.searchParams.set('current', FORECAST_FIELDS.current.join(','));
+    u.searchParams.set('daily', FORECAST_FIELDS.daily.join(','));
+    /* hourly 必须一起要：对比图画的就是各城市的逐小时气温曲线。
+       少了它前端只会拿到 current 和 daily，曲线没数据可画，
+       于是对比区会显示成"没有可比较的数据"——症状看着像前端坏了，
+       实际是这里少要了一个参数。 */
+    u.searchParams.set('hourly', BATCH_HOURLY_FIELDS.join(','));
+    u.searchParams.set('timezone', 'auto');
+    u.searchParams.set('forecast_days', String(FORECAST_DAYS));
+    u.searchParams.set('past_hours', String(HOURS_PAST));
+    u.searchParams.set('forecast_hours', String(HOURS_AHEAD));
+    u.searchParams.set('wind_speed_unit', 'kmh');
+    return u.toString();
+  };
+
+  await cachedJson(key, '批量天气数据', build, res, (json) => {
+    // 单个坐标时上游返回对象而不是数组，这里统一成数组，前端不用分情况处理
+    return Array.isArray(json) ? json : [json];
+  });
+}
+
+/* ------------------------------------------------------------------ 空气质量 */
+
+async function handleAir(url, res) {
+  const lat = parseCoord(url.searchParams.get('lat'), 90);
+  const lon = parseCoord(url.searchParams.get('lon'), 180);
+  if (lat == null || lon == null) return fail(res, 400, '坐标无效');
+
+  const key = `air:${lat.toFixed(3)},${lon.toFixed(3)}`;
+  const build = () => {
+    const u = new URL(UPSTREAM.airQuality);
+    u.searchParams.set('latitude', lat.toFixed(4));
+    u.searchParams.set('longitude', lon.toFixed(4));
+    u.searchParams.set('current', AIR_FIELDS.join(','));
+    u.searchParams.set('hourly', AIR_HOURLY_FIELDS.join(','));
+    u.searchParams.set('timezone', 'auto');
+    // 空气质量模型只提供未来 5 天，多要会报错
+    u.searchParams.set('forecast_days', '5');
+    return u.toString();
+  };
+
+  await cachedJson(key, '空气质量数据', build, res);
+}
+
+/* ------------------------------------------------------------------ 历史档案 */
+
+/** 把日期限定在档案接口真正有数据的范围内（1940 至今，且不含今天之后）。 */
+function clampArchiveRange(startRaw, endRaw) {
+  const iso = /^\d{4}-\d{2}-\d{2}$/;
+  if (!iso.test(String(startRaw)) || !iso.test(String(endRaw))) return null;
+
+  const start = String(startRaw);
+  const end = String(endRaw);
+  if (start > end) return null;
+
+  /* 档案数据有几天延迟（要等再分析产品产出），所以结束日期取到前天。
+     直接让用户查"今天"会返回空，看起来像功能坏了。 */
+  const today = new Date();
+  const latest = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 2));
+  const latestIso = latest.toISOString().slice(0, 10);
+
+  const from = start < '1940-01-01' ? '1940-01-01' : start;
+  const to = end > latestIso ? latestIso : end;
+  if (from > to) return null;
+
+  // 一次最多要 5 年：再长的话响应体太大，而且趋势图也画不下
+  const days = (Date.parse(to) - Date.parse(from)) / 86400000;
+  if (days > 366 * 5) return null;
+
+  return { start: from, end: to, clamped: to !== end || from !== start };
+}
+
+async function handleArchive(url, res) {
+  const lat = parseCoord(url.searchParams.get('lat'), 90);
+  const lon = parseCoord(url.searchParams.get('lon'), 180);
+  if (lat == null || lon == null) return fail(res, 400, '坐标无效');
+
+  const range = clampArchiveRange(url.searchParams.get('start'), url.searchParams.get('end'));
+  if (!range) return fail(res, 400, '日期范围无效（格式 YYYY-MM-DD，最多 5 年，且不能晚于前天）');
+
+  /* 粒度由区间长度决定，不让前端传：
+     超过 120 天还按天画，图上每个点不到一个像素，统计出来的"均值"也会被季节平均掉。
+     长区间一律按月聚合，这样才看得出年际变化。 */
+  const span = (Date.parse(range.end) - Date.parse(range.start)) / 86400000;
+  const grain = span > 120 ? 'month' : 'day';
+
+  const key = `hist:${lat.toFixed(3)},${lon.toFixed(3)}:${range.start}:${range.end}:${grain}`;
+  const build = () => {
+    const u = new URL(UPSTREAM.archive);
+    u.searchParams.set('latitude', lat.toFixed(4));
+    u.searchParams.set('longitude', lon.toFixed(4));
+    u.searchParams.set('start_date', range.start);
+    u.searchParams.set('end_date', range.end);
+    u.searchParams.set('daily', ARCHIVE_FIELDS.join(','));
+    u.searchParams.set('timezone', 'auto');
+    u.searchParams.set('wind_speed_unit', 'kmh');
+    return u.toString();
+  };
+
+  /* 历史数据定版后不再变，缓存给一天足够，也省下大量重复调用。 */
+  await cachedJson(key, '历史数据', build, res, (json) => {
+    const stats = archiveStats.build(json, grain);
+    if (!stats) return null;
+    return Object.assign({
+      requestedStart: range.start,
+      requestedEnd: range.end,
+      clamped: range.clamped,
+    }, stats);
+  }, ARCHIVE_TTL_MS);
+}
+
 /* --------------------------------------------------------------- 静态文件 */
 
 /**
@@ -310,6 +466,9 @@ const server = http.createServer((req, res) => {
     route === '/api/search' ? handleSearch :
     route === '/api/place' ? handlePlace :
     route === '/api/forecast' ? handleForecast :
+    route === '/api/batch' ? handleBatch :
+    route === '/api/air' ? handleAir :
+    route === '/api/archive' ? handleArchive :
     null;
 
   if (handler) {

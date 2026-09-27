@@ -22,7 +22,67 @@
 (function () {
   'use strict';
 
-  function measure() {
+  /**
+   * 探针入口。
+   *
+   * 是异步的，因为"多城市对比"和"历史天气"这两块是在主读数渲染完之后才去取数的
+   * （这样首屏不用等它们）。如果在主读数就绪的那一刻就测量，它们还在路上，
+   * 量到的会是"正在取数"的中间状态——那是探针的测量时机不对，
+   * 不是页面的问题。所以先等这两块落地，再开始测。
+   *
+   * 最多等 20 秒；即使超时也照测，measure 里会把"还没落地"如实报出来。
+   */
+  /**
+   * 只跑一次。
+   *
+   * app.js 每次渲染完成都会调 verifyHook，而页面在启动阶段会渲染好几轮
+   * （收藏栏补数据、对比区补数据、切换城市……）。不加这个闩的话，
+   * 交互自检会并发跑好几遍——而后面的那一遍会看到前面那遍改过的页面状态
+   * （比如它自己用搜索加进去的城市），于是"默认只有 1 个城市"这种断言
+   * 会在第二轮里失败。那是探针自己污染了自己，不是页面的问题。
+   */
+  let started = false;
+
+  async function run() {
+    if (started) return;
+    started = true;
+    const cmpNote = () => document.querySelector('#cmp-note');
+    const settled = () => {
+      /* 对比区：清单里的城市数 = 图上的曲线数，才算数据真的到齐。
+         只看"图显示了"不行——图可能是上一轮渲染留下的，而这一轮还在取数。
+
+         "一个城市都没有"要单独判：那是"还没开始"和"确实空了"两种情况的共同表现，
+         不能一律当成"就绪"。只有提示行明确说了原因（出错／没有可用数据／引导文案），
+         才算真的定下来了。否则探针会在默认值还没算出来时就量一次，
+         把"0 个城市"报成"默认值不对"——那是测量时机的问题，不是页面的问题。 */
+      const chips = document.querySelectorAll('#cmp-chips .cmp-chip').length;
+      const lines = document.querySelectorAll('.cmp-line').length;
+      const note = (cmpNote() || {}).textContent || '';
+      const compareReady = chips >= 2
+        ? (chips === lines || /出错/.test(note))
+        : chips === 1
+          ? (/还能|上限|先移出/.test(note) || lines === 1)
+          : /出错|没有可用数据|搜索框加/.test(note);
+
+      const historyReady = document.querySelectorAll('#history-stats .stat').length > 0
+        || /取不到|没有历史数据|出错/.test(document.querySelector('#history-hint').textContent);
+      return compareReady && historyReady;
+    };
+
+    const deadline = Date.now() + 20000;
+    while (!settled() && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    await measure();
+  }
+
+  window.__CLOUD_VERIFY__ = run;
+
+  /**
+   * 是 async 的：交互自检里有一段要等对比区的搜索出候选（要打地名服务），
+   * 只能 await，不能靠固定 sleep 猜时间。
+   */
+  async function measure() {
     const out = { viewport: { w: innerWidth, h: innerHeight }, issues: [], metrics: {} };
 
     /* ------------------------------------------------------------ 颜色工具 */
@@ -392,6 +452,262 @@
       /* 7.6 定位按钮在没有权限时不该把页面搞崩：只检查它是可用的按钮 */
       const locate = document.querySelector('#locate-btn');
       step('定位按钮可用', !!locate && !locate.disabled);
+
+      /* ---------------------------------------------------- 7.7 扩展功能 */
+
+      /* 天象动画：主读数那个符号必须是开动画的版本，
+         而 7 日条带里的小符号不能开——一排都在动是干扰而不是信息。 */
+      const bigIcon = document.querySelector('#now-icon svg');
+      step('主读数天气符号开了动画', !!bigIcon && bigIcon.classList.contains('wx-icon--animate'));
+      const smallIcons = document.querySelectorAll('.week__icon svg');
+      step('7 日符号保持静态',
+        smallIcons.length > 0 && Array.prototype.every.call(smallIcons, (s) => !s.classList.contains('wx-icon--animate')),
+        smallIcons.length + ' 个小符号');
+
+      /* 空气质量：AQI 必须是数字，且和六级分类对得上 */
+      const aqiText = document.querySelector('#m-aqi').textContent.trim();
+      const aqiLevel = document.querySelector('#m-aqi-level').textContent.trim();
+      if (/^\d+$/.test(aqiText)) {
+        const aqiNum = Number(aqiText);
+        step('空气质量给出了 AQI', aqiNum >= 0 && aqiNum <= 500, aqiText + ' ' + aqiLevel);
+        const expectLevel = window.CloudAqi.levelOf(aqiNum);
+        step('AQI 与六级分类一致', !!expectLevel && expectLevel.name === aqiLevel,
+          aqiLevel + ' vs ' + (expectLevel && expectLevel.name));
+        step('AQI 指针落在色带上', /%/.test(document.querySelector('#aqi-dot').style.left || ''),
+          document.querySelector('#aqi-dot').style.left);
+        step('空气质量明细列出污染物', document.querySelectorAll('.air__item').length >= 2,
+          document.querySelectorAll('.air__item').length + ' 项');
+        step('明细里标出了首要污染物',
+          document.querySelectorAll('.air__item--primary').length <= 1);
+      } else {
+        // 拿不到空气质量时显示 "--" 是允许的，但必须明说没有数据
+        step('拿不到空气质量时明确说暂无数据',
+          aqiText === '--' && /暂无/.test(document.querySelector('#m-aqi-primary').textContent),
+          aqiText + ' / ' + document.querySelector('#m-aqi-primary').textContent);
+      }
+
+      /* 紫外线 */
+      const uvText = document.querySelector('#m-uv').textContent.trim();
+      step('紫外线有读数或明确缺失', /^\d+$/.test(uvText) || uvText === '--', uvText);
+
+      /* 预警：可能出现也可能不出现（看天气），两种状态都要自洽 */
+      const alertsBox = document.querySelector('#alerts');
+      const alertItems = document.querySelectorAll('.alert');
+      if (alertItems.length) {
+        step('有预警时预警条可见', !alertsBox.hidden);
+        step('预警条写明非官方发布', /非官方发布/.test(alertsBox.textContent));
+        step('每条预警都给出推导依据',
+          Array.prototype.every.call(alertItems, (a) => /依据：/.test(a.textContent)));
+        step('预警级别色条已着色',
+          Array.prototype.every.call(alertItems, (a) => /--alert-color:\s*#/.test(a.getAttribute('style') || '')));
+      } else {
+        step('无预警时预警条隐藏', alertsBox.hidden);
+      }
+
+      /* 多城市对比。
+       *
+       * 这一段自己会改页面状态（加城市、删城市），所以顺序很关键：
+       * 先量"默认长什么样"，再验交互。defaultSnapshot 就是为这个留的——
+       * 不带快照的话，后面加进去的城市会把前面那条断言一起带偏。 */
+      const cmpChips = () => document.querySelectorAll('#cmp-chips .cmp-chip').length;
+      const cmpLines = () => document.querySelectorAll('.cmp-line').length;
+      const chipNames = () => Array.prototype.map.call(
+        document.querySelectorAll('.cmp-chip__name'), (n) => n.textContent.trim());
+
+      const cmpInput = document.querySelector('#cmp-input');
+      step('对比区有独立的城市搜索框', !!cmpInput && cmpInput.type === 'search');
+      step('对比区搜索框与顶部搜索框是两个不同的输入框',
+        cmpInput && cmpInput !== document.querySelector('#seek-input'));
+
+      const chips = cmpChips();
+      const chipsNow = () => Array.prototype.map.call(
+        document.querySelectorAll('.cmp-chip__name'), (n) => n.textContent.trim());
+      // 失败时要把内部状态一起报出来，否则只知道"0 个"，不知道是"清单空"还是"没渲染"
+      const uiState = window.__CLOUD_UI__ || {};
+      const stateInfo = uiState.debug
+        ? JSON.stringify(uiState.debug())
+        : '清单里 ' + (uiState.pickCount ? uiState.pickCount() : '?') + ' 个';
+      /* 默认只放当前城市：图先画着它自己的曲线，名额留给用户主动加。
+         默认塞满会让"想加一个城市"变成"必须先删一个"——那是把默认值当成了结论。 */
+      step('对比清单默认只有 1 个城市', chips === 1, chips + ' 个：' + chipsNow().join('、') + '（' + stateInfo + '）');
+
+      if (chips === 1) {
+        const only = chipsNow()[0] || '';
+        const here = document.querySelector('#place-name').textContent.trim();
+        step('默认放的就是当前城市', only === here, `对比里是「${only}」，当前城市是「${here}」`);
+        step('只有一个城市时也画出曲线', cmpLines() === 1, cmpLines() + ' 条');
+        step('只有一个城市时隐藏对照表',
+          document.querySelector('#compare-table-wrap').hidden,
+          document.querySelector('#compare-table-wrap').hidden ? '已隐藏' : '仍显示');
+        step('计数显示为 1 / 5',
+          /1 \/ 5/.test(document.querySelector('#compare-aside').textContent),
+          document.querySelector('#compare-aside').textContent.trim());
+        step('提示行说明还能加几个',
+          /还能/.test(document.querySelector('#cmp-note').textContent)
+          || /还能加/.test(document.querySelector('#compare-aside').textContent),
+          document.querySelector('#cmp-note').textContent.trim() + ' ｜ '
+          + document.querySelector('#compare-aside').textContent.trim());
+      } else if (chips >= 2) {
+        step('对比图画出多条曲线', cmpLines() === chips, cmpLines() + ' 条 / ' + chips + ' 个城市');
+        step('对比表列出了城市', document.querySelectorAll('.compare__table tbody tr').length === chips + 1,
+          '含表头共 ' + document.querySelectorAll('.compare__table tbody tr').length + ' 行');
+        // 上限要写在明处：用户得事先知道能比几个，而不是加第六个时才被拒
+        const noteText = document.querySelector('#cmp-note').textContent;
+        step('提示行写明了上限',
+          /5|五/.test(noteText) || /5|五/.test(document.querySelector('#compare-aside').textContent),
+          noteText.trim() + ' ｜ ' + document.querySelector('#compare-aside').textContent.trim());
+
+        // 图例点击隐藏／恢复
+        const keys = document.querySelectorAll('.compare__key');
+        const beforeLines = cmpLines();
+        keys[0].click();
+        step('点图例能隐藏一个城市', cmpLines() === beforeLines - 1, beforeLines + ' → ' + cmpLines());
+        document.querySelectorAll('.compare__key')[0].click();
+        step('再点一下能恢复', cmpLines() === beforeLines, String(cmpLines()));
+      }
+
+      /* 搜索加入：直接驱动输入框，走的是用户真实路径。
+         这一段要先确认清单没满——满了就加不进去，那是设计如此，不是缺陷。 */
+      const beforeChips = cmpChips();
+      cmpInput.value = '拉萨';
+      cmpInput.dispatchEvent(new Event('input', { bubbles: true }));
+      /* 输入是防抖的（320ms 后发请求），这里等结果出来。
+         不能用固定 sleep 猜时间——地名服务可能慢，所以轮询到候选出现为止。 */
+      const waitFor = async (fn, ms) => {
+        const until = Date.now() + ms;
+        while (Date.now() < until) {
+          if (fn()) return true;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        return false;
+      };
+      const appeared = await waitFor(() => !document.querySelector('#cmp-list').hidden
+        && document.querySelectorAll('#cmp-list .seek__opt').length > 0, 12000);
+
+      if (appeared) {
+        const optCount = document.querySelectorAll('#cmp-list .seek__opt').length;
+        const blockedCount = document.querySelectorAll('#cmp-list .seek__opt--blocked').length;
+        step('对比区搜索能出候选', true, optCount + ' 个候选，其中 ' + blockedCount + ' 个已不可选');
+        // 挑一个"没被挡住"的候选来加，否则点的是已经加过的那个
+        const firstOpt = Array.prototype.find.call(
+          document.querySelectorAll('#cmp-list .seek__opt'),
+          (n) => !n.classList.contains('seek__opt--blocked'));
+        if (!firstOpt) {
+          step('有可加入的候选（未验到：候选都已在对比里）', true, '跳过');
+        } else {
+          const optName = firstOpt.querySelector('.seek__opt-name').textContent.trim();
+          firstOpt.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+          await new Promise((r) => setTimeout(r, 60));
+          step('选中候选后加进了对比清单', cmpChips() === beforeChips + 1,
+            beforeChips + ' → ' + cmpChips() + `（点了「${optName}」，提示：${document.querySelector('#cmp-note').textContent.trim()}）`);
+          step('加进来的正是候选里那个城市',
+            Array.prototype.some.call(document.querySelectorAll('.cmp-chip__name'), (n) => n.textContent.trim() === optName),
+            optName);
+          step('新城市取到数据后画进了图',
+            (await waitFor(() => cmpLines() === cmpChips(), 12000)) || cmpLines() === cmpChips(),
+            cmpLines() + ' 条线 / ' + cmpChips() + ' 个城市');
+          // 加到两个城市之后，对照表就该出现了
+          step('加到 2 个城市后对照表出现',
+            cmpChips() < 2 || !document.querySelector('#compare-table-wrap').hidden,
+            cmpChips() + ' 个城市，表格' + (document.querySelector('#compare-table-wrap').hidden ? '仍隐藏' : '已显示'));
+        }
+      } else {
+        // 地名服务没响应时不算失败，但要说清是没验到
+        step('对比区搜索能出候选（未验到：地名服务无响应）', true, '跳过');
+      }
+
+      /* 移除：点标签上的叉，城市应当从清单里消失 */
+      const afterAdd = cmpChips();
+      const drop = document.querySelector('#cmp-chips [data-drop-pick]');
+      if (drop) {
+        drop.click();
+        await new Promise((r) => setTimeout(r, 80));
+        step('点叉能把城市移出对比', cmpChips() === afterAdd - 1, afterAdd + ' → ' + cmpChips());
+      } else {
+        step('已选城市带移除按钮', false);
+      }
+
+      /* 上限：把清单填到 40 个城市也没用，必须停在 5 个 */
+      step('对比清单不超过 5 个', cmpChips() <= 5, cmpChips() + ' 个');
+
+      /* 上限真的会拦住新增：直接从页面状态里读。
+         光看 chips 数量不够——收藏恰好只有 5 个时，数量对并不能说明"上限生效了"。
+         所以这里主动往清单里塞第 6 个，看它会不会被拦住。 */
+      const ui = window.__CLOUD_UI__;
+      if (ui && typeof ui.addPick === 'function') {
+        /* 假城市之间必须隔得足够远。应用按经纬度判重（约 5 公里内算同一个地方，
+           这是为了修"同名不同省"的问题），挨得太近会被当成同一个城市合并掉，
+           于是循环永远填不满——那是判重逻辑对，不是上限没生效。 */
+        const fakeCities = [];
+        for (let i = 0; i < 8; i++) {
+          fakeCities.push({
+            id: 'probe-' + i,
+            name: '探针城市' + i,
+            latitude: 10 + i * 3,
+            longitude: 100 + i * 3,
+          });
+        }
+
+        for (const city of fakeCities) {
+          if (ui.canAdd(city) !== null) break;
+          ui.addPick(city);
+          await new Promise((r) => setTimeout(r, 20));
+        }
+
+        step('强行加入会被上限拦住', cmpChips() === ui.maxCompare,
+          '加到 ' + cmpChips() + ' 个就停了（上限 ' + ui.maxCompare + '）');
+        step('拒绝时给出了原因',
+          /上限|最多|先移出/.test(document.querySelector('#cmp-note').textContent),
+          document.querySelector('#cmp-note').textContent.trim());
+
+        /* 清理：把探针加的假城市移掉，否则后面的测量会带上它们。
+           按 id 找，不按名字——名字里带"探针"只是巧合的命名，按 id 更可靠。 */
+        for (const city of fakeCities) {
+          const btn = document.querySelector(`#cmp-chips [data-drop-pick="${city.id}"]`);
+          if (btn) {
+            btn.click();
+            await new Promise((r) => setTimeout(r, 20));
+          }
+        }
+
+        /* 探针必须把对比清单还原成"用户从没动过"的状态。
+           为什么非还原不可：截图/自检共用同一个 Chrome 用户目录，
+           而清单存在 localStorage 里。探针如果留下"用户把城市全删光了 + touched"，
+           下一次运行读到的就是这个状态——它看起来完全合法（用户确实可以删空），
+           于是"默认只有 1 个城市"这条断言从第二次起一直失败。
+           这已经不是页面 bug，是测试在污染自己的环境，所以清理要做到位。 */
+        ui.resetPicks();
+        try { localStorage.removeItem('cloud-atlas.compare.v2'); } catch (e) { /* 存不了就算了 */ }
+        try { localStorage.removeItem('cloud-atlas.compare'); } catch (e) { /* 同上 */ }
+        await new Promise((r) => setTimeout(r, 80));
+        step('探针把清单还原成默认（不污染下次运行）',
+          ui.pickCount() === 1, ui.pickCount() + ' 个');
+      } else {
+        step('对比清单可编程访问（用于验证上限）', false, '没找到 __CLOUD_UI__');
+      }
+
+      /* 历史：取到数据时统计格与曲线都要在，否则要有明确说明 */
+      const histStats = document.querySelectorAll('#history-stats .stat').length;
+      if (histStats) {
+        step('历史区给出统计格', histStats >= 4, histStats + ' 格');
+        step('历史曲线已画出', !!document.querySelector('#history-plot svg'));
+        step('历史曲线含均值参考线', !!document.querySelector('.hist-bar-avg'));
+        step('历史区给出天气构成', document.querySelectorAll('.compose__item').length >= 1);
+        step('历史区给出文字结论', document.querySelectorAll('#history-reading li').length >= 1);
+        step('历史说明标明了区间',
+          /\d{4}-\d{2}-\d{2}/.test(document.querySelector('#history-aside').textContent),
+          document.querySelector('#history-aside').textContent.trim());
+      } else {
+        step('历史区在取数中或失败时有说明',
+          document.querySelector('#history-hint').textContent.trim().length > 0,
+          document.querySelector('#history-hint').textContent.trim().slice(0, 30));
+      }
+
+      const rangeBtns = document.querySelectorAll('#history-ranges [data-range]');
+      if (rangeBtns.length) {
+        const pressed = Array.prototype.filter.call(rangeBtns, (b) => b.getAttribute('aria-pressed') === 'true').length;
+        step('时间范围有且只有一个被选中', pressed === 1, pressed + ' 个选中');
+      }
     } catch (err) {
       step('交互自检过程本身出错', false, err.message);
     }
@@ -401,11 +717,19 @@
       if (!d.ok) out.issues.push({ kind: 'interaction', note: '交互「' + d.what + '」不通过　' + d.detail });
     }
 
+    /* app.js 会把渲染阶段的异常记在 window.__CLOUD_ERRORS__ 里。
+       探针抓不到异步异常，所以只能读这份记录——
+       没有这一步的话，"某个区块静默失败"在自检里是完全隐形的。 */
+    const jsErrors = (window.__CLOUD_ERRORS__ || []).slice();
+    out.metrics['页面异常'] = jsErrors.length;
+    for (const e of jsErrors) out.issues.push({ kind: 'js-error', note: e });
+
     document.title = 'RESULT:' + JSON.stringify(out);
   }
 
-  /* app.js 每次渲染完成后调用这里。
-     挂成全局函数而不是用事件：需要的是"此刻的版面"，
-     事件会被合并或延迟，测量就会落到错误的时机。 */
-  window.__CLOUD_VERIFY__ = measure;
+  /* 入口挂在 window 上，由 app.js 在每次渲染完成后调用。
+     挂函数而不是用事件：需要的是"那一处渲染之后的版面"，
+     事件会被合并或延迟，测量就会落到错误的时机。
+     这里挂的是异步的 run（它内部等扩展区块落地后再 measure），
+     所以 app.js 那边不需要 await——结果是通过 document.title 交出去的。 */
 })();

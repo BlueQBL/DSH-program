@@ -111,27 +111,31 @@
     + '<line x1="14" y1="22" x2="50" y2="22"/><line x1="12" y1="30" x2="52" y2="30"/>'
     + '<line x1="16" y1="38" x2="48" y2="38"/><line x1="22" y1="46" x2="42" y2="46"/></g>';
 
-  /* 晴：圆盘填斜排线 + 一圈短辐条。辐条是「仪表刻度」的来源，不是光芒。 */
-  const SUN_RAYS = '<g stroke="currentColor" stroke-width="1.4" stroke-linecap="round" fill="none">'
+  /* 晴：圆盘填斜排线 + 一圈短辐条。辐条是「仪表刻度」的来源，不是光芒。
+     辐条单独成组并带 wx-rays 类，只有大号符号才会让它慢慢转（见 CSS 的 .wx-icon--animate）。 */
+  const SUN_RAYS = '<g class="wx-rays" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" fill="none">'
     + '<line x1="32" y1="6" x2="32" y2="11"/><line x1="32" y1="53" x2="32" y2="58"/>'
     + '<line x1="6" y1="32" x2="11" y2="32"/><line x1="53" y1="32" x2="58" y2="32"/>'
     + '<line x1="13.6" y1="13.6" x2="17.1" y2="17.1"/><line x1="46.9" y1="46.9" x2="50.4" y2="50.4"/>'
     + '<line x1="13.6" y1="50.4" x2="17.1" y2="46.9"/><line x1="46.9" y1="17.1" x2="50.4" y2="13.6"/></g>';
 
-  const MOON = '<path d="M38 12 a20 20 0 1 0 12 34 A16 16 0 0 1 38 12 Z" fill="currentColor" fill-opacity="0.85"/>';
+  /* 月亮：实心月牙。带 wx-moon 类，这样夜间的符号也有自己的动效（极轻微的明暗呼吸）。 */
+  const MOON = '<path class="wx-moon" d="M38 12 a20 20 0 1 0 12 34 A16 16 0 0 1 38 12 Z" fill="currentColor" fill-opacity="0.85"/>';
 
   /**
    * 生成一个天象符号。
    * @param {number|null} code WMO 天气码
    * @param {boolean} isDay 是否白天
-   * @param {{size?:number, cls?:string, title?:string, tone?:string}} [opts]
+   * @param {{size?:number, cls?:string, title?:string, tone?:string, animate?:boolean}} [opts]
    *        tone 可以覆盖由 code 推出的基调——7 日条带里夜间符号需要显式指定 night。
+   *        animate 打开落雨、飘雪、闪电和太阳缓转；只建议用在大号符号上，
+   *        7 日条带里 30px 的小符号动起来是干扰而不是信息。
    */
   function svg(code, isDay, opts) {
     const o = opts || {};
     const size = o.size || 64;
     const tone = o.tone || (C ? C.sky(code, isDay) : fallbackTone(code, isDay));
-    const cls = ['wx-icon', o.cls || ''].filter(Boolean).join(' ');
+    const cls = ['wx-icon', o.animate ? 'wx-icon--animate' : '', o.cls || ''].filter(Boolean).join(' ');
     const label = o.title || (C ? C.describeCode(code).label : '');
 
     const aria = label
@@ -189,6 +193,17 @@
       + '<path d="M18 44 h27 a9.5 9.5 0 0 0 0.6-19 A13 13 0 0 0 20 22.4 A10 10 0 0 0 18 44 Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>';
   }
 
+  /**
+   * 各天象的形体。
+   *
+   * animate 只控制要不要加 wx-icon--animate 这个类，**形状完全不变**——
+   * 具体动什么由 CSS 决定（见 styles.css 的「天象动效」一节）。
+   *
+   * 为什么不在这里决定哪种天气加哪个动画类：
+   * 那样静态版和动画版会生成不同的标签结构，同一个天气在 7 日条带（静态）
+   * 和主读数（动）里就成了两个图形。全部交给 CSS，几何就永远一致，
+   * 而且"要不要动"变成一个纯粹的样式问题，跟数据无关。
+   */
   function body(tone, isDay) {
     const t = baseTone(tone);
     const night = isDay !== true;
@@ -213,10 +228,9 @@
       // 多云在白天的云后还露一小块天体：白天是太阳盘，夜里是月亮
       const extra = t === 'cloud'
         ? (night
-          ? '<g transform="translate(24 -9) scale(0.9)">' + MOON + '</g>'
+          ? '<g class="wx-moon" transform="translate(24 -9) scale(0.9)">' + MOON + '</g>'
           : '<use href="#ct-disc-sm" clip-path="url(#ct-clip-disc-sm)" fill="#ct-clear" transform="translate(25 -8) scale(0.95)"/>')
-        : '';
-      return `<g class="wx-body">${extra}${cloudShape(fill)}</g>`;
+        : '';      return `<g class="wx-body">${extra}${cloudShape(fill)}</g>`;
     }
 
     if (t === 'fog') return `<g class="wx-body">${FOG_RULES}</g>`;
@@ -227,7 +241,7 @@
     }
 
     if (t === 'snow') {
-      return `<g class="wx-body">${cloudShape(fill)}${SNOW_DOTS}</g>`;
+      return `<g class="wx-body">${cloudShape(fill)}<g class="wx-fall">${SNOW_DOTS}</g></g>`;
     }
 
     if (t === 'storm') {

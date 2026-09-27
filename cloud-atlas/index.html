@@ -58,6 +58,16 @@
 
   <div class="notices" id="notices" aria-live="polite"></div>
 
+  <!-- 预警条：只在按标准达到预警量级时出现。
+       措辞上必须写明"本地推算"，不能让人以为是官方发布的预警。 -->
+  <section class="alerts" id="alerts" hidden aria-labelledby="alerts-title">
+    <header class="alerts__head">
+      <h2 class="alerts__title" id="alerts-title">天气提示</h2>
+      <p class="alerts__note">按气象标准阈值由预报数据推算 · 非官方发布</p>
+    </header>
+    <ul class="alerts__list" id="alerts-list"></ul>
+  </section>
+
   <main class="deck">
     <aside class="rail" aria-labelledby="rail-title">
       <h2 class="rail__title eyebrow" id="rail-title">常用城市<span class="eyebrow__count" id="rail-count">0</span></h2>
@@ -96,7 +106,12 @@
                  动作在下（说明可以对它做什么），用一条发丝线隔开 -->
             <div class="readout__foot">
               <p class="readout__note" id="obs-note"></p>
-              <div class="readout__acts" id="obs-acts"></div>
+              <!-- 收藏按钮的文案和状态由 JS 填，但元素本身先放在这里：
+                   放在 HTML 里（而不是 JS 创建）能让结构自检和辅助工具都看得到它，
+                   也不会有"按钮一会儿有一会儿没有"的布局跳动。 -->
+              <div class="readout__acts" id="obs-acts">
+                <button class="collect" id="collect-btn" type="button" hidden>收藏这个城市</button>
+              </div>
             </div>
           </div>
 
@@ -139,8 +154,38 @@
               <p class="instr__val"><span id="m-pop">--</span><small>%</small></p>
               <p class="instr__sub" id="m-precip">—</p>
             </div>
+            <!-- 空气质量：数值 + 六级色带上的位置 + 首要污染物 -->
+            <div class="instr__cell instr__cell--aqi" id="cell-aqi">
+              <p class="instr__key">空气质量</p>
+              <p class="instr__val"><span id="m-aqi">--</span><small id="m-aqi-level">—</small></p>
+              <div class="aqi-scale" id="aqi-scale" aria-hidden="true">
+                <span class="aqi-scale__band" id="aqi-band"></span>
+                <span class="aqi-scale__dot" id="aqi-dot"></span>
+              </div>
+              <p class="instr__sub" id="m-aqi-primary">—</p>
+            </div>
+            <!-- 紫外线 -->
+            <div class="instr__cell">
+              <p class="instr__key">紫外线</p>
+              <p class="instr__val"><span id="m-uv">--</span><small id="m-uv-word">—</small></p>
+              <p class="instr__sub" id="m-uv-tip">—</p>
+            </div>
           </div>
         </div>
+
+        <!-- 空气质量明细：只在拿到数据后展开，六项污染物 + 健康建议 -->
+        <details class="air" id="air-detail" hidden>
+          <summary class="air__summary">
+            <span class="air__summary-text" id="air-summary-text">空气质量明细</span>
+            <span class="air__chev" aria-hidden="true">▾</span>
+          </summary>
+          <div class="air__body">
+            <p class="air__advice" id="air-advice"></p>
+            <ul class="air__list" id="air-list"></ul>
+            <p class="air__foot">AQI 按《环境空气质量指数（AQI）技术规定》HJ 633—2012 由实时浓度计算。
+              国标口径为 24 小时平均，此处用实时浓度查算，与官方日报会有出入。</p>
+          </div>
+        </details>
 
         <div class="ribbon" id="ribbon" role="img" aria-label="今日气温在全年刻度上的位置">
           <div class="ribbon__track"><span class="ribbon__band" id="ribbon-band"></span><span class="ribbon__dot" id="ribbon-dot"></span></div>
@@ -162,18 +207,94 @@
         <div class="plotbox" id="plotbox"></div>
         <p class="panel__foot">在图上按住左右拖动，或用方向键逐小时读数。</p>
       </section>
-
-      <section class="panel" id="week-panel" aria-labelledby="week-title">
-        <header class="panel__head">
-          <h2 class="panel__title" id="week-title">未来 7 天</h2>
-          <p class="panel__aside">同一温度尺，条越长越暖</p>
-        </header>
-        <div class="week__scale" id="week-scale" aria-hidden="true"></div>
-        <ol class="week" id="week"></ol>
-        <div class="daybox" id="daybox" hidden></div>
-      </section>
     </article>
   </main>
+
+  <!-- 7 日往后都是整幅宽的区块：这样 7 日量程条有足够横向空间，
+       下面的对比表和历史趋势也才能铺开。 -->
+  <section class="panel panel--wide" id="week-panel" aria-labelledby="week-title">
+    <header class="panel__head">
+      <h2 class="panel__title" id="week-title">未来 7 天</h2>
+      <p class="panel__aside">同一温度尺，条越长越暖</p>
+    </header>
+    <div class="week__scale" id="week-scale" aria-hidden="true"></div>
+    <ol class="week" id="week"></ol>
+    <div class="daybox" id="daybox" hidden></div>
+  </section>
+
+  <!-- 多城市对比：默认装入收藏城市，但用户可以自己搜、自己决定比哪几个。
+       对比清单与收藏是分开的——不然"为了对比得先收藏"又变成了一道坎。 -->
+  <section class="panel panel--wide" id="compare-panel" aria-labelledby="compare-title">
+    <header class="panel__head">
+      <h2 class="panel__title" id="compare-title">多城市对比</h2>
+      <p class="panel__aside" id="compare-aside">最多 5 个城市</p>
+    </header>
+
+    <div class="cmp-pick">
+      <form class="cmp-seek" id="cmp-form" role="search" autocomplete="off">
+        <label class="seek__label" for="cmp-input">加入对比的城市</label>
+        <div class="cmp-seek__field">
+          <input id="cmp-input" name="q" type="search" placeholder="搜索城市加入对比"
+                 role="combobox" aria-expanded="false" aria-controls="cmp-list"
+                 aria-autocomplete="list" aria-describedby="cmp-note">
+          <button class="cmp-seek__go" type="submit">加入</button>
+        </div>
+        <ul class="seek__list cmp-seek__list" id="cmp-list" role="listbox" aria-label="加入对比的城市候选" hidden></ul>
+      </form>
+
+      <div class="cmp-picks">
+        <p class="cmp-picks__label" id="cmp-note" aria-live="polite"></p>
+        <ul class="cmp-chips" id="cmp-chips"></ul>
+      </div>
+    </div>
+
+    <div class="compare" id="compare">
+      <div class="compare__chart" id="compare-chart" hidden></div>
+      <div class="compare__table-wrap" id="compare-table-wrap" hidden>
+        <table class="compare__table" id="compare-table"></table>
+      </div>
+      <div class="compare__legend" id="compare-legend"></div>
+    </div>
+  </section>
+
+  <!-- 历史天气：先选区间，再看统计、趋势曲线与天气构成 -->
+  <section class="panel panel--wide" id="history-panel" aria-labelledby="history-title">
+    <header class="panel__head">
+      <h2 class="panel__title" id="history-title">历史天气</h2>
+      <p class="panel__aside" id="history-aside">选一段时间看趋势</p>
+    </header>
+    <div class="ranges" id="history-ranges" role="group" aria-label="历史时间范围">
+      <button class="ranges__btn" type="button" data-range="30">近 30 天</button>
+      <button class="ranges__btn" type="button" data-range="92">近 3 个月</button>
+      <button class="ranges__btn" type="button" data-range="365">近一年</button>
+      <button class="ranges__btn" type="button" data-range="1095">近三年</button>
+      <button class="ranges__btn" type="button" data-range="1825">近五年</button>
+      <button class="ranges__btn" type="button" id="history-custom">自定义…</button>
+    </div>
+    <div class="custom-range" id="custom-range" hidden>
+      <label>开始 <input type="date" id="hist-start"></label>
+      <label>结束 <input type="date" id="hist-end"></label>
+      <button class="ranges__btn ranges__btn--go" type="button" id="hist-go">查询这段</button>
+    </div>
+    <div class="history" id="history">
+      <p class="compare__hint" id="history-hint">正在准备历史数据…</p>
+      <div class="history__stats" id="history-stats"></div>
+      <figure class="history__figure">
+        <figcaption class="history__cap" id="history-cap"></figcaption>
+        <div class="plotbox" id="history-plot"></div>
+      </figure>
+      <div class="history__split">
+        <div class="history__compose">
+          <h3 class="history__sub">天气构成</h3>
+          <ul class="compose" id="history-compose"></ul>
+        </div>
+        <div class="history__notes">
+          <h3 class="history__sub">读到的几件事</h3>
+          <ul class="history__reading" id="history-reading"></ul>
+        </div>
+      </div>
+    </div>
+  </section>
 
   <footer class="colophon">
     <p>数据来源 <a href="https://open-meteo.com/" target="_blank" rel="noreferrer noopener">Open-Meteo</a>（WMO 天气码）；定位反查由本机服务代理。</p>
@@ -182,6 +303,8 @@
 </div>
 
 <script src="js/core.js"></script>
+<script src="js/aqi.js"></script>
+<script src="js/alerts.js"></script>
 <script src="js/icons.js"></script>
 <script src="js/chart.js"></script>
 <script>

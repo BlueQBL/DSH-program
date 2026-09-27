@@ -13,6 +13,8 @@
   const C = window.CloudCore;
   const Icons = window.CloudIcons;
   const Chart = window.CloudChart;
+  const Aqi = window.CloudAqi;
+  const Alerts = window.CloudAlerts;
 
   /* ---------------------------------------------------------------- 存储键 */
 
@@ -20,11 +22,43 @@
     unit: 'cloud-atlas.unit',
     saved: 'cloud-atlas.saved',
     last: 'cloud-atlas.last',
+    range: 'cloud-atlas.range',
+    /* 对比清单换成了带版本号的键。
+       换键的原因：旧版把"自动生成的默认清单"也写进了存储，于是
+       "自动填的"和"用户亲手挑的"在存储里长得一模一样，事后无法分辨。
+       结果就是——用户升级之后，旧版自动写进去的那份清单被当成他自己的选择读回来，
+       新的默认值（只有当前城市）永远不生效。
+       旧键不再是"有没有存过"的依据，只作为迁移的输入。 */
+    compare: 'cloud-atlas.compare.v2',
+    compareLegacy: 'cloud-atlas.compare',
   };
 
   const DEFAULT_PLACE = { name: '北京', region: '北京', country: '中国', latitude: 39.9042, longitude: 116.4074 };
   const REFRESH_MS = 10 * 60 * 1000;   // 与 server.js 的缓存时长对齐
   const DEFAULT_HINT = '输入地名开始查询，或点「定位」取当地天气';
+
+  /* 对比图的配色序列。相邻两个必须能一眼分开，所以不用同色系的深浅，
+     而是按色相轮转；顺序固定，这样同一个城市每次都是同一个颜色。 */
+  const SERIES_COLORS = [
+    '#e6a13c', '#5fb7d4', '#c58ae0', '#79c47a', '#e2795f',
+    '#a8b7c4', '#d9c95a', '#6f9fe0', '#dd8ab0', '#8fd0b8',
+    '#c9a06a', '#9aa7e0',
+  ];
+
+  /* 一次最多对比几个城市。
+     不是随手定的数：对比图共用一根温度轴，线条越多越难分辨。
+     5 条是这个配色序列加上图例标签还能"一眼对得上"的上限，
+     再多就得靠逐个点图例来回试，那已经不叫对比了。 */
+  const MAX_COMPARE = 5;
+
+  /* 历史区间的预设。range 是"往前多少天"，null 表示用自定义起止。 */
+  const RANGES = [
+    { days: 30, label: '近 30 天' },
+    { days: 92, label: '近 3 个月' },
+    { days: 365, label: '近一年' },
+    { days: 1095, label: '近三年' },
+    { days: 1825, label: '近五年' },
+  ];
 
   /* ------------------------------------------------------------------ 状态 */
 
@@ -43,6 +77,20 @@
     loadSeq: 0,
     cursor: null,
     week: [],
+    air: null,          // js/aqi.js 的 fromCurrent 结果
+    airSeries: [],      // 逐小时 AQI 序列（趋势用）
+    alerts: [],
+    compare: [],        // [{ place, fc, color, visible }] 已取到数据的城市
+    picks: [],          // 用户选中的对比城市（Place[]），顺序即图例顺序
+    picksTouched: false, // 用户是否手动改过对比清单
+    picksReady: false,  // 默认值是否已经算过（本会话内只算一次）
+    picksPending: false, // 上次算的默认值是在"当前城市未知"时算的，要重算
+    legacyPicks: null,  // 旧格式存下来的清单，等收藏载入后再判断怎么处理
+    compareSel: null,   // 对比区搜索的候选与高亮状态
+    compareInflight: null,   // 正在途中的批量请求：{ sig, promise }
+    rangeDays: 30,
+    history: null,
+    historyLoading: false,
   };
 
   /** 最近一次成功取数的时刻，用于判断从后台切回来时要不要补刷。 */
@@ -102,6 +150,48 @@
     weekScale: $('week-scale'),
     week: $('week'),
     daybox: $('daybox'),
+    /* 预警 */
+    alerts: $('alerts'),
+    alertsList: $('alerts-list'),
+    /* 空气质量 */
+    aqi: $('m-aqi'),
+    aqiLevel: $('m-aqi-level'),
+    aqiDot: $('aqi-dot'),
+    aqiPrimary: $('m-aqi-primary'),
+    airDetail: $('air-detail'),
+    airSummary: $('air-summary-text'),
+    airAdvice: $('air-advice'),
+    airList: $('air-list'),
+    uv: $('m-uv'),
+    uvWord: $('m-uv-word'),
+    uvTip: $('m-uv-tip'),
+    /* 多城市对比 */
+    compare: $('compare'),
+    compareChart: $('compare-chart'),
+    compareTableWrap: $('compare-table-wrap'),
+    compareTable: $('compare-table'),
+    compareLegend: $('compare-legend'),
+    compareAside: $('compare-aside'),
+    cmpForm: $('cmp-form'),
+    cmpInput: $('cmp-input'),
+    cmpList: $('cmp-list'),
+    cmpNote: $('cmp-note'),
+    cmpChips: $('cmp-chips'),
+    /* 历史 */
+    history: $('history'),
+    historyHint: $('history-hint'),
+    historyStats: $('history-stats'),
+    historyPlot: $('history-plot'),
+    historyCap: $('history-cap'),
+    historyCompose: $('history-compose'),
+    historyReading: $('history-reading'),
+    historyAside: $('history-aside'),
+    historyRanges: $('history-ranges'),
+    customRange: $('custom-range'),
+    histStart: $('hist-start'),
+    histEnd: $('hist-end'),
+    histGo: $('hist-go'),
+    historyCustom: $('history-custom'),
   };
 
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
@@ -191,6 +281,53 @@
     if (old) old.remove();
   };
 
+  /**
+   * 渲染阶段出错时的统一出口。
+   *
+   * 为什么要有一个：渲染代码里抛异常只会留下一个控制台报错，
+   * 而用户在页面上看到的是"某一块永远停在加载中"——看不出是坏了还是慢。
+   * 这里把原因写到对应区块的提示行上，同时留一份给自检探针读
+   * （verify-probe 会把哪些错误报成测试失败，这样回归测试就能捕捉到）。
+   */
+  const jsErrors = [];
+
+  function reportError(where, err) {
+    const msg = (err && err.message) || String(err);
+    jsErrors.push(`${where}: ${msg}`);
+    if (where === '对比区') {
+      el.cmpNote.dataset.tone = 'error';
+      el.cmpNote.textContent = `对比区出错：${msg}`;
+    } else if (where === '历史区') {
+      el.historyHint.hidden = false;
+      el.historyHint.textContent = `历史区出错：${msg}`;
+    } else {
+      notice(`<b>${esc(where)}出错</b>：${esc(msg)}`, 'error', { key: 'js' });
+    }
+  }
+
+  // 暴露给自检探针：探针没法捕获异步异常，只能由页面自己记下来给它读
+  window.__CLOUD_ERRORS__ = jsErrors;
+
+  /* 对比清单的最小可编程入口，只给自检用。
+     为什么要开这个口子：上限"最多 5 个"这条规则，靠界面点是验不充分的——
+     收藏恰好只有 5 个时，数一数 chips 也是 5，看不出是上限生效还是凑巧。
+     必须能主动往清单里塞第 6 个，才知道它会不会被拦住。 */
+  window.__CLOUD_UI__ = {
+    canAdd: (place) => addPickBlocker(place),
+    addPick: (place) => addPick(place),
+    pickCount: () => state.picks.length,
+    maxCompare: MAX_COMPARE,
+    resetPicks,
+    // 探针报失败时要把这几个内部标志一起带上，否则只能看到"0 个城市"这种表象
+    debug: () => ({
+      picks: state.picks.length,
+      touched: state.picksTouched,
+      ready: state.picksReady,
+      legacy: state.legacyPicks ? state.legacyPicks.length : null,
+      place: state.place ? state.place.name : null,
+    }),
+  };
+
   /* ------------------------------------------------------------ 着色与标题 */
 
   /** 把天气码与昼夜落成 body 上的基调，整套配色随之切换。 */
@@ -198,6 +335,739 @@
     if (!norm || !norm.current) return;
     const tone = C.sky(norm.current.code, norm.current.isDay);
     if (el.body.dataset.tone !== tone) el.body.dataset.tone = tone;
+  }
+
+  /* ---------------------------------------------------------------- 渲染：预警 */
+
+  /**
+   * 预警条。
+   *
+   * 措辞上有一条硬要求：必须让人看清这是本地推算而不是官方预警。
+   * 所以标题旁边固定带一句「非官方发布」，每条还给出推导依据（哪个要素到了多少）。
+   * 把推算说成"预警发布"是不诚实的——真正的预警还包含发布机构对趋势和影响的判断。
+   */
+  function renderAlerts() {
+    const list = state.alerts;
+    if (!list.length) {
+      el.alerts.hidden = true;
+      el.alertsList.innerHTML = '';
+      return;
+    }
+    el.alerts.hidden = false;
+    el.alertsList.innerHTML = list.map((a) => `
+      <li class="alert" style="--alert-color:${esc(a.color)}">
+        <span class="alert__bar" aria-hidden="true"></span>
+        <span class="alert__icon" aria-hidden="true">${alertGlyph(a.kind)}</span>
+        <div class="alert__main">
+          <p class="alert__headline"><em>${esc(a.kindName + a.levelLabel)}</em>${esc(a.headline)}</p>
+          <p class="alert__detail">${esc(a.detail)}</p>
+          <p class="alert__basis">依据：${esc(a.basis)}　${esc(a.evidence || '')}</p>
+        </div>
+      </li>`).join('');
+  }
+
+  /**
+   * 预警类别的小符号。用简单几何图形而不是天气符号——
+   * 天气符号表示的是"现在天上什么样"，预警表示的是"会有什么危险"，
+   * 两者混用会让用户以为预警图标就是天气图标。
+   */
+  function alertGlyph(kind) {
+    const g = {
+      heat: '<circle cx="12" cy="9" r="4"/><line x1="12" y1="15" x2="12" y2="21"/><line x1="8" y1="18" x2="16" y2="18"/>',
+      cold: '<line x1="12" y1="3" x2="12" y2="21"/><line x1="4" y1="8" x2="20" y2="16"/><line x1="20" y1="8" x2="4" y2="16"/>',
+      wind: '<path d="M3 8h11a3 3 0 1 0-3-3"/><path d="M3 13h15a3 3 0 1 1-3 3"/><path d="M3 18h7"/>',
+      rain: '<path d="M5 10a5 5 0 0 1 9.6-2A4 4 0 0 1 18 16H6a3.5 3.5 0 0 1-1-6Z"/><line x1="8" y1="18" x2="7" y2="21"/><line x1="13" y1="18" x2="12" y2="21"/>',
+      snow: '<line x1="12" y1="3" x2="12" y2="21"/><line x1="4.5" y1="7.5" x2="19.5" y2="16.5"/><line x1="19.5" y1="7.5" x2="4.5" y2="16.5"/>',
+      storm: '<path d="M13 3 6 14h5l-1 7 8-11h-5l0-7Z"/>',
+      fog: '<line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="14" x2="21" y2="14"/><line x1="6" y1="19" x2="18" y2="19"/>',
+      haze: '<circle cx="7" cy="8" r="2"/><circle cx="15" cy="7" r="1.6"/><circle cx="11" cy="12" r="1.8"/><line x1="3" y1="17" x2="21" y2="17"/><line x1="3" y1="20" x2="21" y2="20"/>',
+      uv: '<circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/>',
+    };
+    return `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${g[kind] || g.fog}</svg>`;
+  }
+
+  /* ------------------------------------------------------------ 渲染：空气质量 */
+
+  /**
+   * 空气质量。
+   *
+   * 显示的是按中国国标（HJ 633—2012）算出来的 AQI，不是上游给的美国口径 us_aqi——
+   * 同一份空气两个标准会给出不同的等级，给中国用户看必须用国内口径。
+   * 界面上的措辞也据此写成「实时」：国标口径是 24 小时平均，而这里只有当前浓度，
+   * 与官方日报会有出入，这一点在明细的脚注里说明。
+   */
+  function renderAir() {
+    const air = state.air;
+    if (!air) {
+      // 拿不到就不显示数字，也不要留一个"0"，那会被读成"空气很好"
+      el.aqi.textContent = '--';
+      el.aqiLevel.textContent = '—';
+      el.aqiPrimary.textContent = '暂无数据';
+      el.aqiDot.style.left = '0%';
+      el.airDetail.hidden = true;
+      return;
+    }
+
+    el.aqi.textContent = String(air.aqi);
+    el.aqiLevel.textContent = air.level.name;
+    el.aqiPrimary.textContent = air.primary
+      ? `首要污染物 ${air.primary}`
+      : '无首要污染物';
+    el.aqiDot.style.left = `calc(${(Aqi.positionOnScale(air.aqi) * 100).toFixed(2)}% - 1px)`;
+
+    el.airDetail.hidden = false;
+    el.airSummary.textContent = `空气质量明细 · ${air.level.name}（AQI ${air.aqi}）`;
+    el.airAdvice.textContent = air.level.advice;
+    el.airList.innerHTML = air.detail.map((d) => `
+      <li class="air__item ${d.name === air.primary ? 'air__item--primary' : ''}">
+        <p class="air__item-name">${esc(d.name)}${d.name === air.primary ? ' · 首要' : ''}</p>
+        <p class="air__item-val">${esc(String(d.value))}<small>${esc(d.unit)}</small></p>
+      </li>`).join('');
+
+    renderUv();
+  }
+
+  /** 紫外线：指数 + 强度词 + 一句防护建议 */
+  const UV_WORDS = [
+    { max: 2, word: '最弱', tip: '无需特别防护' },
+    { max: 5, word: '弱', tip: '正常外出即可' },
+    { max: 7, word: '中等', tip: '正午遮阳，涂防晒' },
+    { max: 10, word: '强', tip: '避免长时间暴晒' },
+    { max: Infinity, word: '极强', tip: '尽量留在阴凉处' },
+  ];
+
+  function renderUv() {
+    const raw = (state.air && state.air.uv) != null
+      ? state.air.uv
+      : (state.forecast && state.forecast.current ? state.forecast.current.uv : null);
+    const todayMax = state.forecast && state.forecast.today ? state.forecast.today.uvMax : null;
+    const value = raw != null ? raw : todayMax;
+
+    if (value == null) {
+      el.uv.textContent = '--';
+      el.uvWord.textContent = '—';
+      el.uvTip.textContent = '暂无数据';
+      return;
+    }
+    const lv = UV_WORDS.find((u) => value <= u.max) || UV_WORDS[UV_WORDS.length - 1];
+    el.uv.textContent = String(Math.round(value));
+    el.uvWord.textContent = lv.word;
+    // 同时给出今日峰值：紫外线的危害看的是峰值不是此刻
+    el.uvTip.textContent = todayMax != null && Math.round(todayMax) !== Math.round(value)
+      ? `${lv.tip} · 今日最高 ${Math.round(todayMax)}`
+      : lv.tip;
+  }
+
+  /* ---------------------------------------------------------- 渲染：多城市对比 */
+
+  /**
+   * 对比清单的默认值：**只有当前城市**。
+   *
+   * 一开始这里默认装入收藏城市（最多 5 个），后来改掉了。原因是那个默认值本身
+   * 变成了障碍：清单已经占满 5 个名额时，用户想加一个城市反而必须先删掉一个，
+   * 而他那 5 个未必是想对比的。默认值应该是一个"起点"，不是一个"结论"。
+   *
+   * 现在的规则：
+   *   - 有当前城市 → 清单里只放它。曲线上先画着它自己的 24 小时，
+   *     剩下的名额空着，提示行告诉用户还能加几个；
+   *   - 没有当前城市（页面还没取到数）→ 退回收藏里的第一个，
+   *     总比空白强，用户也不会觉得功能没生效。
+   *
+   * 用户手动加过之后（picksTouched），这个默认值就再不生效了。
+   */
+  function defaultPicks() {
+    if (state.place) return [state.place];
+    return state.saved.slice(0, 1);
+  }
+
+  /** 收藏变化时调用：用户没动过对比清单就跟着收藏走，动过就不管。 */
+  function syncCompareDefault() {
+    /* 清单空着时总是回到默认值——即使之前被标记成"用户动过"。
+       这种情况出现在用户把城市一个个删光之后：
+       空清单会让对比区只剩一句引导，而用户下次打开时很可能期望看到当前城市。
+       "空"和"我挑好了这几个"不是一回事，不该用同一个标志对待。 */
+    if (!state.picks.length) {
+      applyDefaultPicks();
+      return;
+    }
+    /* 还没拿到当前城市时算出来的默认值是不可信的：那时 defaultPicks 只能退回
+       "收藏里的第一个"，而启动流程里 boot() 就是在读存储时顺手算过一次。
+       所以这个标记要跟着那段清单一起存下来，等当前城市到位后重算一遍——
+       否则对比区会停在随便挑的一个收藏城市上，而页面显示的是另一个。 */
+    if (state.picksPending) {
+      applyDefaultPicks();
+      return;
+    }
+    if (state.picksTouched) {
+      renderCompare();
+      return;
+    }
+    if (state.picksReady) {
+      renderCompare();
+      return;
+    }
+    applyDefaultPicks();
+  }
+
+  /** 按默认规则重算清单并渲染。 */
+  function applyDefaultPicks() {
+    state.picks = defaultPicks();
+    // 只有真的拿到了当前城市，这份默认值才算数；否则下次还要重算
+    state.picksReady = !!state.place && state.picks.length > 0;
+    state.picksPending = !state.place;
+    if (state.picks.length) state.picksTouched = false;
+    persistPicks();
+    loadCompare();
+  }
+
+  function persistPicks() {
+    /* 存成一个带来源标记的对象，而不是裸数组。
+       source 是关键：'default' 表示这份清单是程序按默认规则填的，
+       'user' 表示用户亲手加过或删过。
+       下次读的时候只认 'user'——这样"程序填的默认值"永远不会被误当成用户的选择。 */
+    persist(STORE.compare, JSON.stringify({
+      v: 2,
+      source: state.picksTouched ? 'user' : 'default',
+      places: JSON.parse(C.serializeSaved(state.picks)),
+    }));
+  }
+
+  /**
+   * 载入对比清单。返回 true 表示清单来自用户自己的选择。
+   *
+   * 两种情况都要处理：
+   *   - 新版格式（带 source）：只有 source === 'user' 才认，否则让新默认值生效；
+   *   - 旧版格式（裸数组）：无法直接判断是"用户挑的"还是"旧版默认填的"，
+   *     所以交给 looksLikeOldDefault() 在收藏载入之后再判——这里只把它记下来。
+   */
+  function persistPicks() {
+    /* 存成一个带来源标记的对象，而不是裸数组。
+       source 是关键：'default' 表示这份清单是程序按默认规则填的，
+       'user' 表示用户亲手加过或删过。
+       下次读的时候只认 'user'——这样"程序填的默认值"永远不会被误当成用户的选择。
+       pending 表示"这份默认值是在还没拿到当前城市时算的"，
+       下次启动要重算，不能当真。 */
+    persist(STORE.compare, JSON.stringify({
+      v: 2,
+      source: state.picksTouched ? 'user' : 'default',
+      pending: !!state.picksPending,
+      places: JSON.parse(C.serializeSaved(state.picks)),
+    }));
+  }
+
+  function readPicks() {
+    state.legacyPicks = null;
+
+    const modern = localStorage.getItem(STORE.compare);
+    if (modern) {
+      let parsed = null;
+      try { parsed = JSON.parse(modern); } catch (e) { parsed = null; }
+      if (parsed && Array.isArray(parsed.places)) {
+        /* 待重算的默认值不能直接认：它是在"当前城市未知"时算的，
+           内容可能只是收藏里的第一个。标记成 pending，等当前城市到位后重算。 */
+        if (parsed.pending) {
+          state.picks = [];
+          state.picksPending = true;
+          state.picksReady = false;
+          state.picksTouched = false;
+          return false;
+        }
+        if (parsed.source === 'user') {
+          state.picks = C.parseSaved(parsed.places).slice(0, MAX_COMPARE);
+          state.picksTouched = true;
+          state.picksReady = true;
+          return true;
+        }
+        // source 是 default（或未知）：不认它，交给默认规则
+        return false;
+      }
+    }
+
+    const legacy = localStorage.getItem(STORE.compareLegacy);
+    if (legacy != null) {
+      const list = C.parseSaved(legacy);
+      if (list.length) {
+        state.legacyPicks = list.slice(0, MAX_COMPARE);
+        return false;   // 待收藏载入后再判
+      }
+    }
+    return false;
+  }
+
+  /**
+   * 迁移判断：旧存的那份清单，到底是用户挑的，还是旧版默认填的？
+   *
+   * 判据是「有没有一个是收藏之外的城市」：
+   *   - 旧版的默认清单 = 收藏城市的前 5 个 → 全部都在收藏里 → 是自动填的，丢掉；
+   *   - 用户如果自己加过城市（旧版能搜非收藏城市），那份清单里必然有不在收藏里的 → 保留。
+   *
+   * 这个判据不完美：用户也可能主动只挑了收藏里的几个城市。但那种情况和
+   * "旧版自动填的"在数据上完全一样、区分不了；而对绝大多数人来说，
+   * 那份清单根本不是自己选的，留着它才是错的。所以这里选择丢掉。
+   */
+  function migrateLegacyPicks() {
+    if (!state.legacyPicks || !state.legacyPicks.length) return;
+
+    const savedIds = new Set(state.saved.map((p) => p.id));
+    const allFromFavourites = state.legacyPicks.every((p) => savedIds.has(p.id));
+    const legacy = state.legacyPicks;
+    state.legacyPicks = null;
+
+    if (allFromFavourites) {
+      // 旧版自动填的：清掉，让新的默认值（只有当前城市）生效
+      try {
+        localStorage.removeItem(STORE.compareLegacy);
+      } catch (e) { /* 清不掉也不影响本次运行 */ }
+      state.picks = [];
+      state.picksTouched = false;
+      state.picksReady = false;
+      return;
+    }
+
+    // 里面有收藏之外的城市，说明用户确实自己挑过，保留下来并升级成新格式
+    state.picks = legacy;
+    state.picksTouched = true;
+    state.picksReady = true;
+    persistPicks();
+  }
+
+  /**
+   * 把对比清单还原成"用户从没动过"的状态。
+   * 只给自检探针用：它跑完必须把环境恢复原样，否则下一次运行会读到
+   * 它留下的状态（比如"用户把城市全删光了"）而误判成缺陷。
+   */
+  function resetPicks() {
+    state.picks = defaultPicks();
+    state.picksTouched = false;
+    state.picksReady = !!state.place && state.picks.length > 0;
+    state.picksPending = !state.place;
+    state.legacyPicks = null;
+    persistPicks();
+    loadCompare();
+  }
+
+  /**
+   * 能不能把这个城市加进对比。
+   * 不能加时返回一句人话原因，能加时返回 null——把判断和文案放一起，
+   * 免得界面上出现"加不进去但不说为什么"。
+   */
+  function addPickBlocker(place) {
+    if (!place) return '这个城市没有有效坐标';
+    if (state.picks.some((p) => C.samePlace(p, place))) return `${place.name} 已经在对比里了`;
+    if (state.picks.length >= MAX_COMPARE) {
+      return `最多对比 ${MAX_COMPARE} 个城市，先移除一个再加`;
+    }
+    return null;
+  }
+
+  function addPick(place) {
+    const blocked = addPickBlocker(place);
+    if (blocked) {
+      el.cmpNote.textContent = blocked;
+      return false;
+    }
+    state.picks = state.picks.concat([place]).slice(0, MAX_COMPARE);
+    state.picksTouched = true;
+    state.picksReady = true;
+    persistPicks();
+    loadCompare();
+    return true;
+  }
+
+  function removePick(place) {
+    state.picks = state.picks.filter((p) => !C.samePlace(p, place));
+    state.picksTouched = true;
+    state.picksReady = true;
+    persistPicks();
+    loadCompare();
+  }
+
+  async function loadCompare() {
+    const cities = state.picks.slice(0, MAX_COMPARE);
+    const picked = new Set(cities.map((p) => p.id));
+
+    /* 缓存里只保留"还在清单里"的城市。
+       注意判据是 picked 而不是 cities 之外的数据——哪怕一个城市刚从清单里删掉，
+       它的数据也一并丢掉，这样再加回来时会重新取一次；
+       服务端有缓存，代价很小，而留着一堆用不上的城市会让颜色分配越算越乱。 */
+    state.compare = state.compare.filter((c) => picked.has(c.place.id));
+
+    if (!cities.length) {
+      renderCompare();
+      return;
+    }
+
+    const have = new Set(state.compare.map((c) => c.place.id));
+    const need = cities.filter((p) => !have.has(p.id));
+
+    if (need.length) {
+      /* 同一批城市只在途一次。
+         启动流程里 refreshCompare 和 load 之后各会调一次 loadCompare，
+         不去重的话会发两次批量请求，而且后发的那次先回到"加载中"状态，
+         把已经画好的表和曲线又清掉——页面上表现为"图闪一下然后没了"，
+         同时提示停在"正在取数…"，看起来像卡住了。 */
+      const sig = need.map((p) => `${p.latitude.toFixed(3)},${p.longitude.toFixed(3)}`).sort().join(';');
+      if (state.compareInflight && state.compareInflight.sig === sig) {
+        await state.compareInflight.promise.catch(() => {});
+      } else {
+        const promise = (async () => {
+          /* 一次请求取全部城市：上游支持逗号分隔的多组坐标。
+             逐个请求的话 5 个城市就是 5 次调用，而且慢的那一个会拖住整张图。 */
+          const body = await api('/api/batch', {
+            lat: need.map((p) => p.latitude.toFixed(4)).join(','),
+            lon: need.map((p) => p.longitude.toFixed(4)).join(','),
+          });
+          const arr = Array.isArray(body.data) ? body.data : [body.data];
+          const added = [];
+          need.forEach((place, i) => {
+            const norm = C.normalizeForecast(arr[i]);
+            if (norm) added.push({ place, fc: norm, visible: true });
+          });
+          /* 先全部算好再一次性写进 state.compare：
+             逐个 push 再逐个渲染的话，中间会出现"三个城市有数据、第四个还在加载"的
+             半成品状态，表格里的极值标注也会因为样本不全而跳来跳去。 */
+          state.compare = state.compare.concat(added);
+        })();
+
+        state.compareInflight = { sig, promise };
+        renderCompare();
+        try {
+          await promise;
+        } catch (err) {
+          reportError('对比区', err);
+          return;
+        } finally {
+          state.compareInflight = null;
+        }
+      }
+    }
+
+    state.compare.sort(byPickOrder(cities));
+    state.compare.forEach((c, i) => { c.color = SERIES_COLORS[i % SERIES_COLORS.length]; });
+    renderCompare();
+  }
+
+  /** 按用户排定的顺序排序：同一个城市每次都是同一个颜色，图例顺序也不会跳。 */
+  function byPickOrder(cities) {
+    return (a, b) => cities.findIndex((p) => p.id === a.place.id) - cities.findIndex((p) => p.id === b.place.id);
+  }
+
+  function renderCompare() {
+    const picks = state.picks.slice(0, MAX_COMPARE);
+    renderPickChips(picks);
+
+    const full = picks.length >= MAX_COMPARE;
+    el.compareAside.textContent = picks.length === 0
+      ? `还可以展示 ${MAX_COMPARE} 个城市`
+      : `${picks.length} / ${MAX_COMPARE} 个城市`
+        + (full ? ' · 已满' : ` · 还能加 ${MAX_COMPARE - picks.length} 个`);
+
+    if (!picks.length) {
+      el.compareChart.hidden = true;
+      el.compareTableWrap.hidden = true;
+      el.compareLegend.innerHTML = '';
+      el.cmpNote.dataset.tone = 'hint';
+      el.cmpNote.textContent = '用上面的搜索框加一个城市，就能在这里看它的 24 小时气温曲线。';
+      return;
+    }
+
+    /* 数据还没到齐时，图和图例要么一起显示、要么一起不显示。
+       之前只画了图例而没画曲线，会短暂出现"有城市名但图上一根线都没有"的状态——
+       看起来就像图画坏了。宁可先给一句"正在取数"。 */
+    if (!state.compare.length) {
+      el.compareChart.hidden = true;
+      el.compareTableWrap.hidden = true;
+      el.compareLegend.innerHTML = '';
+      el.cmpNote.dataset.tone = state.compareInflight ? 'hint' : 'error';
+      el.cmpNote.textContent = state.compareInflight ? '正在取这些城市的预报…' : '这些城市还没有可用数据。';
+      return;
+    }
+
+    setPickNote(picks);
+    const visible = state.compare.filter((c) => c.visible);
+    const unit = state.unit;
+
+    /* 一个城市也画：用户要的就是"先看当前城市这条曲线"。
+       此时它是基准线，后面加进来的城市都跟它比。 */
+    el.compareChart.hidden = false;
+    el.compareChart.innerHTML = visible.length
+      ? Chart.compare(visible.map((c) => ({
+        name: c.place.name,
+        color: c.color,
+        hours: c.fc.hours,
+      })), {
+        unit,
+        // 只有一条线时不说"对比"，那会让人以为漏画了
+        ariaLabel: visible.length > 1
+          ? `${visible.length} 个城市的气温对比曲线`
+          : `${visible[0].name} 未来 24 小时气温曲线`,
+        emptyText: '被隐藏的城市之外没有可比较的数据',
+      })
+      : Chart.compare([], { emptyText: '所有城市都被隐藏了，点下面的图例恢复' });
+
+    // 图例：点击隐藏/显示某个城市，用来排除离群值看清其余的线
+    el.compareLegend.innerHTML = state.compare.map((c) => {
+      const temp = c.fc.current ? t_(c.fc.current.temp) : null;
+      return `<button class="compare__key" type="button" data-city="${esc(c.place.id)}"
+        aria-pressed="${c.visible}">
+        <span class="compare__swatch" style="background:${esc(c.color)}"></span>
+        ${esc(c.place.name)}
+        <span class="compare__key-temp">${temp == null ? '—' : temp + '°'}</span>
+      </button>`;
+    }).join('');
+
+    /* 对照表必须两个城市以上才有意义：一行的表格没有"对照"，
+       留着会让人以为少渲染了别的行。 */
+    if (picks.length >= 2) {
+      renderCompareTable(picks, unit);
+    } else {
+      el.compareTableWrap.hidden = true;
+      el.compareTable.innerHTML = '';
+    }
+  }
+
+  /** 已选城市的表现：一个个可以点掉的标签，顺序就是图例顺序。 */
+  function renderPickChips(picks) {
+    el.cmpChips.innerHTML = picks.map((p) => {
+      const color = SERIES_COLORS[picks.indexOf(p) % SERIES_COLORS.length];
+      return `<li>
+        <span class="cmp-chip" style="--chip-color:${esc(color)}">
+          <span class="cmp-chip__swatch" aria-hidden="true"></span>
+          <span class="cmp-chip__name">${esc(p.name)}</span>
+          <span class="cmp-chip__where">${esc(C.placeLabel(p))}</span>
+          <button class="cmp-chip__drop" type="button" data-drop-pick="${esc(p.id)}"
+                  aria-label="${esc(`把 ${p.name} 移出对比`)}" title="移出对比">✕</button>
+        </span>
+      </li>`;
+    }).join('');
+  }
+
+  /** 还差几个、已经满了没有——这一行同时是 aria-live 的反馈区。 */
+  function setPickNote(picks) {
+    const left = MAX_COMPARE - picks.length;
+    if (left === 0) {
+      el.cmpNote.dataset.tone = 'full';
+      el.cmpNote.textContent = `已经是对比上限 ${MAX_COMPARE} 个城市。想换一个，先移出一个。`;
+      return;
+    }
+    el.cmpNote.dataset.tone = 'ok';
+    // 只有一个城市时要说清"现在看的是它自己"，否则用户会以为对比没生效
+    el.cmpNote.textContent = picks.length === 1
+      ? `现在只展示 ${picks[0].name} 的曲线，还能再展示 ${left} 个城市。搜索结果或收藏里点城市名就能加进来。`
+      : `还能再展示 ${left} 个城市。`;
+  }
+
+  /** 温度换算的简写，避免和模板里的局部变量 t 撞名 */
+  function t_(c) { return C.convertTemp(c, state.unit); }
+
+  /**
+   * 指标对照表。
+   *
+   * 每列标出最好与最差：一屏十几个数字，没有标注的话用户要自己逐个比。
+   * 比较方向按指标本身的意义定——气温没有好坏，但温差、降水概率、风速有可比性，
+   * 所以只给"最大/最小"这类客观标注，不做主观好坏判断。
+   */
+  function renderCompareTable(cities, unit) {
+    const rows = state.compare;
+    if (!rows.length) {
+      el.compareTableWrap.hidden = true;
+      return;
+    }
+    el.compareTableWrap.hidden = false;
+
+    const col = (get) => rows.map(get);
+    const temps = col((c) => (c.fc.current ? c.fc.current.temp : null)).filter((v) => v != null);
+    const highs = col((c) => (c.fc.daily[0] ? c.fc.daily[0].high : null)).filter((v) => v != null);
+    const lows = col((c) => (c.fc.daily[0] ? c.fc.daily[0].low : null)).filter((v) => v != null);
+    const hums = col((c) => (c.fc.current ? c.fc.current.humidity : null)).filter((v) => v != null);
+    const winds = col((c) => (c.fc.current ? c.fc.current.wind : null)).filter((v) => v != null);
+    const rains = col((c) => (c.fc.daily[0] ? c.fc.daily[0].precip : null)).filter((v) => v != null);
+
+    const maxOf = (a) => (a.length ? Math.max.apply(null, a) : null);
+    const minOf = (a) => (a.length ? Math.min.apply(null, a) : null);
+    const isMax = (v, a) => v != null && a.length > 1 && v === maxOf(a);
+    const isMin = (v, a) => v != null && a.length > 1 && v === minOf(a);
+
+    const head = `<caption>今日观测与预报对照。橙色标注的是该列的最大值${unit === 'f' ? '（华氏）' : ''}。</caption>
+      <thead><tr>
+        <th scope="col">城市</th>
+        <th scope="col">天气</th>
+        <th scope="col">气温</th>
+        <th scope="col">今日区间</th>
+        <th scope="col">湿度</th>
+        <th scope="col">风速</th>
+        <th scope="col">降水量</th>
+        <th scope="col">未来 7 天</th>
+      </tr></thead>`;
+
+    const body = rows.map((c) => {
+      const cur = c.fc.current || {};
+      const day = c.fc.daily[0] || {};
+      const isCurrent = state.place && c.place.id === state.place.id;
+      // 未来 7 天的迷你量程条：用这 7 天的温差自己归一化，只是"变化幅度"的示意
+      const weekTemps = c.fc.daily.map((d) => d.high).filter((v) => v != null);
+      const wMax = maxOf(weekTemps);
+      const wMin = minOf(c.fc.daily.map((d) => d.low).filter((v) => v != null));
+
+      return `<tr ${isCurrent ? 'aria-current="true"' : ''}>
+        <th scope="row" class="city-cell">
+          ${Icons.svg(cur.code, cur.isDay, { size: 22 })}
+          <span>${esc(c.place.name)}<span class="compare__where">${esc(C.placeLabel(c.place))}</span></span>
+        </th>
+        <td>${esc(C.describeCode(cur.code).label)}</td>
+        <td class="num ${isMax(cur.temp, temps) ? 'extreme' : ''}">${cur.temp == null ? '—' : t_(cur.temp) + '°'}</td>
+        <td class="num">${day.low == null || day.high == null ? '—' : t_(day.low) + '° / ' + t_(day.high) + '°'}</td>
+        <td class="num ${isMax(cur.humidity, hums) ? 'extreme' : ''}">${cur.humidity == null ? '—' : Math.round(cur.humidity) + '%'}</td>
+        <td class="num ${isMax(cur.wind, winds) ? 'extreme' : ''}">${cur.wind == null ? '—' : u(cur.wind) + ' ' + C.windLabel(unit)}</td>
+        <td class="num ${isMax(day.precip, rains) ? 'extreme' : ''}">${day.precip == null ? '—' : C.round1(day.precip) + ' mm'}</td>
+        <td class="num">${wMax == null || wMin == null ? '—' : t_(wMin) + '° ~ ' + t_(wMax) + '°'}</td>
+      </tr>`;
+    }).join('');
+
+    el.compareTable.innerHTML = head + '<tbody>' + body + '</tbody>';
+  }
+
+  /* ------------------------------------------------------------ 渲染：历史 */
+
+  function rangeToDates(days) {
+    const today = new Date();
+    const end = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 2));
+    const start = new Date(end.getTime() - days * 86400000);
+    return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
+  }
+
+  async function loadHistory(range) {
+    if (!state.place) return;
+    const r = range && range.start ? range : rangeToDates(range && range.days ? range.days : state.rangeDays);
+
+    state.historyLoading = true;
+    el.historyHint.hidden = false;
+    el.historyHint.textContent = '正在取历史数据…';
+    el.historyStats.innerHTML = '';
+    el.historyPlot.innerHTML = '';
+    el.historyCompose.innerHTML = '';
+    el.historyReading.innerHTML = '';
+    el.historyCap.textContent = '';
+
+    try {
+      const body = await api('/api/archive', {
+        lat: state.place.latitude,
+        lon: state.place.longitude,
+        start: r.start,
+        end: r.end,
+      });
+      state.history = body.data;
+      state.historyLoading = false;
+      renderHistory();
+    } catch (err) {
+      state.historyLoading = false;
+      state.history = null;
+      el.historyHint.hidden = false;
+      el.historyHint.textContent = `历史数据取不到：${err.message}`;
+      el.historyAside.textContent = '取数失败';
+    }
+  }
+
+  function renderHistory() {
+    const h = state.history;
+    if (!h || !h.summary) {
+      el.historyHint.hidden = false;
+      el.historyHint.textContent = '这段区间没有历史数据。换个时间范围试试。';
+      return;
+    }
+
+    el.historyHint.hidden = true;
+    el.historyAside.textContent = `${h.startDate} ~ ${h.endDate} · ${h.summary.days} 天`
+      + (h.clamped ? ' · 已按数据可用范围截取' : '');
+
+    const s = h.summary;
+    const unit = state.unit;
+    const stats = [
+      ['平均气温', s.meanTemp == null ? '—' : t_(s.meanTemp) + '°', C.tempLabel(unit), s.meanHigh == null ? '' : `均高 ${t_(s.meanHigh)}° / 均低 ${t_(s.meanLow)}°`],
+      ['最高气温', s.maxTemp == null ? '—' : t_(s.maxTemp) + '°', '', s.maxTempDate || ''],
+      ['最低气温', s.minTemp == null ? '—' : t_(s.minTemp) + '°', '', s.minTempDate || ''],
+      ['降水合计', s.totalPrecip == null ? '—' : String(C.round1(s.totalPrecip)), 'mm', s.rainDays == null ? '' : `雨日 ${s.rainDays} 天`],
+      ['最多雨的一天', s.wettestDay == null ? '—' : String(C.round1(s.wettestDay)), 'mm', s.wettestDate || ''],
+      ['日照合计', s.totalSunshine == null ? '—' : String(s.totalSunshine), 'h', s.meanUv == null ? '' : `均紫外线 ${Math.round(s.meanUv)}`],
+    ];
+    if (s.meanHumidity != null) stats.push(['平均湿度', String(Math.round(s.meanHumidity)), '%', s.meanWind == null ? '' : `均风速 ${u(s.meanWind)} ${C.windLabel(unit)}`]);
+
+    el.historyStats.innerHTML = stats.map(([key, val, small, sub]) => `
+      <div class="stat">
+        <p class="stat__key">${esc(key)}</p>
+        <p class="stat__val">${esc(val)}${small ? `<small>${esc(small)}</small>` : ''}</p>
+        ${sub ? `<p class="stat__sub">${esc(sub)}</p>` : ''}
+      </div>`).join('');
+
+    el.historyCap.textContent = h.grain === 'month'
+      ? '按月聚合：折线是月均温，浅色带是月内高低温范围，底部灰柱是月降水量'
+      : '日值：折线是日均温，浅色带是当日高低温范围，底部灰柱是日降水量';
+
+    el.historyPlot.innerHTML = Chart.historySeries(h.series, { unit, grain: h.grain });
+
+    // 天气构成
+    el.historyCompose.innerHTML = `
+      <div class="compose__strip" aria-hidden="true">
+        ${h.composition.items.map((x) => `<span class="compose__seg" style="flex:${x.days};background:${composeColor(x.key)}"></span>`).join('')}
+      </div>
+      ${h.composition.items.map((x) => `
+        <li class="compose__item">
+          <span class="compose__dot" style="background:${composeColor(x.key)}"></span>
+          <span>${esc(x.name)}</span>
+          <span class="compose__days">${x.days} 天</span>
+          <span class="compose__pct">${Math.round(x.ratio * 100)}%</span>
+        </li>`).join('')}`;
+
+    el.historyReading.innerHTML = readings(h, unit).map((r) => `<li>${r}</li>`).join('');
+  }
+
+  const COMPOSE_COLORS = {
+    clear: '#e0b74a', cloud: '#9aa7b4', rain: '#5fb7d4',
+    snow: '#cfe0f0', fog: '#b9b3a0', storm: '#b79ae0',
+  };
+  const composeColor = (key) => COMPOSE_COLORS[key] || '#9aa7b4';
+
+  /**
+   * 把统计写成几句话。
+   *
+   * 这一块是"历史天气"真正有用的地方：光给一堆均值用户看不出什么，
+   * 得把它和参照物比一比——和前半段比、和降水天数比、和紫外线峰值比。
+   * 所以每条都是一句带数字的结论，而不是形容词。
+   */
+  function readings(h, unit) {
+    const s = h.summary;
+    const out = [];
+
+    if (s.halfAnomaly != null) {
+      const mag = Math.abs(s.halfAnomaly);
+      // 幅度分三档说，避免"是不明显的的降温趋势"这种叠字，也别把 0.3 度说成趋势
+      const word = mag >= 2 ? '明显' : mag >= 0.8 ? '一定' : '轻微';
+      out.push(`这段区间的后半段比前半段平均${s.halfAnomaly > 0 ? '升' : '降'} <b>${mag.toFixed(1)}°</b>，`
+        + `属于${word}的${s.halfAnomaly > 0 ? '回暖' : '降温'}。`);
+    }
+
+    if (s.rainRatio != null) {
+      out.push(`${s.days} 天里有 <b>${s.rainDays}</b> 天出现降水（占 ${Math.round(s.rainRatio * 100)}%），`
+        + `其中 <b>${s.heavyDays}</b> 天日降水量达到 10 mm 以上。`);
+    }
+
+    if (s.maxTemp != null && s.minTemp != null) {
+      out.push(`气温区间 <b>${t_(s.minTemp)}° ~ ${t_(s.maxTemp)}°</b>，`
+        + `日较差大约 ${Math.round((s.meanHigh != null && s.meanLow != null ? s.meanHigh - s.meanLow : 0))} 度。`);
+    }
+
+    if (s.totalPrecip != null && s.days) {
+      const perDay = s.totalPrecip / s.days;
+      out.push(`平均每天降水 <b>${C.round1(perDay)} mm</b>，`
+        + `${s.wettestDate ? `最多的一天是 ${s.wettestDate}（${C.round1(s.wettestDay)} mm）` : ''}。`);
+    }
+
+    if (s.meanUv != null && s.meanUv >= 4) {
+      out.push(`平均紫外线指数 <b>${Math.round(s.meanUv)}</b>，日照较强，户外注意防晒。`);
+    }
+
+    return out.slice(0, 5);
   }
 
   /* ---------------------------------------------------------------- 渲染：观测 */
@@ -225,7 +1095,9 @@
     el.tempNow.dataset.tempC = cur.temp == null ? '' : String(cur.temp);
     el.tempUnit.textContent = tUnit();
 
-    el.nowIcon.innerHTML = Icons.svg(cur.code, cur.isDay, { size: 38 });
+    // 主读数这个符号是整屏最大的一处天象，开动画；
+    // 7 日条带里那一排小符号保持静态（见 renderWeek），一排都在动是干扰
+    el.nowIcon.innerHTML = Icons.svg(cur.code, cur.isDay, { size: 38, animate: true });
     el.condNow.textContent = C.describeCode(cur.code).label;
     el.feelsNow.textContent = cur.feels == null ? '—' : t(cur.feels) + '°';
     el.todayRange.textContent = (norm.today && norm.today.high != null && norm.today.low != null)
@@ -267,6 +1139,7 @@
       : '当前无降水';
 
     renderRibbon();
+    renderAir();
   }
 
   /**
@@ -569,18 +1442,39 @@
     renderRail();
 
     try {
-      const body = await api('/api/forecast', { lat: place.latitude, lon: place.longitude });
+      /* 天气和空气质量并行取：两者互不依赖，串行会白白多等一个往返。
+         空气质量失败不影响天气显示——所以用 allSettled 而不是 all。 */
+      const [wxRes, airRes] = await Promise.allSettled([
+        api('/api/forecast', { lat: place.latitude, lon: place.longitude }),
+        api('/api/air', { lat: place.latitude, lon: place.longitude }),
+      ]);
       if (seq !== state.loadSeq) return;
+      if (wxRes.status === 'rejected') throw wxRes.reason;
 
+      const body = wxRes.value;
       const norm = C.normalizeForecast(body.data);
       if (!norm) throw new Error('观测数据格式不认识');
 
-      // hourly 原始数组留给「切换到某一天」用，不能只留切片
-      norm.rawHourly = body.data && body.data.hourly;
-
+      // 预警推导要 CAPE 和能见度，normalizeForecast 已经把原始逐小时数组挂上了
       state.forecast = norm;
       state.hoursDayIndex = 0;
       state.railWx.set(place.id, norm);
+
+      /* 空气质量：拿不到就是 null，界面显示「暂无数据」而不是 0。
+         0 会被读成"空气极好"，那是在编结论。 */
+      state.air = null;
+      if (airRes.status === 'fulfilled') {
+        const airData = airRes.value.data || {};
+        const now = airData.current || {};
+        state.air = Aqi.fromCurrent(now);
+        if (state.air) state.air.uv = C.num(now.uv_index);
+        state.airSeries = Aqi.trendFromHourly(airData.hourly || {});
+      } else {
+        state.airSeries = [];
+      }
+
+      // 预警：要用到刚算出的 AQI，所以必须在这之后
+      state.alerts = Alerts.derive(norm, state.air);
 
       // 上游时区比地名库更可靠，用它补全地点信息
       state.place = Object.assign({}, place, {
@@ -590,6 +1484,7 @@
 
       persist(STORE.last, JSON.stringify(state.place));
       paintTone(norm);
+      renderAlerts();
       renderObservation();
       renderCurve();
       renderWeek();
@@ -600,6 +1495,17 @@
       el.body.dataset.state = 'ready';
       verifyHook();
 
+      /* 对比与历史是"次要视图"：主读数出来之后再取，避免拖慢首屏。
+         各自失败只影响自己那一块——所以分开 catch，并且把原因说出来。
+         早先这里是裸调用，任何一侧抛异常都会变成一个没人看见的 unhandled rejection，
+         页面上只留下"正在取数…"不动，排查时毫无线索。 */
+      // 用户没调过对比清单时，此时才知道"当前城市"，用它来定默认值
+      if (!state.picksTouched && !state.picksReady) {
+        state.picks = defaultPicks();
+        if (state.picks.length) state.picksReady = true;
+      }
+      loadCompare().catch((e) => reportError('对比区', e));
+      loadHistory().catch((e) => reportError('历史区', e));
       if (body.stale && body.warning) notice(esc(body.warning) + '。', 'error', { key: 'stale' });
       else clearNotice('stale');
     } catch (err) {
@@ -607,6 +1513,12 @@
       /* 失败也必须离开 loading 态：否则占位符会一直挂着，
          用户看到的是"永远在读表"，而不知道已经失败了。 */
       el.body.dataset.state = 'error';
+      // 预警和空气质量跟着这次取数一起作废，不能把上一个城市的结论留在屏幕上
+      state.alerts = [];
+      state.air = null;
+      state.airSeries = [];
+      renderAlerts();
+      renderAir();
       verifyHook();
       notice(`<b>取不到 ${esc(place.name)} 的观测</b>：${esc(err.message)}。`
         + `<button class="notice__retry" type="button">重试</button>`, 'error', { key: 'load' });
@@ -878,10 +1790,13 @@
     });
     // 单位只影响显示，所以整屏重渲染即可，不用重新取数
     if (state.forecast) {
+      renderAlerts();
       renderObservation();
       renderCurve();
       renderWeek();
       renderRail();
+      renderCompare();
+      renderHistory();
     }
   }
 
@@ -902,6 +1817,7 @@
       persistSaved();
       renderRail();
       renderCollectButton();
+      refreshCompare();
       return;
     }
     const item = ev.target.closest('[data-place]');
@@ -923,19 +1839,257 @@
     }
   });
 
-  /* 「当前城市是否已收藏」的按钮不在 HTML 里，而是跟着观测一起渲染出来的：
-     它只在拿到数据、知道这是哪个地方之后才有意义。 */
-  function renderCollectButton() {
-    if (!state.place) return;
-    const saved = C.hasSaved(state.saved, state.place);
-    let btn = document.getElementById('collect-btn');
-    if (!btn) {
-      btn = document.createElement('button');
-      btn.id = 'collect-btn';
-      btn.type = 'button';
-      btn.className = 'collect';
-      el.acts.appendChild(btn);
+  /* -------------------------------------------------------- 对比区的城市搜索 */
+
+  /**
+   * 对比区自己的搜索。
+   *
+   * 和顶部那个搜索框是两套东西，刻意不共用：
+   *   - 顶部搜索是"切换当前城市"，选中的城市会接管整个页面；
+   *   - 这里搜索是"往对比清单里加一个"，当前城市不动。
+   * 如果共用一个输入框，用户就没法区分"我要切到这里"和"我要把它加进对比"，
+   * 而这两件事的后果完全相反——前者会把主读数换掉。
+   */
+  let cmpDebounce = null;
+  let cmpSeq = 0;
+
+  el.cmpInput.addEventListener('input', () => {
+    const q = el.cmpInput.value.trim();
+    clearTimeout(cmpDebounce);
+    if (!q) {
+      closePickSuggest();
+      return;
     }
+    cmpDebounce = setTimeout(() => runPickSearch(q), 320);
+  });
+
+  el.cmpInput.addEventListener('keydown', (ev) => {
+    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+      if (el.cmpList.hidden) return;
+      highlightPickSuggest(state.compareSel.active + (ev.key === 'ArrowDown' ? 1 : -1));
+      ev.preventDefault();
+      return;
+    }
+    if (ev.key === 'Enter' && state.compareSel.active >= 0 && !el.cmpList.hidden) {
+      addPick(state.compareSel.hits[state.compareSel.active]);
+      el.cmpInput.value = '';
+      closePickSuggest();
+      ev.preventDefault();
+      return;
+    }
+    if (ev.key === 'Escape') closePickSuggest();
+  });
+
+  el.cmpList.addEventListener('mousedown', (ev) => {
+    const opt = ev.target.closest('.seek__opt');
+    if (!opt) return;
+    ev.preventDefault();   // 别让输入框先失焦，否则 blur 会把列表关掉
+    /* 已经在对比里、或清单已满的候选是"看得见但不能选"的：
+       光标已经写成 not-allowed，点击就不能再去尝试添加——
+       否则用户点一下什么也没发生，只会以为是坏了。 */
+    if (opt.classList.contains('seek__opt--blocked')) {
+      el.cmpNote.dataset.tone = 'hint';
+      el.cmpNote.textContent = opt.querySelector('.seek__opt-region').textContent.trim();
+      return;
+    }
+    addPick(state.compareSel.hits[Number(opt.dataset.index)]);
+    el.cmpInput.value = '';
+    closePickSuggest();
+  });
+
+  el.cmpForm.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const q = el.cmpInput.value.trim();
+    if (!q) {
+      el.cmpInput.focus();
+      return;
+    }
+    if (state.compareSel.active >= 0 && state.compareSel.hits[state.compareSel.active]) {
+      addPick(state.compareSel.hits[state.compareSel.active]);
+      el.cmpInput.value = '';
+      closePickSuggest();
+      return;
+    }
+    // 直接回车：只有一条候选就直接加，多条就摆出来让用户选
+    const hits = await pickSearch(q);
+    if (!hits.length) {
+      el.cmpNote.dataset.tone = 'hint';
+      el.cmpNote.textContent = `没有找到「${q}」。换个说法试试，比如加上省份。`;
+      return;
+    }
+    if (hits.length === 1) {
+      addPick(hits[0]);
+      el.cmpInput.value = '';
+      closePickSuggest();
+      return;
+    }
+    showPickSuggest(hits);
+    highlightPickSuggest(0);
+  });
+
+  async function pickSearch(q) {
+    const seq = ++cmpSeq;
+    const found = await findPlace(q);
+    if (seq !== cmpSeq) return [];
+    return found.hits;
+  }
+
+  async function runPickSearch(q) {
+    el.cmpNote.dataset.tone = 'hint';
+    el.cmpNote.textContent = '查询中…';
+    try {
+      const hits = await pickSearch(q);
+      if (!hits.length) {
+        closePickSuggest();
+        el.cmpNote.textContent = `没有找到「${q}」。换个说法试试，比如加上省份。`;
+        return;
+      }
+      showPickSuggest(hits);
+      if (!state.compareSel.active || state.compareSel.active < 0) {
+        el.cmpNote.textContent = `${hits.length} 个候选，选一个加入对比`;
+      }
+    } catch (err) {
+      closePickSuggest();
+      el.cmpNote.textContent = `地名查询失败：${err.message}`;
+    }
+  }
+
+  function showPickSuggest(hits) {
+    state.compareSel = { hits, active: -1 };
+    el.cmpList.innerHTML = hits.map((p, i) => {
+      const blocked = addPickBlocker(p);
+      return `<li class="seek__opt ${blocked ? 'seek__opt--blocked' : ''}" role="option"
+        id="cmp-opt-${i}" data-index="${i}" aria-selected="false" ${blocked ? 'aria-disabled="true"' : ''}>
+        <span class="seek__opt-name">${esc(p.name)}</span>
+        <span class="seek__opt-region">${esc(blocked || [p.city, p.region].filter(Boolean).join(' · ') || '—')}</span>
+        <span class="seek__opt-coord">${esc(C.formatCoords(p.latitude, p.longitude))}</span>
+      </li>`;
+    }).join('');
+    el.cmpList.hidden = false;
+    el.cmpInput.setAttribute('aria-expanded', 'true');
+  }
+
+  /** 键盘高亮时跳过不能选的候选：方向键停在"已经在对比里"的条目上没有意义。 */
+  function highlightPickSuggest(index) {
+    const opts = Array.from(el.cmpList.querySelectorAll('.seek__opt'));
+    if (!opts.length) return;
+    const usable = opts.filter((n) => !n.classList.contains('seek__opt--blocked'));
+    if (!usable.length) {
+      state.compareSel.active = -1;
+      opts.forEach((n) => n.setAttribute('aria-selected', 'false'));
+      el.cmpInput.removeAttribute('aria-activedescendant');
+      return;
+    }
+    const n = usable.length;
+    const next = usable[((index % n) + n) % n];
+    state.compareSel.active = Number(next.dataset.index);
+    opts.forEach((node) => node.setAttribute('aria-selected', String(node === next)));
+    el.cmpInput.setAttribute('aria-activedescendant', next.id);
+    next.scrollIntoView({ block: 'nearest' });
+  }
+
+  function closePickSuggest() {
+    el.cmpList.hidden = true;
+    el.cmpList.innerHTML = '';
+    el.cmpInput.setAttribute('aria-expanded', 'false');
+    el.cmpInput.removeAttribute('aria-activedescendant');
+    state.compareSel = { hits: [], active: -1 };
+  }
+
+  el.cmpChips.addEventListener('click', (ev) => {
+    const drop = ev.target.closest('[data-drop-pick]');
+    if (!drop) return;
+    const place = state.picks.find((p) => p.id === drop.dataset.dropPick);
+    if (place) removePick(place);
+  });
+
+  /* 点页面别处收起候选。只在搜索框有内容或有候选时才处理，
+     避免每次点击都去碰 DOM。 */
+  document.addEventListener('click', (ev) => {
+    if (el.cmpList.hidden) return;
+    if (!ev.target.closest('.cmp-seek')) closePickSuggest();
+  });
+
+  /* -------------------------------------------------------- 对比与历史的交互 */
+
+  // 图例点击：隐藏/显示某个城市。排除离群值看清其余几条线时用得上。
+  el.compareLegend.addEventListener('click', (ev) => {
+    const key = ev.target.closest('[data-city]');
+    if (!key) return;
+    const c = state.compare.find((x) => x.place.id === key.dataset.city);
+    if (!c) return;
+    // 不允许把所有城市都关掉：一张空图没有任何意义，用户会以为坏了
+    const visible = state.compare.filter((x) => x.visible);
+    if (c.visible && visible.length <= 1) return;
+    c.visible = !c.visible;
+    renderCompare();
+  });
+
+  // 时间范围：预设按钮 + 自定义
+  el.historyRanges.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('[data-range]');
+    if (!btn) return;
+    const days = Number(btn.dataset.range);
+    state.rangeDays = days;
+    syncRangeButtons(days, null);
+    loadHistory({ days });
+  });
+
+  function syncRangeButtons(days, custom) {
+    el.historyRanges.querySelectorAll('[data-range]').forEach((b) => {
+      b.setAttribute('aria-pressed', String(!custom && Number(b.dataset.range) === days));
+    });
+    el.historyCustom.setAttribute('aria-pressed', String(!!custom));
+    el.customRange.hidden = !custom;
+  }
+
+  el.historyCustom.addEventListener('click', () => {
+    if (!el.customRange.hidden) {
+      syncRangeButtons(state.rangeDays, null);
+      return;
+    }
+    const r = rangeToDates(state.rangeDays);
+    el.histStart.value = r.start;
+    el.histEnd.value = r.end;
+    syncRangeButtons(state.rangeDays, true);
+    el.histStart.focus();
+  });
+
+  el.histGo.addEventListener('click', () => {
+    const start = el.histStart.value;
+    const end = el.histEnd.value;
+    if (!start || !end) {
+      notice('请填写完整的开始和结束日期。', 'error', { key: 'hist' });
+      return;
+    }
+    if (start > end) {
+      notice('开始日期不能晚于结束日期。', 'error', { key: 'hist' });
+      return;
+    }
+    clearNotice('hist');
+    loadHistory({ start, end });
+  });
+
+  /* 收藏变化时对比区跟着变。
+     但要分清两种情况：用户还没动过对比清单时，收藏就是它的默认值，跟着走；
+     一旦他手动加过或删过，就以他的选择为准，不再被收藏动作覆盖——
+     否则精心挑的那几个城市会被下一次收藏打乱，而用户不知道为什么。 */
+  function refreshCompare() {
+    syncCompareDefault();
+  }
+
+  /* 「当前城市是否已收藏」的按钮在 HTML 里就有（见 index.html），
+     但只在拿到数据、知道这是哪个地方之后才显示——
+     没数据时留下一个"收藏这个城市"的按钮，点了也不知道收藏谁。 */
+  function renderCollectButton() {
+    const btn = document.getElementById('collect-btn');
+    if (!btn) return;
+    if (!state.place) {
+      btn.hidden = true;
+      return;
+    }
+    btn.hidden = false;
+    const saved = C.hasSaved(state.saved, state.place);
     btn.textContent = saved ? '已收藏，点击取消' : '收藏这个城市';
     btn.classList.toggle('collect--on', saved);
     btn.onclick = () => {
@@ -944,6 +2098,7 @@
       renderRail();
       fillRailWx();
       renderCollectButton();
+      refreshCompare();
       notice(saved ? `已从常用城市移除 <b>${esc(state.place.name)}</b>` : `已收藏 <b>${esc(state.place.name)}</b>，下次在左侧一点就到`, 'ok', { key: 'collect' });
     };
   }
@@ -996,7 +2151,10 @@
 
     state.saved = places.reduce((list, p) => C.addSaved(list, p), []);
     persistSaved();
+    // 收藏这时才载入，旧格式对比清单的迁移判断只能放在这里
+    migrateLegacyPicks();
     renderRail();
+    refreshCompare();
 
     const queue = places.slice();
     const worker = async () => {
@@ -1021,6 +2179,12 @@
     el.sprite.innerHTML = Icons.DEFS;
 
     readStore();
+    readPicks();
+    /* 迁移判断要放在这里，不能只放在 seedFavourites 里。
+       收藏是从本地存储读出来的（readStore 已经读到 state.saved），
+       所以此刻就具备判断条件；而 seedFavourites 只在带了 ?fav= 时才跑，
+       普通冷启动根本不会经过它——早先就是这个原因让迁移在真实使用中没生效。 */
+    migrateLegacyPicks();
 
     const params = readParams();
     if (params.unit) state.unit = params.unit;
@@ -1033,6 +2197,15 @@
 
     renderRail();
     fillRailWx();
+
+    /* 时间范围按钮的初始选中态要在这里定下来。
+       不在 HTML 里写 aria-pressed 是因为"哪个是默认范围"由 state.rangeDays 决定，
+       两处各写一遍迟早会不一致——而且缺少这个属性时，
+       读屏软件读到的是一个"状态未知"的按钮，用户不知道当前选的是哪一档。 */
+    syncRangeButtons(state.rangeDays, null);
+    const initRange = rangeToDates(state.rangeDays);
+    el.histStart.value = initRange.start;
+    el.histEnd.value = initRange.end;
 
     // 提示行先给一句用法，别留一条空白——空着的提示行看起来像"这里出错了但没说"
     el.hint.textContent = DEFAULT_HINT;

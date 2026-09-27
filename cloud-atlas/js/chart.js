@@ -274,5 +274,173 @@
     };
   }
 
-  return { hourly, attachCursor, W, H, PAD };
+  /* ---------------------------------------------------------- 多城市对比图 */
+
+  /**
+   * 把多个城市的 24 小时气温画在同一张图上。
+   *
+   * 关键和 7 日量程条同理：所有城市必须共用一根温度轴。
+   * 各自归一化的话，"哪条线在上面"就不再等于"哪个城市更热"，
+   * 那样画出来的图看着热闹但读不出结论。
+   *
+   * @param {Array<{name:string, color:string, hours:Array, current?:number}>} series
+   * @param {{unit?:string, emptyText?:string, ariaLabel?:string}} [opts]
+   *        ariaLabel 由调用方给：只有一条曲线时不该说"对比"，
+   *        那会让读屏用户以为漏画了别的城市。
+   */
+  function compare(series, opts) {
+    const o = opts || {};
+    const unit = o.unit === 'f' ? 'f' : 'c';
+    const usable = (series || []).filter((s) => s && s.hours && s.hours.length >= 2);
+    if (!usable.length) {
+      return `<p class="chart-empty">${esc(o.emptyText || '还没有可对比的城市')}</p>`;
+    }
+
+    const id = 'ct-cmp-' + (++uid);
+    // 公共温度轴：把所有城市的点都放进来算范围
+    const all = [];
+    usable.forEach((s) => s.hours.forEach((h) => { if (isFinite(h.temp)) all.push(h.temp); }));
+    const range = C.niceRange(all, 1.5);
+    const yOf = (t) => PAD.top + C.yAt(t, range.min, range.max, plotH);
+    const xOf = (i, n) => PAD.left + C.xAt(i, n, plotW);
+
+    const grades = C.ticks(range.min, range.max, 5).map((t) => {
+      const y = yOf(t);
+      return `<g class="cmp-grade"><line x1="${PAD.left}" y1="${r1(y)}" x2="${PAD.left + plotW}" y2="${r1(y)}"/>`
+        + `<text x="${PAD.left - 8}" y="${r1(y + 4)}">${C.convertTemp(t, unit)}°</text></g>`;
+    }).join('');
+
+    // 横轴按"时刻"标，而不是按索引：各城市的数据起点可能不是一个整点
+    const base = usable[0].hours;
+    const ticks = base.map((h, i) => {
+      if (i % 6 !== 0) return '';
+      const x = xOf(i, base.length);
+      const hour = C.hourOf(h.time);
+      return `<g class="cmp-tick"><line x1="${r1(x)}" y1="${PAD.top + plotH}" x2="${r1(x)}" y2="${PAD.top + plotH + 5}"/>`
+        + `<text x="${r1(x)}" y="${PAD.top + plotH + 20}">${i === 0 ? '此刻' : hour + ':00'}</text></g>`;
+    }).join('');
+
+    const lines = usable.map((s) => {
+      const n = s.hours.length;
+      const pts = s.hours.map((h, i) => ({ x: xOf(i, n), y: yOf(h.temp) }));
+      const last = pts[pts.length - 1];
+      return `<g class="cmp-series" data-city="${esc(s.name)}">`
+        + `<path class="cmp-line" d="${C.pathFrom(pts)}" stroke="${esc(s.color)}"/>`
+        // 末端一个点，图例和线的对应关系因此不需要靠猜
+        + `<circle class="cmp-dot" cx="${r1(last.x)}" cy="${r1(last.y)}" r="3.4" fill="${esc(s.color)}"/>`
+        + '</g>';
+    }).join('');
+
+    return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img"
+      aria-label="${esc(o.ariaLabel || (usable.length + ' 个城市的气温对比曲线'))}">
+      <defs>
+        <clipPath id="${id}-clip"><rect x="${PAD.left}" y="${PAD.top - 8}" width="${plotW}" height="${plotH + 16}"/></clipPath>
+      </defs>
+      ${grades}
+      <g class="cmp-axis"><line x1="${PAD.left}" y1="${PAD.top + plotH}" x2="${PAD.left + plotW}" y2="${PAD.top + plotH}"/></g>
+      <g clip-path="url(#${id}-clip)">${lines}</g>
+      ${ticks}
+    </svg>`;
+  }
+
+  /* -------------------------------------------------------------- 历史曲线 */
+
+  /**
+   * 历史趋势图：日均温的区间带 + 均值线 + 下缘的降水柱。
+   *
+   * 用"带"而不是两根线来画高温低温：读历史的人关心的是"这段时间大概多少度"，
+   * 上下两条线中间的空间才是重点，两根线各自拐来拐去反而看不清。
+   *
+   * @param {Array<{label:string, high:number, low:number, mean:number, precip:number}>} series
+   * @param {{unit?:string, grain?:string}} [opts]
+   */
+  function historySeries(series, opts) {
+    const o = opts || {};
+    const unit = o.unit === 'f' ? 'f' : 'c';
+    const rows = (series || []).filter((d) => d && (d.high != null || d.low != null || d.mean != null));
+    if (rows.length < 2) {
+      return `<p class="chart-empty">${esc('这段区间没有足够的历史数据')}</p>`;
+    }
+
+    const H2 = 260;
+    const pad = { top: 20, right: 16, bottom: 46, left: 46 };
+    const plotH2 = H2 - pad.top - pad.bottom;
+    const plotW2 = W - pad.left - pad.right;
+    const rainH = 34;   // 降水柱占底部一条固定高度，不随量程变
+
+    const temps = [];
+    rows.forEach((d) => {
+      if (isFinite(d.high)) temps.push(d.high);
+      if (isFinite(d.low)) temps.push(d.low);
+    });
+    const range = C.niceRange(temps, 1);
+    const yOf = (t) => pad.top + C.yAt(t, range.min, range.max, plotH2 - rainH - 8);
+    const xOf = (i) => pad.left + C.xAt(i, rows.length, plotW2);
+    const step = plotW2 / Math.max(1, rows.length - 1);
+
+    // 注意用回调的索引，不要用 rows.indexOf(d)：后者是线性查找，
+    // 1800 天（五年）的区间上就变成 300 多万次比较，图会卡住一下。
+    const highs = rows.map((d, i) => ({ x: xOf(i), y: yOf(isFinite(d.high) ? d.high : d.mean) }));
+    const lows = rows.map((d, i) => ({ x: xOf(i), y: yOf(isFinite(d.low) ? d.low : d.mean) }));
+    const means = rows.map((d, i) => ({ x: xOf(i), y: yOf(isFinite(d.mean) ? d.mean : d.high) }));
+
+    // 区间带 = 上界正向 + 下界反向闭合
+    const band = C.pathFrom(highs)
+      + ' L ' + r1(lows[lows.length - 1].x) + ' ' + r1(lows[lows.length - 1].y)
+      + lows.slice(0, -1).reverse().map((p) => ` L ${r1(p.x)} ${r1(p.y)}`).join('')
+      + ' Z';
+
+    const rainMax = Math.max.apply(null, rows.map((d) => (isFinite(d.precip) ? d.precip : 0)).concat([1]));
+    const rainBase = pad.top + plotH2;
+    const rain = rows.map((d, i) => {
+      const v = isFinite(d.precip) ? d.precip : 0;
+      if (v <= 0) return '';
+      const h = Math.max(1.5, (v / rainMax) * rainH);
+      // 柱宽按步长算，长区间（几千个点）时至少留 1px，否则会整段消失
+      const w = Math.max(1, Math.min(14, step * 0.62));
+      return `<rect class="hist-rain" x="${r1(xOf(i) - w / 2)}" y="${r1(rainBase - h)}" width="${r1(w)}" height="${r1(h)}"/>`;
+    }).join('');
+
+    const avg = rows.reduce((a, d) => a + (isFinite(d.mean) ? d.mean : 0), 0)
+      / Math.max(1, rows.filter((d) => isFinite(d.mean)).length);
+    const avgY = isFinite(avg) ? yOf(avg) : null;
+
+    // 横轴标签：只标若干个，避免 1800 个日期糊成一片
+    const labelEvery = Math.max(1, Math.ceil(rows.length / 8));
+    const axis = rows.map((d, i) => {
+      if (i % labelEvery !== 0 && i !== rows.length - 1) return '';
+      return `<g class="hist-tick"><text x="${r1(xOf(i))}" y="${pad.top + plotH2 + 18}" text-anchor="middle">${esc(shortLabel(d.label, o.grain))}</text></g>`;
+    }).join('');
+
+    const grades = C.ticks(range.min, range.max, 5).map((t) => {
+      const y = yOf(t);
+      return `<g class="hist-grade"><line x1="${pad.left}" y1="${r1(y)}" x2="${pad.left + plotW2}" y2="${r1(y)}"/>`
+        + `<text x="${pad.left - 8}" y="${r1(y + 4)}">${C.convertTemp(t, unit)}°</text></g>`;
+    }).join('');
+
+    return `<svg class="chart" viewBox="0 0 ${W} ${H2}" role="img"
+      aria-label="${esc(rows.length + ' 个时段的温度与降水趋势')}">
+      ${grades}
+      <path class="hist-band" d="${band}"/>
+      <path class="hist-line" d="${C.pathFrom(means)}"/>
+      ${avgY != null ? `<line class="hist-bar-avg" x1="${pad.left}" y1="${r1(avgY)}" x2="${pad.left + plotW2}" y2="${r1(avgY)}"/>`
+        + `<text class="hist-bar-avg-label" x="${pad.left + plotW2 + 2}" y="${r1(avgY + 4)}" text-anchor="end">均 ${C.convertTemp(avg, unit)}°</text>` : ''}
+      <g class="hist-axis"><line x1="${pad.left}" y1="${rainBase}" x2="${pad.left + plotW2}" y2="${rainBase}"/></g>
+      ${rain}
+      ${axis}
+    </svg>`;
+  }
+
+  /** 横轴标签：日粒度给「9/27」，月粒度给「26年9月」 */
+  function shortLabel(label, grain) {
+    if (grain === 'month' && /^\d{4}-\d{2}$/.test(label)) {
+      return `${label.slice(2, 4)}年${Number(label.slice(5, 7))}月`;
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(label)) {
+      return `${Number(label.slice(5, 7))}/${Number(label.slice(8, 10))}`;
+    }
+    return label;
+  }
+
+  return { hourly, compare, historySeries, attachCursor, W, H, PAD };
 });

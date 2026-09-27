@@ -24,6 +24,8 @@
     geocode: 'https://geocoding-api.open-meteo.com/v1/search',
     reverse: 'https://api.bigdatacloud.net/data/reverse-geocode-client',
     forecast: 'https://api.open-meteo.com/v1/forecast',
+    airQuality: 'https://air-quality-api.open-meteo.com/v1/air-quality',
+    archive: 'https://archive-api.open-meteo.com/v1/archive',
   };
 
   /* 一次请求要拿到的东西都写在这里，server.js 直接引用，避免两处字段名漂移 */
@@ -38,8 +40,21 @@
       'wind_speed_10m',
       'wind_direction_10m',
       'surface_pressure',
+      'visibility',
+      'uv_index',
+      'cape',          // 对流有效位能：雷电预警的依据
     ],
-    hourly: ['temperature_2m', 'weather_code', 'precipitation_probability', 'wind_speed_10m'],
+    hourly: [
+      'temperature_2m',
+      'weather_code',
+      'precipitation_probability',
+      'wind_speed_10m',
+      'wind_gusts_10m',   // 阵风：大风预警按阵风发布
+      'snowfall',
+      'visibility',
+      'cape',
+      'apparent_temperature',
+    ],
     daily: [
       'weather_code',
       'temperature_2m_max',
@@ -49,8 +64,41 @@
       'precipitation_probability_max',
       'precipitation_sum',
       'wind_speed_10m_max',
+      'wind_gusts_10m_max',
+      'snowfall_sum',
+      'uv_index_max',
+      'daylight_duration',
     ],
   };
+
+  const AIR_FIELDS = [
+    'pm10', 'pm2_5', 'carbon_monoxide', 'nitrogen_dioxide', 'sulphur_dioxide', 'ozone',
+    'us_aqi', 'european_aqi', 'uv_index',
+  ];
+
+  const AIR_HOURLY_FIELDS = ['pm10', 'pm2_5', 'ozone', 'nitrogen_dioxide'];
+
+  /* 历史档案要的日值。选这些是因为它们能回答"这段时间天气怎么样"：
+     冷暖、下没下雨、下了多少、日照多长。 */
+  const ARCHIVE_FIELDS = [
+    'weather_code',
+    'temperature_2m_max',
+    'temperature_2m_min',
+    'temperature_2m_mean',
+    'apparent_temperature_max',
+    'apparent_temperature_min',
+    'precipitation_sum',
+    'rain_sum',
+    'snowfall_sum',
+    'precipitation_hours',
+    'wind_speed_10m_max',
+    'wind_gusts_10m_max',
+    'shortwave_radiation_sum',
+    'sunshine_duration',
+    'relative_humidity_2m_mean',
+    'surface_pressure_mean',
+    'uv_index_max',
+  ];
 
   /* 请求的量程：过去 1 小时到未来 24 小时，够画一条「从此刻起」的曲线 */
   const HOURS_PAST = 1;
@@ -236,6 +284,7 @@
     const from = nowIso ? hourly.time.indexOf(nowIso) : 0;
     const start = from >= 0 ? from : firstIndexAtOrAfter(hourly.time, nowIso);
     const temps = Array.isArray(hourly.temperature_2m) ? hourly.temperature_2m : [];
+    const at = (key, i) => num(hourly[key] ? hourly[key][i] : null);
     const out = [];
     for (let i = start; i < hourly.time.length && out.length < count; i++) {
       const t = num(temps[i]);
@@ -243,9 +292,14 @@
       out.push({
         time: hourly.time[i],
         temp: t,
-        code: num(hourly.weather_code ? hourly.weather_code[i] : null),
-        pop: num(hourly.precipitation_probability ? hourly.precipitation_probability[i] : null),
-        wind: num(hourly.wind_speed_10m ? hourly.wind_speed_10m[i] : null),
+        code: at('weather_code', i),
+        pop: at('precipitation_probability', i),
+        wind: at('wind_speed_10m', i),
+        gust: at('wind_gusts_10m', i),
+        snow: at('snowfall', i),
+        visibility: at('visibility', i),
+        cape: at('cape', i),
+        feels: at('apparent_temperature', i),
       });
     }
     return out;
@@ -284,19 +338,31 @@
     if (!daily || !Array.isArray(daily.time)) return [];
     return daily.time.map(function (iso, i) {
       const day = parseDay(iso) || { iso, weekday: '', isWeekend: false };
+      const pick = (key) => num(daily[key] ? daily[key][i] : null);
       return {
         date: day.iso,
         weekday: day.weekday,
         isWeekend: day.isWeekend,
         monthDay: `${Number(day.iso.slice(5, 7))}/${Number(day.iso.slice(8, 10))}`,
-        code: num(daily.weather_code ? daily.weather_code[i] : null),
-        high: num(daily.temperature_2m_max ? daily.temperature_2m_max[i] : null),
-        low: num(daily.temperature_2m_min ? daily.temperature_2m_min[i] : null),
+        code: pick('weather_code'),
+        high: pick('temperature_2m_max'),
+        low: pick('temperature_2m_min'),
         sunrise: timeOf(daily.sunrise ? daily.sunrise[i] : null),
         sunset: timeOf(daily.sunset ? daily.sunset[i] : null),
-        pop: num(daily.precipitation_probability_max ? daily.precipitation_probability_max[i] : null),
-        precip: num(daily.precipitation_sum ? daily.precipitation_sum[i] : null),
-        wind: num(daily.wind_speed_10m_max ? daily.wind_speed_10m_max[i] : null),
+        pop: pick('precipitation_probability_max'),
+        precip: pick('precipitation_sum'),
+        wind: pick('wind_speed_10m_max'),
+        gust: pick('wind_gusts_10m_max'),
+        snow: pick('snowfall_sum'),
+        uvMax: pick('uv_index_max'),
+        daylight: pick('daylight_duration'),
+        // 历史档案才有的字段，预报接口没有；有就带着，没有就是 null
+        mean: pick('temperature_2m_mean'),
+        rain: pick('rain_sum'),
+        hours: pick('precipitation_hours'),
+        sunshine: pick('sunshine_duration'),
+        humidity: pick('relative_humidity_2m_mean'),
+        radiation: pick('shortwave_radiation_sum'),
       };
     });
   }
@@ -329,10 +395,42 @@
         windDir: num(raw.current && raw.current.wind_direction_10m),
         pressure: num(raw.current && raw.current.surface_pressure),
         precip: num(raw.current && raw.current.precipitation),
+        visibility: num(raw.current && raw.current.visibility),
+        uv: num(raw.current && raw.current.uv_index),
+        cape: num(raw.current && raw.current.cape),
       },
       daily: daily,
-      today: today ? { high: today.high, low: today.low, sunrise: today.sunrise, sunset: today.sunset } : null,
+      today: today ? {
+        high: today.high,
+        low: today.low,
+        sunrise: today.sunrise,
+        sunset: today.sunset,
+        uvMax: today.uvMax,
+        gust: today.gust,
+      } : null,
       hours: sliceHours(raw.hourly, now, HOURS_AHEAD),
+      // 原始逐小时数组留给预警推导（要 CAPE/能见度）和"切到某一天"用
+      rawHourly: raw.hourly || null,
+    };
+  }
+
+  /**
+   * 历史档案：上游返回的形状和预报接口一致，只是日值字段更多。
+   * 单独写一个入口是因为它没有 current/hourly，语义也不同（是观测记录而非预测），
+   * 混用 normalizeForecast 会让调用方以为那里也有"当前天气"。
+   */
+  function normalizeArchive(raw) {
+    if (!raw || typeof raw !== 'object' || !raw.daily) return null;
+    const daily = normalizeDaily(raw.daily);
+    if (!daily.length) return null;
+    return {
+      latitude: num(raw.latitude),
+      longitude: num(raw.longitude),
+      elevation: num(raw.elevation),
+      timezone: raw.timezone || null,
+      daily: daily,
+      startDate: daily[0].date,
+      endDate: daily[daily.length - 1].date,
     };
   }
 
@@ -613,6 +711,9 @@
   return {
     UPSTREAM,
     FORECAST_FIELDS,
+    AIR_FIELDS,
+    AIR_HOURLY_FIELDS,
+    ARCHIVE_FIELDS,
     HOURS_PAST,
     HOURS_AHEAD,
     FORECAST_DAYS,
@@ -631,6 +732,7 @@
     normalizePlace,
     normalizeForecast,
     normalizeDaily,
+    normalizeArchive,
     sliceHours,
     toHourIso,
     parseDay,
@@ -661,5 +763,9 @@
     serializeSaved,
     round1,
     clamp,
+    /* 暴露出去是因为"是不是一个能用的数字"这条判断在前端到处都要用，
+       而它必须和 core 里同一个口径（显式 typeof，不用 isFinite，
+       否则 null 会被当成 0）。各处自己写一份迟早会写歪。 */
+    num,
   };
 });

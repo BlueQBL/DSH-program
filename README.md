@@ -440,6 +440,12 @@ http://localhost:5173
 | **番茄钟 · 专注计时** | `pomodoro/` | 零依赖 HTML + CSS + 原生 JS + Node 服务 | `cd pomodoro && node server.js` → http://127.0.0.1:5230 |
 | **云图 · 天气台** | `cloud-atlas/` | 零依赖 HTML + CSS + 原生 JS + Node 服务（含 API 代理） | `cd cloud-atlas && node server.js` → http://127.0.0.1:5240 |
 
+`cloud-atlas/` 除了城市天气查询与 7 日预报，还包含：AQI（按中国国标 HJ 633—2012 计算）、
+天气提示（按预警分级标准推算，界面明确标注非官方）、多城市对比、历史天气趋势（30 天～5 年）。
+细节见 `cloud-atlas/README.md`。
+
+后续新增项目会继续追加到本表。
+
 后续新增项目会继续追加到本表。
 
 ---
