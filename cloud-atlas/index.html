@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-unit="c">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="云图 · 天气台：查城市当前天气、气温曲线、七日预报，按定位自动取当地天气，收藏常用城市。">
+<title>云图 · 天气台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%230c1620'/%3E%3Cg stroke='%237fd1c0' stroke-width='3'%3E%3Cline x1='10' y1='20' x2='54' y2='20'/%3E%3Cline x1='10' y1='32' x2='54' y2='32'/%3E%3Cline x1='10' y1='44' x2='54' y2='44'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<!-- 天象符号的图案与裁切路径在这里定义一次，页面里所有 <use> 都引用它 -->
+<svg class="wx-sprite" width="0" height="0" aria-hidden="true" focusable="false"></svg>
+
+<!-- 天空底色：条件与昼夜决定它的三个色标，CSS 变量在 body[data-tone] 上切换 -->
+<div class="sky" aria-hidden="true"></div>
+<!-- 坐标纸：细节来自气象传真图的方格底，极淡，只提供"这是一张图"的观感 -->
+<div class="graticule" aria-hidden="true"></div>
+
+<a class="skip" href="#plot">跳到观测数据</a>
+
+<div class="console" id="console">
+  <header class="masthead">
+    <a class="brand" href="./" aria-label="云图 · 天气台，回到默认城市">
+      <svg class="brand__mark" viewBox="0 0 40 40" width="34" height="34" aria-hidden="true">
+        <circle cx="20" cy="20" r="15" fill="none" stroke="currentColor" stroke-width="1.6"/>
+        <line x1="5" y1="15" x2="35" y2="15" stroke="currentColor" stroke-width="1.1"/>
+        <line x1="5" y1="21" x2="35" y2="21" stroke="currentColor" stroke-width="1.1"/>
+        <line x1="5" y1="27" x2="35" y2="27" stroke="currentColor" stroke-width="1.1"/>
+        <path d="M11 25 L17 17 L23 22 L29 12" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      <span class="brand__text">云图<em>天气台</em></span>
+    </a>
+
+    <form class="seek" id="seek-form" role="search" autocomplete="off">
+      <label class="seek__label" for="seek-input">查地名</label>
+      <div class="seek__field">
+        <input id="seek-input" name="q" type="search" placeholder="输入城市、区县或地名"
+               aria-describedby="seek-hint" aria-expanded="false" aria-controls="seek-list"
+               role="combobox" aria-autocomplete="list">
+        <button class="seek__go" type="submit">查询</button>
+      </div>
+      <ul class="seek__list" id="seek-list" role="listbox" aria-label="地名候选" hidden></ul>
+      <p class="seek__hint" id="seek-hint" aria-live="polite"></p>
+    </form>
+
+    <div class="masthead__tools">
+      <button class="tool" id="locate-btn" type="button" title="用浏览器定位取当地天气">
+        <span class="tool__glyph" aria-hidden="true">◈</span>定位
+      </button>
+      <div class="unit-toggle" role="group" aria-label="温度与风速单位">
+        <button class="unit-toggle__btn" type="button" data-unit-set="c" aria-pressed="true">°C</button>
+        <button class="unit-toggle__btn" type="button" data-unit-set="f" aria-pressed="false">°F</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="notices" id="notices" aria-live="polite"></div>
+
+  <main class="deck">
+    <aside class="rail" aria-labelledby="rail-title">
+      <h2 class="rail__title eyebrow" id="rail-title">常用城市<span class="eyebrow__count" id="rail-count">0</span></h2>
+      <ul class="rail__list" id="saved-list"></ul>
+      <p class="rail__note" id="rail-empty">还没有收藏。查到想要的城市后，按「收藏」留在这里，下次一点就到。</p>
+      <div class="rail__foot">
+        <p class="rail__meta" id="history-meta"></p>
+      </div>
+    </aside>
+
+    <article class="plot" id="plot" aria-labelledby="place-name">
+      <section class="obs" id="obs" aria-busy="true">
+        <header class="obs__head">
+          <div class="obs__id">
+            <h1 class="obs__place" id="place-name">读表中</h1>
+            <p class="obs__where" id="place-where">正在获取观测数据</p>
+          </div>
+          <div class="obs__meta">
+            <span class="obs__stamp"><b id="obs-time">—</b> 观测</span>
+            <span class="obs__stamp" id="obs-zone">—</span>
+          </div>
+        </header>
+
+        <div class="obs__body">
+          <div class="readout">
+            <div class="readout__num">
+              <span class="readout__value" id="temp-now">--</span>
+              <span class="readout__unit" id="temp-unit">°C</span>
+            </div>
+            <p class="readout__cond">
+              <span class="readout__icon" id="now-icon" aria-hidden="true"></span>
+              <span class="readout__label" id="cond-now">—</span>
+            </p>
+            <p class="readout__feels">体感 <b id="feels-now">—</b> · 今日 <b id="today-range">—</b></p>
+            <!-- 旁注与动作同属主读数的收尾：结论在上（说明这是什么天气），
+                 动作在下（说明可以对它做什么），用一条发丝线隔开 -->
+            <div class="readout__foot">
+              <p class="readout__note" id="obs-note"></p>
+              <div class="readout__acts" id="obs-acts"></div>
+            </div>
+          </div>
+
+          <div class="instr" id="instr">
+            <!-- 湿度 -->
+            <div class="instr__cell">
+              <p class="instr__key">湿度</p>
+              <p class="instr__val"><span id="m-humidity">--</span><small>%</small></p>
+              <div class="instr__scale" id="scale-humidity"><i></i></div>
+            </div>
+            <!-- 风：一个指北针 + 读数 -->
+            <div class="instr__cell instr__cell--wind">
+              <p class="instr__key">风</p>
+              <p class="instr__val"><span id="m-wind">--</span><small id="m-wind-unit">km/h</small></p>
+              <div class="vane" id="vane" role="img" aria-label="风向">
+                <svg viewBox="0 0 72 72" width="72" height="72">
+                  <circle class="vane__ring" cx="36" cy="36" r="26"/>
+                  <g class="vane__ticks">
+                    <line x1="36" y1="6" x2="36" y2="13"/><line x1="36" y1="59" x2="36" y2="66"/>
+                    <line x1="6" y1="36" x2="13" y2="36"/><line x1="59" y1="36" x2="66" y2="36"/>
+                  </g>
+                  <text class="vane__n" x="36" y="24" text-anchor="middle">N</text>
+                  <g class="vane__needle" id="vane-needle">
+                    <line x1="36" y1="52" x2="36" y2="16"/>
+                    <path d="M36 12 L31.5 20 L40.5 20 Z"/>
+                  </g>
+                </svg>
+              </div>
+              <p class="instr__sub" id="m-wind-dir">—</p>
+            </div>
+            <!-- 气压 -->
+            <div class="instr__cell">
+              <p class="instr__key">气压</p>
+              <p class="instr__val"><span id="m-pressure">--</span><small id="m-pressure-unit">hPa</small></p>
+              <p class="instr__sub" id="m-pressure-alt">—</p>
+            </div>
+            <!-- 降水 -->
+            <div class="instr__cell">
+              <p class="instr__key">降水概率</p>
+              <p class="instr__val"><span id="m-pop">--</span><small>%</small></p>
+              <p class="instr__sub" id="m-precip">—</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="ribbon" id="ribbon" role="img" aria-label="今日气温在全年刻度上的位置">
+          <div class="ribbon__track"><span class="ribbon__band" id="ribbon-band"></span><span class="ribbon__dot" id="ribbon-dot"></span></div>
+          <div class="ribbon__keys"><span id="ribbon-low">—</span><span>今日低温 / 高温</span><span id="ribbon-high">—</span></div>
+        </div>
+      </section>
+
+      <section class="panel" id="curve-panel" aria-labelledby="curve-title">
+        <header class="panel__head">
+          <h2 class="panel__title" id="curve-title">未来 24 小时</h2>
+          <p class="panel__aside" id="curve-aside"></p>
+        </header>
+        <div class="readoutbar" id="readoutbar" aria-live="polite">
+          <span class="readoutbar__slot" id="rb-time">此刻</span>
+          <span class="readoutbar__slot" id="rb-temp">--</span>
+          <span class="readoutbar__slot" id="rb-cond">—</span>
+          <span class="readoutbar__slot" id="rb-pop">—</span>
+        </div>
+        <div class="plotbox" id="plotbox"></div>
+        <p class="panel__foot">在图上按住左右拖动，或用方向键逐小时读数。</p>
+      </section>
+
+      <section class="panel" id="week-panel" aria-labelledby="week-title">
+        <header class="panel__head">
+          <h2 class="panel__title" id="week-title">未来 7 天</h2>
+          <p class="panel__aside">同一温度尺，条越长越暖</p>
+        </header>
+        <div class="week__scale" id="week-scale" aria-hidden="true"></div>
+        <ol class="week" id="week"></ol>
+        <div class="daybox" id="daybox" hidden></div>
+      </section>
+    </article>
+  </main>
+
+  <footer class="colophon">
+    <p>数据来源 <a href="https://open-meteo.com/" target="_blank" rel="noreferrer noopener">Open-Meteo</a>（WMO 天气码）；定位反查由本机服务代理。</p>
+    <p class="colophon__note">本机演示项目，观测数据每 10 分钟刷新一次。</p>
+  </footer>
+</div>
+
+<script src="js/core.js"></script>
+<script src="js/icons.js"></script>
+<script src="js/chart.js"></script>
+<script>
+/* 版面自检：只在带 ?verify=1 打开时加载探针。
+ *
+ * 探针必须在 app.js 之前进入队列，因为 app.js 会在渲染完成后调用 window.__CLOUD_VERIFY__
+ * 完成测量——如果探针晚一步加载，那次调用就丢了，结果永远写不出来。
+ * 探针本身是同步的、只做一次测量，不靠定时器轮询：
+ * 无头浏览器的 --virtual-time-budget 会快进定时器，任何"等一会儿再量"的思路都不可靠。
+ *
+ * 正常使用（没有 verify 参数）时这个文件根本不会被请求。 */
+if (new URLSearchParams(location.search).get('verify') === '1') {
+  document.write('<script src="js/verify-probe.js"><\/script>');
+}
+</script>
+<script src="js/app.js"></script>
+</body>
+</html>

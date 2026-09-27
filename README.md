@@ -438,6 +438,7 @@ http://localhost:5173
 | **案头待办** | `todo-app/` | 零依赖 HTML + CSS + 原生 JS + Node 服务 | `cd todo-app && node server.js` → http://127.0.0.1:5210 |
 | **校样 · Markdown 笔记台** | `markdown-notes/` | 零依赖 HTML + CSS + 原生 JS + Node 服务 | `cd markdown-notes && node server.js` → http://127.0.0.1:5220 |
 | **番茄钟 · 专注计时** | `pomodoro/` | 零依赖 HTML + CSS + 原生 JS + Node 服务 | `cd pomodoro && node server.js` → http://127.0.0.1:5230 |
+| **云图 · 天气台** | `cloud-atlas/` | 零依赖 HTML + CSS + 原生 JS + Node 服务（含 API 代理） | `cd cloud-atlas && node server.js` → http://127.0.0.1:5240 |
 
 后续新增项目会继续追加到本表。
 

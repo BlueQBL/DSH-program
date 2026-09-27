@@ -1,0 +1,16 @@
+{
+  "name": "cloud-atlas",
+  "version": "1.0.0",
+  "private": true,
+  "description": "云图 · 天气台 —— 零依赖的城市天气查询应用",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/",
+    "shot": "node scripts/capture.js",
+    "check": "node scripts/verify-layout.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

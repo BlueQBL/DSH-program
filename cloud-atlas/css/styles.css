@@ -1,0 +1,1171 @@
+/* 云图 · 样式
+ *
+ * 设计说明（这份文件里的每个颜色和间距都从这里推出来，不是随手调和出来的）：
+ *
+ * 1. 整套配色叫「天空底色」：--paper / --ink / --accent / --sky-* 五个值由
+ *    <body data-tone="..."> 决定，而 data-tone 来自真实数据（WMO 天气码 + 当时是否白天）。
+ *    在杭州清晨的雨里打开和在拉萨夜晚的晴空下打开，是两套不同的配色——
+ *    但版面结构、字号、间距完全不变。变化的是天气，不是产品。
+ *
+ * 2. 版面借自气象观测：上方报头（站名 / 观测时间），左侧一栏常用城市像值班表，
+ *    中间是主读数区（大号气温 + 四项仪器读数 + 一根置于今日量程上的指针），
+ *    下面是曲线台与 7 日量程条。区块之间用发丝线分隔并配等宽小标签，
+ *    不做圆角卡片堆叠——那会把一张图拆成一堆互相没关系的小方块。
+ *
+ * 3. 圆角只有一处（输入框 3px，为了不与浏览器的默认外观打架），
+ *    其余一律直角：这是图纸的语言。
+ *
+ * 4. 字体只用系统里必有的两族：CJK 用雅黑系粗体承担标题与标签，
+ *    等宽 Consolas 承担所有数字读数（等宽数字对齐，读数跳动时不会左右抖）。
+ *    不引外部字体，断网也长一个样。
+ */
+
+/* ------------------------------------------------------------------ 变量 */
+
+:root {
+  --font-cjk: "Microsoft YaHei", "微软雅黑", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", system-ui, sans-serif;
+  --font-mono: Consolas, "SFMono-Regular", "JetBrains Mono", "Cascadia Mono", Menlo, monospace;
+
+  /* 观测时间轴上的统一节奏 */
+  --gap: 22px;
+  --pad: 26px;
+  --hair: 1px;
+
+  /* 日间默认（未拿到数据前的兜底配色） */
+  --paper: #0d1a26;
+  --paper-2: #12212e;
+  --ink: #e9f2f7;
+  --ink-2: #98aebd;
+  --accent: #e6a13c;
+  --sky-a: #12283a;
+  --sky-b: #0d1a26;
+  --sky-c: #08111a;
+  --grid: rgba(233, 242, 247, 0.45);
+  --glow: rgba(230, 161, 60, 0.5);
+}
+
+/* 天象基调：晴（昼） */
+body[data-tone="clear"] {
+  --paper: #101f2c; --paper-2: #16293a;
+  --ink: #ecf4f9; --ink-2: #9ab2c2;
+  --accent: #eaa53f;
+  --sky-a: #17405a; --sky-b: #0f2233; --sky-c: #09131d;
+  --grid: rgba(236, 244, 249, 0.45); --glow: rgba(234, 165, 63, 0.55);
+}
+
+/* 晴间多云 */
+body[data-tone="fair"] {
+  --paper: #101d2a; --paper-2: #16283a;
+  --ink: #eaf1f8; --ink-2: #98aec0;
+  --accent: #dcac55;
+  --sky-a: #1a3c57; --sky-b: #112336; --sky-c: #0a141f;
+  --grid: rgba(234, 241, 248, 0.45); --glow: rgba(220, 172, 85, 0.5);
+}
+
+/* 多云 */
+body[data-tone="cloud"] {
+  --paper: #131b23; --paper-2: #1b2531;
+  --ink: #e9eff4; --ink-2: #9aa9b8;
+  --accent: #cfa96b;
+  --sky-a: #2b3d4d; --sky-b: #1d2a36; --sky-c: #121a22;
+  --grid: rgba(233, 239, 244, 0.45); --glow: rgba(207, 169, 107, 0.45);
+}
+
+/* 阴 */
+body[data-tone="overcast"] {
+  --paper: #12171b; --paper-2: #1a2126;
+  --ink: #e6ebee; --ink-2: #94a1a9;
+  --accent: #d8b47a;
+  --sky-a: #33404a; --sky-b: #232d35; --sky-c: #151b20;
+  --grid: rgba(230, 235, 238, 0.45); --glow: rgba(216, 180, 122, 0.4);
+}
+
+/* 雾 */
+body[data-tone="fog"] {
+  --paper: #14181b; --paper-2: #1c2226;
+  --ink: #e8ecee; --ink-2: #9ba5ab;
+  --accent: #dccfa8;
+  --sky-a: #3a4145; --sky-b: #262d31; --sky-c: #161b1e;
+  --grid: rgba(232, 236, 238, 0.5); --glow: rgba(220, 207, 168, 0.4);
+}
+
+/* 毛毛雨 / 雨 */
+body[data-tone="drizzle"], body[data-tone="rain"] {
+  --paper: #0e161c; --paper-2: #16222b;
+  --ink: #e7eff3; --ink-2: #93a7b3;
+  --accent: #7fcfe6;
+  --sky-a: #123145; --sky-b: #0d1e29; --sky-c: #070f15;
+  --grid: rgba(231, 239, 243, 0.45); --glow: rgba(127, 207, 230, 0.5);
+}
+
+/* 雪 */
+body[data-tone="snow"] {
+  --paper: #141b21; --paper-2: #1d262e;
+  --ink: #eef3f7; --ink-2: #a3b0ba;
+  --accent: #c9dcf0;
+  --sky-a: #35485a; --sky-b: #22303d; --sky-c: #131b23;
+  --grid: rgba(238, 243, 247, 0.5); --glow: rgba(201, 220, 240, 0.5);
+}
+
+/* 雷暴 */
+body[data-tone="storm"] {
+  --paper: #0d1117; --paper-2: #171c26;
+  --ink: #e9edf5; --ink-2: #98a1b3;
+  --accent: #cdb6ff;
+  --sky-a: #2a2340; --sky-b: #191627; --sky-c: #0b0a13;
+  --grid: rgba(233, 237, 245, 0.45); --glow: rgba(205, 182, 255, 0.5);
+}
+
+/* 夜间：雨夜 */
+body[data-tone="rain-night"] {
+  --paper: #0a1117; --paper-2: #121b23;
+  --ink: #e2ebf0; --ink-2: #8b9daa;
+  --accent: #6fbcd4;
+  --sky-a: #0d1c28; --sky-b: #08131c; --sky-c: #04090e;
+  --grid: rgba(226, 235, 240, 0.4); --glow: rgba(111, 188, 212, 0.45);
+}
+
+/* 夜间：雪夜 */
+body[data-tone="snow-night"] {
+  --paper: #0b1119; --paper-2: #141c26;
+  --ink: #e6edf5; --ink-2: #97a4b4;
+  --accent: #b6cde6;
+  --sky-a: #16212e; --sky-b: #0c141d; --sky-c: #05090e;
+  --grid: rgba(230, 237, 245, 0.4); --glow: rgba(182, 205, 230, 0.45);
+}
+
+/* 夜间：雷暴夜 */
+body[data-tone="storm-night"] {
+  --paper: #09090f; --paper-2: #14121c;
+  --ink: #e7e5f2; --ink-2: #9a95ad;
+  --accent: #b9a1f5;
+  --sky-a: #1c1630; --sky-b: #0f0c1a; --sky-c: #05040a;
+  --grid: rgba(231, 229, 242, 0.4); --glow: rgba(185, 161, 245, 0.5);
+}
+
+/* 夜间：晴 / 其余夜天 */
+body[data-tone="night"] {
+  --paper: #0b1420; --paper-2: #131f2c;
+  --ink: #e6eff6; --ink-2: #92a6b6;
+  --accent: #9fc6e8;
+  --sky-a: #101f33; --sky-b: #0a1420; --sky-c: #04080e;
+  --grid: rgba(230, 239, 246, 0.4); --glow: rgba(159, 198, 232, 0.5);
+}
+
+/* ------------------------------------------------------------------ 基础 */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-cjk);
+  font-size: 15px;
+  line-height: 1.55;
+  /* 底色切换时要看得见「天变了」，但不能慢到影响操作 */
+  transition: background-color 900ms ease, color 900ms ease;
+  overflow-x: hidden;
+}
+
+h1, h2, h3, p, ol, ul, figure { margin: 0; }
+ol, ul { padding: 0; list-style: none; }
+button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+a { color: inherit; }
+
+/* 只有键盘用户看得到焦点环：鼠标点击不该在图上留下一个框 */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.skip {
+  position: absolute; left: -9999px; top: 0; z-index: 40;
+  padding: 10px 16px; background: var(--paper-2); color: var(--ink);
+  border: var(--hair) solid var(--accent);
+}
+.skip:focus { left: 12px; top: 12px; }
+
+/* 屏幕阅读器专用：曲线的等价数据表用得上 */
+.sr {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* ---------------------------------------------------------- 天空与坐标纸 */
+
+/* 天空用三层：最外是整页底色，中间一块随高度淡出的天光，
+   最里一朵贴右上角的云影。都是静态渐变，不用动画——天气是慢的，
+   在背景上做循环动画会让页面显得躁。 */
+.sky {
+  position: fixed;
+  inset: 0;
+  z-index: -3;
+  pointer-events: none;
+  background:
+    radial-gradient(120% 62% at 12% -18%, var(--sky-a) 0%, transparent 62%),
+    radial-gradient(80% 48% at 92% -6%, var(--glow) 0%, transparent 58%),
+    linear-gradient(180deg, var(--sky-b) 0%, var(--paper) 46%, var(--sky-c) 100%);
+  transition: background 900ms ease;
+}
+
+/* 坐标纸：32px 一格的横竖发丝线。透明度压到 4%–6%，
+   它的作用是让人「感到这是一张图」，一旦看得清就已经太抢了。 */
+.graticule {
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, var(--grid) var(--hair), transparent var(--hair)),
+    linear-gradient(to bottom, var(--grid) var(--hair), transparent var(--hair));
+  background-size: 32px 32px;
+  opacity: 0.055;
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.9) 0%, rgba(0, 0, 0, 0.35) 70%, transparent 100%);
+  -webkit-mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.9) 0%, rgba(0, 0, 0, 0.35) 70%, transparent 100%);
+}
+
+/* ------------------------------------------------------------------ 版心 */
+
+.console {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 0 clamp(14px, 3vw, 34px) 56px;
+}
+
+/* ------------------------------------------------------------------ 报头 */
+
+.masthead {
+  display: flex;
+  align-items: center;
+  gap: clamp(14px, 2.4vw, 30px);
+  padding: 18px 0 14px;
+  border-bottom: var(--hair) solid color-mix(in srgb, var(--ink) 26%, transparent);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  /* 滚动时内容会从报头下面穿过，所以给它一层和底色同调的实底 */
+  background: color-mix(in srgb, var(--paper) 88%, transparent);
+  backdrop-filter: blur(10px) saturate(1.1);
+  -webkit-backdrop-filter: blur(10px) saturate(1.1);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  flex: 0 0 auto;
+}
+.brand__mark { color: var(--ink); flex: 0 0 auto; }
+.brand__text {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  white-space: nowrap;
+}
+.brand__text em {
+  font-style: normal;
+  font-weight: 400;
+  font-size: 11px;
+  letter-spacing: 0.24em;
+  color: var(--ink-2);
+  display: block;
+  margin-top: -2px;
+}
+
+/* --- 检索 --- */
+
+.seek {
+  position: relative;
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.seek__label {
+  position: absolute;
+  width: 1px; height: 1px;
+  overflow: hidden; clip: rect(0 0 0 0);
+}
+
+.seek__field {
+  display: flex;
+  align-items: stretch;
+  border: var(--hair) solid color-mix(in srgb, var(--ink) 34%, transparent);
+  background: color-mix(in srgb, var(--paper-2) 70%, transparent);
+  transition: border-color 160ms ease, background 160ms ease;
+}
+.seek__field:focus-within {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--paper-2) 92%, transparent);
+}
+
+.seek__field input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 9px 12px;
+  border: none;
+  background: none;
+  color: var(--ink);
+  font-family: var(--font-cjk);
+  font-size: 14px;
+  /* 搜索框保留 3px 圆角：它必须一眼看出是"能打字的输入框"，
+     在这一片直角里，这一点圆角是有信息量的，不是装饰。 */
+  border-radius: 3px;
+}
+.seek__field input::placeholder { color: color-mix(in srgb, var(--ink-2) 92%, transparent); }
+.seek__field input:focus { outline: none; }
+.seek__field input::-webkit-search-cancel-button { filter: invert(0.7); }
+
+.seek__go {
+  flex: 0 0 auto;
+  padding: 0 18px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  border-left: var(--hair) solid color-mix(in srgb, var(--ink) 34%, transparent);
+  transition: background 160ms ease, color 160ms ease;
+}
+.seek__go:hover { background: var(--accent); color: var(--paper); }
+.seek__go:active { transform: translateY(1px); }
+
+.seek__hint {
+  min-height: 0;
+  font-size: 12px;
+  color: var(--ink-2);
+  padding-top: 5px;
+}
+.seek__hint:empty { padding-top: 0; }
+
+/* 候选下拉：和输入框同宽，逐条列出经纬度，避免同名城市选错 */
+.seek__list {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 1px);
+  left: 0; right: 0;
+  max-height: 340px;
+  overflow-y: auto;
+  border: var(--hair) solid var(--accent);
+  background: color-mix(in srgb, var(--paper-2) 97%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 18px 40px -18px rgba(0, 0, 0, 0.7);
+}
+.seek__opt {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 12px;
+  align-items: baseline;
+  padding: 9px 13px;
+  cursor: pointer;
+  border-bottom: var(--hair) solid color-mix(in srgb, var(--ink) 12%, transparent);
+}
+.seek__opt:last-child { border-bottom: none; }
+.seek__opt[aria-selected="true"], .seek__opt:hover {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.seek__opt-name { font-weight: 700; font-size: 14px; }
+.seek__opt-region { font-size: 12px; color: var(--ink-2); grid-column: 1; }
+.seek__opt-coord {
+  grid-row: 1 / span 2;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  align-self: center;
+}
+.seek__list-empty {
+  padding: 12px 13px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+/* --- 报头右侧 --- */
+
+.masthead__tools {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 0 auto;
+}
+
+.tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 13px;
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  border: var(--hair) solid color-mix(in srgb, var(--ink) 34%, transparent);
+  transition: border-color 160ms ease, background 160ms ease;
+}
+.tool:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.tool[disabled] { opacity: 0.5; cursor: progress; }
+.tool__glyph { color: var(--accent); font-size: 12px; }
+
+.unit-toggle {
+  display: flex;
+  border: var(--hair) solid color-mix(in srgb, var(--ink) 34%, transparent);
+}
+.unit-toggle__btn {
+  padding: 8px 11px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--ink-2);
+  transition: background 160ms ease, color 160ms ease;
+}
+.unit-toggle__btn + .unit-toggle__btn { border-left: var(--hair) solid color-mix(in srgb, var(--ink) 34%, transparent); }
+.unit-toggle__btn[aria-pressed="true"] { background: var(--accent); color: var(--paper); font-weight: 700; }
+.unit-toggle__btn:not([aria-pressed="true"]):hover { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--ink); }
+
+/* ------------------------------------------------------------- 提示与故障 */
+
+.notices:empty { display: none; }
+.notices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 14px;
+}
+
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 13px;
+  font-size: 13px;
+  border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--paper-2) 78%, transparent);
+}
+.notice--error { border-left-color: #e2705f; }
+.notice--ok { border-left-color: #6fbf95; }
+.notice b { font-weight: 700; }
+.notice__close {
+  margin-left: auto;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--ink-2);
+  padding: 0 2px;
+}
+.notice__close:hover { color: var(--ink); }
+
+/* --------------------------------------------------------------- 主版面 */
+
+.deck {
+  display: grid;
+  grid-template-columns: minmax(210px, 244px) minmax(0, 1fr);
+  gap: 0;
+  align-items: start;
+}
+
+/* --- 左栏：常用城市 --- */
+
+.rail {
+  padding: 20px 20px 0 0;
+  border-right: var(--hair) solid color-mix(in srgb, var(--ink) 24%, transparent);
+  min-height: 240px;
+  position: sticky;
+  top: 82px;
+}
+
+.eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+.eyebrow__count {
+  font-family: var(--font-mono);
+  letter-spacing: 0;
+  color: var(--ink);
+  border: var(--hair) solid color-mix(in srgb, var(--ink) 30%, transparent);
+  padding: 0 5px;
+}
+
+.rail__list { margin-top: 12px; display: flex; flex-direction: column; }
+
+/* 每一行是「主按钮 + 移除按钮」两个兄弟节点叠在一起：
+   主按钮占满整行负责切城市，移除按钮绝对定位贴回右上角。 */
+.rail__row { position: relative; }
+
+.rail__item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  text-align: left;
+  /* 右边留出移除按钮的位置，避免气温被它压住 */
+  padding: 9px 26px 9px 10px;
+  border-left: 2px solid transparent;
+  border-bottom: var(--hair) solid color-mix(in srgb, var(--ink) 10%, transparent);
+  transition: background 150ms ease, border-color 150ms ease;
+}
+.rail__item:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.rail__item[aria-current="true"] {
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.rail__icon { display: flex; color: var(--ink); opacity: 0.85; }
+.rail__text { min-width: 0; display: block; }
+.rail__name { display: block; font-size: 14px; font-weight: 700; line-height: 1.3; }
+.rail__sub {
+  display: block;
+  font-size: 11px;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rail__temp {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+.rail__temp--none { color: var(--ink-2); font-size: 12px; }
+.rail__drop {
+  position: absolute;
+  top: 50%;
+  right: 2px;
+  transform: translateY(-50%);
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  color: color-mix(in srgb, var(--ink-2) 80%, transparent);
+  opacity: 0;
+  transition: opacity 150ms ease, color 150ms ease;
+}
+/* 鼠标悬停或键盘聚焦时才显形：平时它是噪点，需要时它就在那儿。
+   触屏没有 hover，所以用 @media (hover: none) 让它常驻。 */
+.rail__row:hover .rail__drop,
+.rail__drop:focus-visible { opacity: 1; }
+.rail__drop:hover { color: #e2705f; }
+
+@media (hover: none) {
+  .rail__drop { opacity: 0.75; }
+}
+
+.rail__note {
+  margin-top: 12px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--ink-2);
+  text-indent: 0;
+}
+
+.rail__foot { margin-top: 18px; }
+.rail__meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  line-height: 1.8;
+}
+
+/* --- 右栏：观测 + 图 --- */
+
+.plot { padding-left: clamp(16px, 2.6vw, 34px); padding-top: 20px; min-width: 0; }
+
+.obs__head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding-bottom: 12px;
+  border-bottom: var(--hair) solid color-mix(in srgb, var(--ink) 26%, transparent);
+}
+
+.obs__place {
+  font-size: clamp(26px, 4vw, 40px);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  line-height: 1.1;
+}
+.obs__where {
+  margin-top: 5px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+}
+
+.obs__meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  color: var(--ink-2);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.obs__stamp b { font-family: var(--font-mono); color: var(--ink); letter-spacing: 0.04em; }
+
+.obs__body {
+  display: grid;
+  grid-template-columns: minmax(0, 300px) minmax(0, 1fr);
+  gap: clamp(18px, 3vw, 40px);
+  padding: 22px 0 18px;
+  align-items: start;
+}
+
+/* --- 主读数 --- */
+
+.readout__num {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  line-height: 0.84;
+}
+.readout__value {
+  font-size: clamp(76px, 13vw, 132px);
+  font-weight: 400;
+  letter-spacing: -0.045em;
+}
+.readout__unit {
+  font-size: clamp(18px, 2.4vw, 24px);
+  color: var(--accent);
+  padding-top: 0.42em;
+  letter-spacing: 0.02em;
+}
+
+.readout__cond {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+.readout__icon { display: flex; color: var(--ink); }
+.readout__icon svg { display: block; }
+.readout__label { font-size: 19px; font-weight: 700; letter-spacing: 0.05em; }
+
+.readout__feels {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.readout__feels b { font-family: var(--font-mono); color: var(--ink); font-weight: 400; }
+
+.readout__note {
+  margin-top: 12px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--ink-2);
+}
+.readout__note:empty { display: none; }
+
+/* 旁注下面是动作区。用一条与读数同宽的短发丝线收口——
+   线只画到读数区的一半宽（border-image 的简化做法用 padding + border-left 表达），
+   所以不会和左侧栏的竖线在中缝处交叉出一团。 */
+.readout__foot {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: var(--hair) solid color-mix(in srgb, var(--ink) 16%, transparent);
+  max-width: 300px;
+}
+.readout__acts { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* 收藏按钮：跟着观测一起出现，位置就在旁注下面——
+   它是"关于这个城市的动作"，所以贴着城市读数，而不是飘到报头去。 */
+.collect {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 13px;
+  font-size: 12.5px;
+  letter-spacing: 0.06em;
+  border: var(--hair) solid color-mix(in srgb, var(--ink) 34%, transparent);
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+.collect::before {
+  content: "";
+  width: 8px; height: 8px;
+  border: var(--hair) solid currentColor;
+  transform: rotate(45deg);
+  transition: background 160ms ease;
+}
+.collect:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.collect--on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.collect--on::before { background: currentColor; }
+
+/* --- 仪器读数：四项指标排成 2×2 的仪表格 --- */
+
+.instr {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  /* 用 1px 间隙 + 底色当分隔线：比给每格加边框少写四行，也不会出现双线 */
+  background: color-mix(in srgb, var(--ink) 22%, transparent);
+  border: var(--hair) solid color-mix(in srgb, var(--ink) 22%, transparent);
+}
+
+.instr__cell {
+  background: color-mix(in srgb, var(--paper) 82%, transparent);
+  padding: 12px 14px 13px;
+  min-width: 0;
+}
+
+.instr__key {
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  color: var(--ink-2);
+  text-transform: uppercase;
+}
+.instr__val {
+  margin-top: 5px;
+  font-family: var(--font-mono);
+  font-size: 30px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
+}
+.instr__val small { font-size: 12px; color: var(--ink-2); letter-spacing: 0.04em; }
+.instr__sub {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+}
+
+/* 湿度条：把百分比还原成一根长度，比单看数字更快 */
+.instr__scale {
+  margin-top: 9px;
+  height: 3px;
+  background: color-mix(in srgb, var(--ink) 16%, transparent);
+}
+.instr__scale i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 500ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+/* 指北针 */
+.instr__cell--wind { display: flex; flex-direction: column; }
+.vane { margin-top: 8px; color: var(--ink); }
+.vane svg { display: block; margin: 0 auto; }
+.vane__ring, .vane__ticks line { fill: none; stroke: color-mix(in srgb, var(--ink) 40%, transparent); stroke-width: 1; }
+.vane__n { fill: var(--ink-2); font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; }
+.vane__needle { fill: var(--accent); stroke: var(--accent); stroke-width: 1.8; transform-origin: 36px 36px; transition: transform 700ms cubic-bezier(0.2, 0.7, 0.2, 1); }
+.vane__needle path { stroke: none; }
+
+/* --- 今日量程条 --- */
+
+.ribbon { padding: 4px 0 22px; }
+.ribbon__track {
+  position: relative;
+  height: 6px;
+  background: color-mix(in srgb, var(--ink) 14%, transparent);
+}
+/* 今日低温→高温之间的一段，用强调色半透明铺出来 */
+.ribbon__band {
+  position: absolute;
+  top: 0; bottom: 0;
+  background: color-mix(in srgb, var(--accent) 42%, transparent);
+  transition: left 600ms cubic-bezier(0.2, 0.7, 0.2, 1), width 600ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+/* 当前气温的指针：一个 2px 竖标，压在量程条上 */
+.ribbon__dot {
+  position: absolute;
+  top: -6px; bottom: -6px;
+  width: 2px;
+  left: 0;
+  background: var(--ink);
+  transition: left 600ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+.ribbon__dot::after {
+  content: "";
+  position: absolute;
+  top: -4px; left: -3px;
+  width: 8px; height: 8px;
+  background: var(--ink);
+  transform: rotate(45deg);
+}
+.ribbon__keys {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-2);
+}
+.ribbon__keys span:nth-child(2) { letter-spacing: 0.16em; font-family: var(--font-cjk); }
+
+/* ------------------------------------------------------------- 区块外壳 */
+
+.panel {
+  border-top: var(--hair) solid color-mix(in srgb, var(--ink) 26%, transparent);
+  padding: 18px 0 30px;
+}
+
+.panel__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.panel__title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+.panel__aside {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-2);
+}
+.panel__foot {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--ink-2);
+}
+
+/* 曲线读数条：光标在哪，这四个数就是哪一小时的 */
+.readoutbar {
+  display: flex;
+  align-items: baseline;
+  gap: clamp(12px, 2.5vw, 30px);
+  flex-wrap: wrap;
+  margin: 14px 0 4px;
+  padding: 9px 0;
+  border-top: var(--hair) solid color-mix(in srgb, var(--ink) 12%, transparent);
+  border-bottom: var(--hair) solid color-mix(in srgb, var(--ink) 12%, transparent);
+}
+.readoutbar__slot {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+#rb-time { color: var(--ink); font-weight: 400; letter-spacing: 0.06em; }
+#rb-temp {
+  font-size: 22px;
+  color: var(--accent);
+  letter-spacing: -0.01em;
+}
+
+.plotbox { position: relative; margin-top: 6px; }
+
+/* --- 曲线本体 --- */
+
+.chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+  touch-action: pan-y; /* 允许竖滑页面，横向拖动留给光标 */
+}
+.chart text {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  fill: var(--ink-2);
+}
+.ch-night { fill: color-mix(in srgb, var(--ink) 9%, transparent); }
+.ch-grade line { stroke: color-mix(in srgb, var(--ink) 13%, transparent); stroke-width: 1; }
+.ch-grade text { fill: color-mix(in srgb, var(--ink-2) 88%, transparent); }
+.ch-frame line { stroke: color-mix(in srgb, var(--ink) 30%, transparent); stroke-width: 1; }
+.ch-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.ch-area { stroke: none; }
+.ch-tick line { stroke: color-mix(in srgb, var(--ink) 40%, transparent); stroke-width: 1; }
+.ch-peak circle { fill: var(--paper); stroke: var(--accent); stroke-width: 1.6; }
+.ch-peak text { fill: var(--ink); font-size: 11.5px; }
+.ch-sunmark line { stroke: color-mix(in srgb, var(--ink) 30%, transparent); stroke-width: 1; stroke-dasharray: 2 4; }
+.ch-sunmark circle { fill: var(--accent); }
+.ch-sunmark text { fill: var(--ink-2); font-size: 10px; letter-spacing: 0.1em; }
+.ch-hit { fill: transparent; cursor: col-resize; }
+.ch-cursor line { stroke: var(--ink); stroke-width: 1; stroke-dasharray: 3 3; }
+.ch-cursor circle { fill: var(--ink); }
+.chart-empty {
+  padding: 40px 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+/* --- 7 日量程 --- */
+
+.week__scale {
+  position: relative;
+  height: 22px;
+  margin-top: 14px;
+  border-bottom: var(--hair) solid color-mix(in srgb, var(--ink) 22%, transparent);
+}
+.week__grade {
+  position: absolute;
+  bottom: 0;
+  transform: translateX(-50%);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-2);
+  padding-bottom: 3px;
+}
+.week__grade::after {
+  content: "";
+  position: absolute;
+  left: 50%; bottom: 0;
+  width: 1px; height: 5px;
+  background: color-mix(in srgb, var(--ink) 34%, transparent);
+}
+
+.week { margin-top: 0; }
+.week__row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border-bottom: var(--hair) solid color-mix(in srgb, var(--ink) 11%, transparent);
+  padding: 9px 6px 9px 8px;
+  border-left: 2px solid transparent;
+  transition: background 150ms ease, border-color 150ms ease;
+}
+.week__row:hover { background: color-mix(in srgb, var(--accent) 11%, transparent); }
+.week__row[aria-expanded="true"] {
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.week__row:last-child { border-bottom: none; }
+
+/* 一行 = 日期 | 符号 | 天气 | 低温 | 量程条 | 高温
+   量程条那一列是弹性列，所以每个「条」都是同一个坐标系里的长度，
+   跨行比长短就能直接读出哪天更冷，不用逐个比数字。 */
+.week__grid {
+  display: grid;
+  grid-template-columns: 62px 34px minmax(72px, 1fr) 42px minmax(90px, 3fr) 42px;
+  align-items: center;
+  gap: 10px;
+}
+.week__day { font-size: 14px; font-weight: 700; line-height: 1.25; }
+.week__date { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-2); }
+.week__row--weekend .week__day { color: var(--accent); }
+.week__icon { color: var(--ink); display: flex; }
+.week__icon svg { display: block; }
+.week__cond { font-size: 13px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.week__temp {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.week__temp--low { color: var(--ink-2); }
+
+.week__bar {
+  position: relative;
+  height: 18px;
+}
+.week__bar i {
+  position: absolute;
+  top: 50%;
+  height: 5px;
+  margin-top: -2.5px;
+  border-radius: 3px; /* 圆头只在这一处：量程条是"温度计的水银柱"，圆头是它的惯例 */
+  background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 45%, var(--ink-2)));
+  transition: left 500ms cubic-bezier(0.2, 0.7, 0.2, 1), width 500ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+/* 今天是实心强调色，其余日子降一档：7 行里第一个必须一眼分出 */
+.week__row:not([data-today]) .week__bar i {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--ink-2) 70%, transparent), color-mix(in srgb, var(--ink) 55%, transparent));
+}
+
+/* --- 展开的某一天 --- */
+
+.daybox {
+  margin-top: 16px;
+  padding: 16px 18px 18px;
+  border: var(--hair) solid color-mix(in srgb, var(--ink) 24%, transparent);
+  background: color-mix(in srgb, var(--paper-2) 62%, transparent);
+}
+.daybox__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.daybox__title { font-size: 13px; font-weight: 700; letter-spacing: 0.18em; }
+.daybox__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 1px;
+  background: color-mix(in srgb, var(--ink) 20%, transparent);
+  border: var(--hair) solid color-mix(in srgb, var(--ink) 20%, transparent);
+}
+.daybox__cell { background: color-mix(in srgb, var(--paper) 80%, transparent); padding: 11px 13px; }
+.daybox__key { font-size: 11px; letter-spacing: 0.16em; color: var(--ink-2); }
+.daybox__val { margin-top: 4px; font-family: var(--font-mono); font-size: 16px; }
+
+/* ------------------------------------------------------------------ 页脚 */
+
+.colophon {
+  margin-top: 34px;
+  padding-top: 16px;
+  border-top: var(--hair) solid color-mix(in srgb, var(--ink) 22%, transparent);
+  font-size: 11.5px;
+  color: var(--ink-2);
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.colophon a { color: var(--ink); text-underline-offset: 3px; }
+.colophon__note { font-family: var(--font-mono); }
+
+/* ------------------------------------------------------------------ 天象符号 */
+
+.wx-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+.wx-icon { display: block; }
+/* 雨丝和闪电在切换城市时会轻轻重播一次，提示"数据换了一批"。
+   幅度很小、只播一次，不做无限循环。 */
+@keyframes wx-fall {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.wx-fall { animation: wx-fall 420ms ease-out both; }
+.wx-bolt { animation: wx-fall 420ms 80ms ease-out both; }
+
+/* ------------------------------------------------------------------ 载入 */
+
+/* 读数还没到位时用点阵占位，不用旋转菊花：数字在读表里就是"待测"的样子 */
+body[data-state="loading"] .readout__value,
+body[data-state="loading"] .instr__val span {
+  color: transparent;
+  position: relative;
+}
+body[data-state="loading"] .readout__value::after,
+body[data-state="loading"] .instr__val span::after {
+  content: "···";
+  position: absolute;
+  left: 0; top: 0;
+  color: var(--ink-2);
+  letter-spacing: 0.06em;
+}
+
+/* ------------------------------------------------------------------ 自适应 */
+
+/* 中等屏：左栏改为横向滚动的一排，观测区两栏压成一栏 */
+@media (max-width: 980px) {
+  .deck { grid-template-columns: minmax(0, 1fr); }
+
+  .rail {
+    position: static;
+    border-right: none;
+    border-bottom: var(--hair) solid color-mix(in srgb, var(--ink) 24%, transparent);
+    padding: 16px 0 14px;
+  }
+  .rail__list {
+    flex-direction: row;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 6px;
+    scrollbar-width: thin;
+  }
+  .rail__item {
+    flex: 0 0 auto;
+    min-width: 172px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    border-bottom: none;
+    border-left: none;
+    border-top: 2px solid transparent;
+    background: color-mix(in srgb, var(--paper-2) 58%, transparent);
+    padding: 8px 26px 8px 10px;
+  }
+  .rail__item[aria-current="true"] { border-top-color: var(--accent); border-left-color: transparent; }
+  .rail__icon { display: none; }  /* 横向一排里位置紧张，符号让位给名字与气温 */
+  .rail__note { display: none; }
+  .rail__foot { margin-top: 10px; }
+
+  .plot { padding-left: 0; }
+  .obs__body { grid-template-columns: minmax(0, 1fr); }
+  .readout { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 26px; }
+  .readout__cond { margin-top: 0; }
+  .readout__note { flex-basis: 100%; }
+}
+
+/* 窄屏：报头折成两段，7 日行减少一列（天气文字让位给数字） */
+@media (max-width: 720px) {
+  .masthead { flex-wrap: wrap; padding-top: 14px; }
+  .brand { order: 1; }
+  .masthead__tools { order: 2; margin-left: auto; }
+  .seek { order: 3; flex-basis: 100%; }
+  .seek__hint { padding-top: 4px; }
+
+  .week__grid { grid-template-columns: 52px 30px 1fr 34px minmax(70px, 2fr) 34px; gap: 7px; }
+  .week__cond { display: none; }
+  .week__day { font-size: 13px; }
+  .readout__value { font-size: clamp(66px, 20vw, 96px); }
+  .instr { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .instr__val { font-size: 25px; }
+  .chart text { font-size: 13px; }  /* SVG 缩放到窄屏后字会变小，按比例补回来 */
+  .panel { padding-bottom: 24px; }
+}
+
+@media (max-width: 460px) {
+  .brand__text { font-size: 15px; }
+  .tool span:not(.tool__glyph) { display: none; }  /* 只剩图标，文字靠 title 提示 */
+  .tool { padding: 8px 11px; }
+  .readoutbar { gap: 10px 16px; }
+  #rb-temp { font-size: 19px; }
+}
+
+/* ------------------------------------------------------- 减少动态效果 */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .wx-fall, .wx-bolt { animation: none; }
+}
+
+/* ---------------------------------------------------------- 高对比度偏好 */
+
+@media (prefers-contrast: more) {
+  .graticule { opacity: 0.12; }
+  .instr__cell, .daybox__cell { background: var(--paper); }
+  .panel { border-top-color: var(--ink); }
+  .obs__head { border-bottom-color: var(--ink); }
+}
+
+/* ------------------------------------------------------------- 打印 */
+
+/* 打印时坐标纸和天空底色没有意义，只留数据和线条 */
+@media print {
+  .sky, .graticule, .masthead__tools, .seek, .panel__foot, .colophon__note { display: none; }
+  body { background: #fff; color: #111; }
+  .console { max-width: none; padding: 0; }
+  .rail { display: none; }
+  .deck { grid-template-columns: 1fr; }
+  .plot { padding-left: 0; }
+  .instr__cell, .daybox__cell { background: #fff; }
+  .notice { display: none; }
+}
