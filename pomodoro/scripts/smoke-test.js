@@ -61,6 +61,47 @@ function group(name, fn) {
   console.log(`  ${failures.length === before ? '✓' : '✗'} ${name}`);
 }
 
+/** 造一段极短的静音 WAV，用来测本地音乐——不往仓库里塞音频文件 */
+function wavSilence(seconds = 0.5) {
+  const rate = 8000;
+  const dataLen = Math.floor(rate * seconds) * 2;
+  const buf = Buffer.alloc(44 + dataLen);
+  buf.write('RIFF', 0);
+  buf.writeUInt32LE(36 + dataLen, 4);
+  buf.write('WAVE', 8);
+  buf.write('fmt ', 12);
+  buf.writeUInt32LE(16, 16); // fmt 块长度
+  buf.writeUInt16LE(1, 20); // PCM
+  buf.writeUInt16LE(1, 22); // 单声道
+  buf.writeUInt32LE(rate, 24);
+  buf.writeUInt32LE(rate * 2, 28); // 字节率
+  buf.writeUInt16LE(2, 32); // 块对齐
+  buf.writeUInt16LE(16, 34); // 位深
+  buf.write('data', 36);
+  buf.writeUInt32LE(dataLen, 40); // 数据全是 0，也就是静音
+  return buf;
+}
+
+/** 把计时状态摆到一个已知的"待机专注"（前面的用例会留下正在跑的短休） */
+async function settleToIdleFocus(page) {
+  await page.evaluate(() => {
+    const raw = JSON.parse(localStorage.getItem('pomodoro/v1'));
+    raw.phase = 'focus';
+    raw.round = 1;
+    raw.running = false;
+    raw.deadline = 0;
+    raw.startedAt = 0;
+    raw.roundTaskId = '';
+    // 本轮时长要跟设置对齐：上弦会让两者合法地不一致，但这里必须一致，
+    // 否则后面"把专注改成 1 分钟"会变成空操作（值没变 → 不触发任何事）
+    raw.totalMs = (raw.settings && raw.settings.focus ? raw.settings.focus : 25) * 60000;
+    raw.remainingMs = raw.totalMs;
+    localStorage.setItem('pomodoro/v1', JSON.stringify(raw));
+  });
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForTimeout(300);
+}
+
 /** 表盘上某个角度（0° 在正上方、顺时针）对应的屏幕坐标 */
 async function dialPoint(page, angle, ratio = 0.42) {
   const box = await page.locator('#dial').boundingBox();
@@ -305,8 +346,12 @@ async function dialPoint(page, angle, ratio = 0.42) {
     total: document.querySelector('.tape__total') ? document.querySelector('.tape__total').textContent : '',
     tally: document.getElementById('topTally').textContent,
     todayBar: document.querySelector('.chart__bar:last-of-type .chart__num').textContent,
-    figures: Array.from(document.querySelectorAll('.figures__item')).map((f) => f.textContent),
+    figures: Array.from(document.querySelectorAll('.figures__item')).map((f) => ({
+      num: f.querySelector('.figures__num').textContent,
+      label: f.querySelector('.figures__label').textContent,
+    })),
     ringing: document.getElementById('plate').classList.contains('is-ringing'),
+    recordTask: (JSON.parse(localStorage.getItem('pomodoro/v1') || '{}').days || {})[Object.keys(JSON.parse(localStorage.getItem('pomodoro/v1') || '{}').days || {})[0]]?.sessions[0]?.taskId,
     saved: JSON.parse(localStorage.getItem('pomodoro/v1') || '{}'),
   }));
 
@@ -336,7 +381,9 @@ async function dialPoint(page, angle, ratio = 0.42) {
   group('统计同步更新', () => {
     ok(/今天\s*1\s*个番茄/.test(done.tally), `顶栏今日（${done.tally}）`);
     eq(done.todayBar, '1', '今天那根柱子标着 1');
-    eq(done.figures[1], '1累计番茄', '累计番茄');
+    const fig = (label) => done.figures.find((f) => f.label === label);
+    eq(fig('7 天番茄').num, '1', '区间番茄数');
+    eq(fig('天连续').num, '1', '连续天数');
   });
 
   group('存档已经落盘', () => {
@@ -405,7 +452,10 @@ async function dialPoint(page, angle, ratio = 0.42) {
       text: l.textContent,
       today: l.classList.contains('is-today'),
     })),
-    figures: Array.from(document.querySelectorAll('.figures__item')).map((f) => f.textContent),
+    figures: Array.from(document.querySelectorAll('.figures__item')).map((f) => ({
+      num: f.querySelector('.figures__num').textContent,
+      label: f.querySelector('.figures__label').textContent,
+    })),
     goalBottom: document.querySelector('.chart__plot') ? document.querySelector('.chart__plot').style.getPropertyValue('--goal') : '',
     chartMeta: document.getElementById('chartMeta').textContent,
   }));
@@ -427,11 +477,270 @@ async function dialPoint(page, angle, ratio = 0.42) {
   });
 
   group('累计与连续天数', () => {
-    eq(multi.figures[0], '4天连续', '今天 + 前 3 天 = 4 天连续');
-    eq(multi.figures[1], '13累计番茄', '1 + 3 + 4 + 5 = 13 个');
+    const fig = (label) => multi.figures.find((f) => f.label === label);
+    eq(fig('天连续').num, '4', '今天 + 前 3 天 = 4 天连续');
+    eq(fig('7 天番茄').num, '13', '1 + 3 + 4 + 5 = 13 个');
+    eq(fig('天达标').num, '0', '目标 8 个，最高的一天 5 个 → 0 天达标');
   });
 
   await page.screenshot({ path: path.join(SHOTS, 'desktop-stats.png') });
+
+  /* ── 6.5 任务：加 / 选 / 关联 / 完成 / 改 / 删 ─────── */
+  await settleToIdleFocus(page);
+  await page.fill('#taskInput', '写完这一节的稿');
+  await page.press('#taskInput', 'Enter');
+  await page.fill('#taskInput', '回邮件');
+  await page.press('#taskInput', 'Enter');
+  await page.waitForTimeout(120);
+
+  const added = await page.evaluate(() => ({
+    rows: Array.from(document.querySelectorAll('.task')).map((r) => ({
+      title: r.querySelector('.task__title').textContent,
+      sub: r.querySelector('.task__sub').textContent,
+      active: r.dataset.active,
+      done: r.dataset.done,
+    })),
+    meta: document.getElementById('tasksMeta').textContent,
+    emptyHidden: document.getElementById('tasksEmpty').hidden,
+    slip: document.getElementById('slipTitle').textContent,
+    slipTag: document.querySelector('.slip__tag').textContent,
+    stored: JSON.parse(localStorage.getItem('pomodoro/v1')).tasks.map((t) => t.title),
+  }));
+
+  group('往任务列表里加两条，第一条自动成为当前任务', () => {
+    eq(added.rows.length, 2, '有两条任务');
+    eq(added.rows.map((r) => r.title), ['写完这一节的稿', '回邮件'], '顺序按加入时间');
+    eq(added.rows[0].active, '1', '第一条是当前任务');
+    eq(added.rows[1].active, '0', '第二条不是');
+    eq(added.meta, '0 / 2 已完成', '完成度');
+    ok(added.emptyHidden, '空状态提示收起来了');
+    eq(added.stored, ['写完这一节的稿', '回邮件'], '已经存档');
+  });
+
+  group('工单条跟着显示当前任务', () => {
+    eq(added.slip, '写完这一节的稿', '面板上的纸条写着它');
+    eq(added.slipTag, '待办', '还没开始 → 待办');
+  });
+
+  // 切到第二条，然后跑一个番茄
+  await page.click('.task:nth-child(2) .task__main');
+  await page.waitForTimeout(80);
+  await page.fill('#setFocus', '1');
+  await page.dispatchEvent('#setFocus', 'change');
+  await page.click('#startBtn');
+  await page.waitForTimeout(80);
+
+  const runningSlip = await page.evaluate(() => ({
+    slip: document.getElementById('slipTitle').textContent,
+    tag: document.querySelector('.slip__tag').textContent,
+  }));
+  group('开工后工单条变成「在办」', () => {
+    eq(runningSlip.slip, '回邮件', '纸条上是在办的那条');
+    eq(runningSlip.tag, '在办', '标记变成在办');
+  });
+
+  await page.clock.fastForward(61 * 1000);
+  await page.waitForTimeout(150);
+
+  const afterTask = await page.evaluate(() => ({
+    rows: Array.from(document.querySelectorAll('.task')).map((r) => ({
+      title: r.querySelector('.task__title').textContent,
+      sub: r.querySelector('.task__sub').textContent,
+      active: r.dataset.active,
+    })),
+    tapeTasks: Array.from(document.querySelectorAll('.tape__task')).map((t) => t.textContent),
+    recordTaskId: (() => {
+      const s = JSON.parse(localStorage.getItem('pomodoro/v1'));
+      const day = s.days[Object.keys(s.days).sort().pop()];
+      const last = day.sessions.filter((x) => x.phase === 'focus').pop();
+      return { taskId: last.taskId, matches: s.tasks.some((t) => t.id === last.taskId) };
+    })(),
+  }));
+
+  group('这一轮番茄记到了当前任务头上', () => {
+    const row = afterTask.rows.find((r) => r.title === '回邮件');
+    ok(/1 个番茄/.test(row.sub), `任务行显示进度（${row.sub}）`);
+    eq(row.active, '1', '仍然是当前任务');
+    ok(afterTask.recordTaskId.matches, '记录里的 taskId 指向真实任务');
+    eq(afterTask.tapeTasks.pop(), '回邮件', '纸带上也标了任务名');
+  });
+
+  // 改：点「改」→ 改标题和预估
+  await page.click('.task:nth-child(2) .task__act');
+  await page.waitForTimeout(80);
+  const editing = await page.evaluate(() => ({
+    editingRows: document.querySelectorAll('.task--editing').length,
+    value: document.querySelector('.task__edit-input').value,
+    focused: document.activeElement.classList.contains('task__edit-input'),
+  }));
+  group('点「改」进入就地编辑，输入框自动聚焦', () => {
+    eq(editing.editingRows, 1, '有一行进入编辑态');
+    eq(editing.value, '回邮件', '带出原标题');
+    ok(editing.focused, '焦点在输入框里');
+  });
+
+  await page.fill('.task__edit-input', '回完所有邮件');
+  await page.fill('.task__edit-est', '3');
+  await page.press('.task__edit-input', 'Enter');
+  await page.waitForTimeout(120);
+  const edited = await page.evaluate(() => ({
+    titles: Array.from(document.querySelectorAll('.task__title')).map((t) => t.textContent),
+    sub: Array.from(document.querySelectorAll('.task__sub')).map((t) => t.textContent),
+    stored: JSON.parse(localStorage.getItem('pomodoro/v1')).tasks.map((t) => ({ title: t.title, estimate: t.estimate })),
+  }));
+  group('编辑保存后标题和预估都更新了', () => {
+    ok(edited.titles.includes('回完所有邮件'), '新标题生效');
+    ok(edited.sub.some((s) => /1 \/ 3 个番茄/.test(s)), `进度按新的预估显示（${edited.sub.join(' | ')}）`);
+    eq(edited.stored.find((t) => t.title === '回完所有邮件').estimate, 3, '预估存下来了');
+  });
+
+  // 完成第二条 → 当前任务应该让给第一条
+  await page.click('.task:nth-child(2) .task__check');
+  await page.waitForTimeout(120);
+  const doneTask = await page.evaluate(() => ({
+    rows: Array.from(document.querySelectorAll('.task')).map((r) => ({
+      title: r.querySelector('.task__title').textContent,
+      done: r.dataset.done,
+      active: r.dataset.active,
+    })),
+    meta: document.getElementById('tasksMeta').textContent,
+    slip: document.getElementById('slipTitle').textContent,
+  }));
+  group('勾完成之后当前任务让给还没做完的那条', () => {
+    eq(doneTask.rows.find((r) => r.title === '回完所有邮件').done, '1', '标记为完成');
+    eq(doneTask.rows.find((r) => r.title === '写完这一节的稿').active, '1', '当前任务换成第一条');
+    eq(doneTask.meta, '1 / 2 已完成', '完成度更新');
+    eq(doneTask.slip, '写完这一节的稿', '工单条跟着换');
+  });
+
+  /* ── 6.6 效率图表 ─────────────────────────────────── */
+  const eff = await page.evaluate(() => ({
+    hours: document.querySelectorAll('.hours__col').length,
+    hoursNonEmpty: Array.from(document.querySelectorAll('.hours__col')).filter((c) => c.dataset.empty === '0').length,
+    hoursMeta: document.getElementById('hoursMeta').textContent,
+    rankRows: Array.from(document.querySelectorAll('#taskRank .rank__row')).map((r) => ({
+      title: r.querySelector('.rank__title').textContent,
+      num: r.querySelector('.rank__num').textContent,
+      unknown: r.dataset.unknown,
+    })),
+    rankMeta: document.getElementById('rankMeta').textContent,
+    pressed: Array.from(document.querySelectorAll('.range__btn')).map((b) => b.dataset.days + '=' + b.getAttribute('aria-pressed')),
+  }));
+
+  group('时段分布画了 24 根柱子', () => {
+    eq(eff.hours, 24, '24 个小时');
+    ok(eff.hoursNonEmpty > 0, `有数据的时段 ${eff.hoursNonEmpty} 个`);
+    ok(/最出活 \d+:00/.test(eff.hoursMeta), `峰值提示（${eff.hoursMeta}）`);
+  });
+
+  group('任务消耗排行把番茄摊到任务上', () => {
+    ok(eff.rankRows.length >= 1, `有 ${eff.rankRows.length} 行`);
+    ok(eff.rankRows.some((r) => r.title === '回完所有邮件'), '刚做的那条在榜上');
+    ok(/个 · /.test(eff.rankRows[0].num), `带番茄数和时长（${eff.rankRows[0].num}）`);
+  });
+
+  group('区间默认 7 天', () => {
+    eq(eff.pressed, ['7=true', '30=false'], '7 天被按下');
+  });
+
+  // 切到 30 天
+  await page.click('.range__btn[data-days="30"]');
+  await page.waitForTimeout(180);
+  const wideView = await page.evaluate(() => ({
+    bars: document.querySelectorAll('.chart__bar').length,
+    labels: Array.from(document.querySelectorAll('.chart__label')).filter((l) => l.textContent).length,
+    pressed: Array.from(document.querySelectorAll('.range__btn')).map((b) => b.dataset.days + '=' + b.getAttribute('aria-pressed')),
+    stored: JSON.parse(localStorage.getItem('pomodoro/v1')).settings.range,
+    figLabel: document.querySelector('.figures__label').textContent,
+  }));
+  group('切到 30 天：柱子变多、标签自动抽稀', () => {
+    eq(wideView.bars, 30, '30 根柱子');
+    ok(wideView.labels <= 9, `标签抽稀到 ${wideView.labels} 个，不会糊成一片`);
+    eq(wideView.pressed, ['7=false', '30=true'], '30 天被按下');
+    eq(wideView.stored, 30, '区间存进设置');
+    eq(wideView.figLabel, '30 天番茄', '指标标题跟着换');
+  });
+  await page.click('.range__btn[data-days="7"]');
+  await page.waitForTimeout(150);
+
+  /* ── 6.7 背景声音 ─────────────────────────────────── */
+  const scenesInit = await page.evaluate(() => ({
+    count: document.querySelectorAll('.scene').length,
+    labels: Array.from(document.querySelectorAll('.scene')).map((s) => s.textContent),
+    pressed: Array.from(document.querySelectorAll('.scene')).filter((s) => s.getAttribute('aria-pressed') === 'true').map((s) => s.dataset.scene),
+    toggleDisabled: document.getElementById('musicToggle').disabled,
+    musicName: document.getElementById('musicName').textContent,
+  }));
+  group('环境音场景齐了，默认是关闭', () => {
+    eq(scenesInit.count, 7, '7 个场景');
+    eq(scenesInit.labels[0], '关闭', '第一个是关闭');
+    eq(scenesInit.pressed, ['off'], '默认选中关闭');
+    ok(scenesInit.toggleDisabled, '没选音乐时播放按钮是禁用的');
+    eq(scenesInit.musicName, '未选择', '还没选音乐');
+  });
+
+  await page.click('.scene[data-scene="rain"]');
+  await page.waitForTimeout(500);
+  const rain = await page.evaluate(() => ({
+    pressed: Array.from(document.querySelectorAll('.scene')).filter((s) => s.getAttribute('aria-pressed') === 'true').map((s) => s.dataset.scene),
+    meta: document.getElementById('soundMeta').textContent,
+    hint: document.getElementById('soundHint').textContent,
+    stored: JSON.parse(localStorage.getItem('pomodoro/v1')).settings.ambience,
+    osc: window.__osc,
+  }));
+  group('选「雨」会真的出声（计时没跑时先试听）', () => {
+    eq(rain.pressed, ['rain'], '雨被选中');
+    eq(rain.stored, 'rain', '已存档');
+    ok(/雨/.test(rain.meta), `状态栏说明（${rain.meta}）`);
+    ok(/雨声/.test(rain.hint), `提示写着这个场景是什么动静（${rain.hint}）`);
+    ok(rain.osc > 0, `生成了音频节点（振荡器 ${rain.osc} 个）`);
+  });
+
+  await page.screenshot({ path: path.join(SHOTS, 'desktop-sound.png') });
+
+  // 音量滑块
+  await page.fill('#ambVolume', '80');
+  await page.dispatchEvent('#ambVolume', 'input');
+  await page.waitForTimeout(120);
+  const vol = await page.evaluate(() => ({
+    text: document.getElementById('ambVolumeText').textContent,
+    stored: JSON.parse(localStorage.getItem('pomodoro/v1')).settings.ambienceVolume,
+  }));
+  group('环境音音量可调', () => {
+    eq(vol.text, '80%', '读数跟着走');
+    eq(vol.stored, 0.8, '存档为 0–1');
+  });
+
+  // 本地音乐：用内存里的一段 WAV，不往仓库里放音频文件
+  await page.setInputFiles('#musicFile', {
+    name: '我的歌.wav',
+    mimeType: 'audio/wav',
+    buffer: Buffer.from(wavSilence()),
+  });
+  await page.waitForTimeout(200);
+  const picked = await page.evaluate(() => ({
+    name: document.getElementById('musicName').textContent,
+    disabled: document.getElementById('musicToggle').disabled,
+    scene: JSON.parse(localStorage.getItem('pomodoro/v1')).settings.ambience,
+    pressed: Array.from(document.querySelectorAll('.scene')).filter((s) => s.getAttribute('aria-pressed') === 'true').map((s) => s.dataset.scene),
+  }));
+  group('载入本地音乐：和环境音互斥，自动把环境音关掉', () => {
+    eq(picked.name, '我的歌.wav', '显示文件名');
+    eq(picked.disabled, false, '播放按钮可以点了');
+    eq(picked.scene, 'off', '环境音被让位');
+    eq(picked.pressed, ['off'], '场景按钮回到关闭');
+  });
+
+  await page.click('#musicToggle');
+  await page.waitForTimeout(400);
+  const playing = await page.evaluate(() => ({
+    label: document.getElementById('musicToggle').textContent,
+    meta: document.getElementById('soundMeta').textContent,
+  }));
+  group('本地音乐能真的播起来', () => {
+    eq(playing.label, '暂停', '按钮变成暂停（说明 play() 真的成功了）');
+    ok(/播放中/.test(playing.meta), `状态栏（${playing.meta}）`);
+  });
 
   /* ── 7. 设置与开关 ────────────────────────────────── */
   await page.fill('#setLong', '99');
@@ -462,7 +771,8 @@ async function dialPoint(page, angle, ratio = 0.42) {
   await page.click('#soundBtn');
 
   /* ── 8. 快捷键 ────────────────────────────────────── */
-  await page.click('#resetBtn');
+  // 先摆回待机专注：重置按钮在待机时是禁用的，不能拿来当"回到起点"用
+  await settleToIdleFocus(page);
   // 焦点要是还停在按钮上，空格会被浏览器当成"按下这个按钮"（这是标准行为，不是 bug），
   // 所以先把焦点移开，再测全局快捷键。
   await page.evaluate(() => document.activeElement && document.activeElement.blur());

@@ -1,0 +1,24 @@
+{
+   "action": {
+      "default_icon": "images/Normal.png",
+      "default_popup": "popup.html",
+      "default_title": "电脑管家上网防护"
+   },
+   "background": {
+      "service_worker": "js/background.js"
+   },
+   "description": "过滤网络不良信息，保护您的上网环境",
+   "homepage_url": "https://guanjia.qq.com/",
+   "icons": {
+      "128": "images/128.png",
+      "16": "images/Normal.png",
+      "32": "images/Normal.png",
+      "48": "images/Normal.png"
+   },
+   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAhnLh7MkRjzxa4wJmajQQ4pVd6tG2J3T1TUU01UndC6CAqOrfCqc3vZZAsgvgfxJ6ZQ3ayqjdVxjaEo/aW9/LQlCyjZNVsyim8fhJCa6vzxqQPRDMu0Fl/lO2G/oW50fR7SrUYqr5hbNZf+Ol/YBs7VeRURSNC6qvM/3gbwssTHx3wex7yYkAHy4boqOlqmk/MIii8ct4vlG/Fo2VPjZntXThnKY0rPwLKH15b4nv1D2Ni02K+gPRsJlagr11TDiUkPH/xn95hp+7LOPql+IPp6unSvhFipUnDN49a8JzeQ2Qdpwo5PN/GmTCHqEpDydsKbecS6A/iKAgw9ya1HsTvQIDAQAB",
+   "manifest_version": 3,
+   "name": "电脑管家上网防护",
+   "permissions": [ "nativeMessaging", "tabs", "storage" ],
+   "update_url": "https://clients2.google.com/service/update2/crx",
+   "version": "1.1.1"
+}

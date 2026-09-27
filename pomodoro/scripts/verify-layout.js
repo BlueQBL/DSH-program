@@ -58,9 +58,12 @@ const MEASURE = () => {
   const sels = [
     '.topbar', '.layout', '.instrument', '.plate', '.plate__label', '.dial',
     '.counter', '.counter__window', '.counter__digits', '.counter__meta', '.chip',
-    '.counter__round', '.pushers', '.pusher--main', '#resetBtn', '#skipBtn',
+    '.counter__round', '.slip', '.slip__title', '.pushers', '.pusher--main', '#resetBtn', '#skipBtn',
     '.instrument__hint', '.column', '.card--tape', '.tape', '.card--tape + .card',
     '.chart', '.figures', '#setTitle',
+    '#tasksTitle', '.task-add', '.task', '.task__title', '.task__check', '.task__acts',
+    '#chartTitle', '.range', '.hours', '.hours__axis', '.rank', '.rank__row',
+    '#soundTitle', '.scenes', '.scene', '.knobs', '.knob', '.local',
   ];
   const boxes = {};
   for (const s of sels) boxes[s] = box(s);
@@ -118,6 +121,14 @@ const MEASURE = () => {
     ['铭牌/面板', cs('.plate__label', 'color'), 'rgb(243, 239, 227)'],
     ['面板文字/面板', cs('.counter__round', 'color'), 'rgb(243, 239, 227)'],
     ['阶段标记/面板', cs('.chip', 'color'), cs('.chip', 'backgroundColor')],
+    ['工单条文字/纸条', cs('.slip__title', 'color'), cs('.slip', 'backgroundColor')],
+    ['任务标题/任务行', cs('.task__title', 'color'), cs('.task', 'backgroundColor')],
+    ['任务进度/任务行', cs('.task__sub', 'color'), cs('.task', 'backgroundColor')],
+    ['区块标题/卡片', cs('#tasksTitle', 'color'), card],
+    ['时段轴标签/卡片', cs('.hours__axis', 'color'), card],
+    ['排行标题/卡片', cs('.rank__title', 'color'), card],
+    ['场景按钮/卡片', cs('.scene', 'color'), card],
+    ['旋钮标签/卡片', cs('.knob__label', 'color'), card],
   ];
   const contrast = {};
   for (const [label, fg, bg] of pairs) {
@@ -188,6 +199,12 @@ const MEASURE = () => {
     const dayKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
     const days = {};
     const plan = [4, 6, 3, 0, 5, 7, 2];
+    // 任务行、番茄消耗排行都要有内容才量得出来
+    const tasks = [
+      { id: 't1', title: '写完番茄钟的任务关联与统计', estimate: 5, done: false, createdAt: 1, doneAt: 0 },
+      { id: 't2', title: '回邮件', estimate: 2, done: true, createdAt: 2, doneAt: 3 },
+      { id: 't3', title: '整理会议记录', estimate: 1, done: false, createdAt: 3, doneAt: 0 },
+    ];
     for (let i = 0; i < plan.length; i++) {
       const base = new Date();
       base.setDate(base.getDate() - i);
@@ -196,15 +213,16 @@ const MEASURE = () => {
       const sessions = [];
       for (let j = 0; j < plan[i]; j++) {
         const s = t0 + j * 30 * 60000;
-        sessions.push({ id: `s${i}-${j}`, phase: 'focus', startTs: s, endTs: s + 25 * 60000, plannedMin: 25 });
-        sessions.push({ id: `b${i}-${j}`, phase: 'short', startTs: s + 25 * 60000, endTs: s + 30 * 60000, plannedMin: 5 });
+        sessions.push({ id: `s${i}-${j}`, phase: 'focus', startTs: s, endTs: s + 25 * 60000, plannedMin: 25, taskId: tasks[j % tasks.length].id });
+        sessions.push({ id: `b${i}-${j}`, phase: 'short', startTs: s + 25 * 60000, endTs: s + 30 * 60000, plannedMin: 5, taskId: '' });
       }
       if (sessions.length) days[dayKey(base)] = { sessions };
     }
     localStorage.setItem('pomodoro/v1', JSON.stringify({
-      settings: { focus: 25, short: 5, long: 15, rounds: 4, goal: 8, autoNext: false, sound: true, ticking: false, keepAwake: false },
+      settings: { focus: 25, short: 5, long: 15, rounds: 4, goal: 8, autoNext: false, sound: true, ticking: false, keepAwake: false, ambience: 'rain', ambienceVolume: 0.45, ambienceFocusOnly: true, musicVolume: 0.6, range: 7 },
       phase: 'focus', round: 1, running: false, deadline: 0,
-      remainingMs: 25 * 60000, totalMs: 25 * 60000, startedAt: 0, days, notifyAsked: true,
+      remainingMs: 25 * 60000, totalMs: 25 * 60000, startedAt: 0, roundTaskId: '',
+      activeTaskId: 't1', tasks, days, notifyAsked: true,
     }));
   });
   await page.reload({ waitUntil: 'load' });
@@ -218,7 +236,7 @@ const MEASURE = () => {
   const b = m.boxes;
 
   /* ── 1. 仪器内部自上而下的顺序与不重叠 ───────────── */
-  const chain = ['.plate__label', '.dial', '.counter', '.counter__meta', '.pushers'];
+  const chain = ['.plate__label', '.dial', '.counter', '.counter__meta', '.slip', '.pushers'];
   let ordered = true;
   let msg = [];
   for (let i = 1; i < chain.length; i++) {
@@ -228,7 +246,7 @@ const MEASURE = () => {
     msg.push(`${chain[i - 1].slice(1)}→${chain[i].slice(1)} ${gap}px`);
     if (gap < 2) ordered = false;
   }
-  group('面板内五块自上而下依次排开、互不重叠', () => {
+  group('面板内六块自上而下依次排开、互不重叠', () => {
     ok(ordered, `相邻间距：${msg.join('，')}`);
   });
 
@@ -245,6 +263,42 @@ const MEASURE = () => {
     eq(b['.dial'].w, b['.dial'].h, `表盘 ${b['.dial'].w}×${b['.dial'].h}`);
     eq(m.dialSvg.w, b['.dial'].w, 'SVG 宽度等于表盘宽度');
     ok(m.dialSvg.w > 240, `表盘够大（${m.dialSvg.w}px）`);
+  });
+
+  const cardInfo = await page.evaluate(() => {
+    const list = Array.from(document.querySelectorAll('.column > .card'));
+    const gaps = [];
+    for (let i = 1; i < list.length; i++) {
+      gaps.push(Math.round(list[i].getBoundingClientRect().top - list[i - 1].getBoundingClientRect().bottom));
+    }
+    return {
+      titles: list.map((c) => (c.querySelector('.card__title') || {}).textContent || ''),
+      gaps,
+      widths: list.map((c) => Math.round(c.getBoundingClientRect().width)),
+    };
+  });
+
+  group('右栏的卡片依次排开，互不重叠', () => {
+    eq(cardInfo.titles, ['任务', '今日纸带', '效率', '背景声音', '设置'], '五张卡片的顺序');
+    ok(cardInfo.gaps.every((g) => g >= 0), `相邻间距：${cardInfo.gaps.join('、')}px`);
+    ok(new Set(cardInfo.widths).size === 1, `各卡片等宽：${cardInfo.widths.join('/')}`);
+  });
+
+  const rowBoxes = await page.evaluate(() => {
+    const r = document.querySelector('.task');
+    if (!r) return null;
+    const q = (s) => { const e = r.querySelector(s); return e ? e.getBoundingClientRect() : null; };
+    const pick = (b) => (b ? { left: b.left, right: b.right, top: b.top, bottom: b.bottom, width: b.width, height: b.height } : null);
+    return { check: pick(q('.task__check')), main: pick(q('.task__title')), acts: pick(q('.task__acts')), row: pick(r.getBoundingClientRect()) };
+  });
+
+  group('任务行三段式布局：勾选 / 标题 / 操作', () => {
+    ok(rowBoxes, '有任务行可量');
+    if (!rowBoxes) return;
+    ok(rowBoxes.check.right <= rowBoxes.main.left + 1, `勾选框在标题左边（${Math.round(rowBoxes.check.right)} ≤ ${Math.round(rowBoxes.main.left)}）`);
+    ok(rowBoxes.main.right <= rowBoxes.acts.left + 1, `标题在操作按钮左边（${Math.round(rowBoxes.main.right)} ≤ ${Math.round(rowBoxes.acts.left)}）`);
+    ok(rowBoxes.acts.right <= rowBoxes.row.right + 1, '操作按钮没有溢出任务行');
+    ok(rowBoxes.row.height >= 40, `任务行高度 ${Math.round(rowBoxes.row.height)}px，点得着`);
   });
 
   /* ── 2. 数字不会被裁 ───────────────────────────── */
@@ -351,7 +405,7 @@ const MEASURE = () => {
   console.log('');
 
   group('每种宽度都不横向溢出，数字都放得下', () => {
-    const bad = rowsOut.filter(([, r]) => r.overflow !== 0).map(([w]) => `${w}px 溢出 ${w}`);
+    const bad = rowsOut.filter(([, r]) => r.overflow !== 0).map(([w, r]) => `${w}px 溢出 ${r.overflow}px`);
     eq(bad, [], '溢出的宽度');
     const clipped = rowsOut.filter(([, r]) => r.digitsOverflow > 0).map(([w, r]) => `${w}px 数字超 ${r.digitsOverflow}px`);
     eq(clipped, [], '数字被裁的宽度');

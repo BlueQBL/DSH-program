@@ -1,0 +1,43 @@
+{
+   "action": {
+      "default_popup": "index.html#/popup"
+   },
+   "background": {
+      "service_worker": "background.js"
+   },
+   "content_scripts": [ {
+      "exclude_matches": [ "*://*.kdocs.cn/*", "*://*.wps.cn/*" ],
+      "js": [ "lib/link.umd.min.js", "lib/tooltips.umd.min.js", "lib/ocr.umd.min.js" ],
+      "matches": [ "\u003Call_urls>" ],
+      "run_at": "document_end"
+   }, {
+      "all_frames": true,
+      "exclude_matches": [ "*://*.kdocs.cn/*", "*://*.wps.cn/*" ],
+      "js": [ "lib/webproxy.umd.min.js" ],
+      "matches": [ "\u003Call_urls>" ],
+      "run_at": "document_end"
+   }, {
+      "js": [ "lib/tooltips.umd.min.js", "lib/ocr.umd.min.js", "lib/introduce.umd.min.js" ],
+      "matches": [ "https://tool.kdocs.cn/*", "https://dev.ext.wps.cn/*" ],
+      "run_at": "document_end"
+   } ],
+   "description": "网页AI总结，快速划词解释、翻译，AI 写作与生成PPT，更多功能等您体验。",
+   "host_permissions": [ "\u003Call_urls>" ],
+   "icons": {
+      "128": "icons/wps_logo_128.png",
+      "16": "icons/wps_logo_16.png",
+      "48": "icons/wps_logo_48.png"
+   },
+   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAgzULptPYNXXk5slXyzYr8T0n2ekjSaT3tI3MD0rdD7KLbxzj7v8UR1kXl7yIQKZ3BEzoXuujHjwQVaVQarsYE4Slb8KDcCqDcJ8VDsiubj3soI89kd6d2ecWfIL8M2VFD0nJiKk2loFjs9e9EWwdim4Xjyo+gfdLc/dg/IDh+B9m/Y/ak5hMK8KEn/XsmvVtFXz5+UE37INQZIafBiLcRDrfRrnXmgSzTGNF42I4yoTAzWGrhTeFwXAW00JOGH/4t0xXjcppeDg5edecxiFKGhJkKuWTUCiDEJHOr+MhR/vqMhbPpoY3nhHSsTUdm8nsYvyDmmZQzIiL/ivbx43LiQIDAQAB",
+   "manifest_version": 3,
+   "name": "WPS浏览器助手：网页AI总结，文档在线阅读编辑",
+   "optional_permissions": [ "history" ],
+   "options_page": "index.html#/options",
+   "permissions": [ "webRequest", "downloads", "storage", "tabs", "cookies", "nativeMessaging", "declarativeNetRequest", "gcm", "contextMenus", "sidePanel" ],
+   "side_panel": {
+      "default_path": "index.html#/sidepanel",
+      "default_title": "Click to open panel"
+   },
+   "update_url": "https://clients2.google.com/service/update2/crx",
+   "version": "3.0.2"
+}

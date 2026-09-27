@@ -46,17 +46,17 @@ function fakeStorage(seed) {
 }
 
 /** 直接往历史里塞一段记录，用来造统计场景 */
-function seed(state, dayKeyStr, breakCount, focusCount, minutes = 25) {
+function seed(state, dayKeyStr, breakCount, focusCount, minutes = 25, taskId = '') {
   const day = state.days[dayKeyStr] || (state.days[dayKeyStr] = { sessions: [] });
   const [y, m, d] = dayKeyStr.split('-').map(Number);
   const base = new Date(y, m - 1, d, 9, 0, 0).getTime();
   for (let i = 0; i < focusCount; i++) {
     const s = base + i * 30 * MIN;
-    day.sessions.push({ id: `f${dayKeyStr}${i}`, phase: 'focus', startTs: s, endTs: s + minutes * MIN, plannedMin: minutes });
+    day.sessions.push({ id: `f${dayKeyStr}${i}${taskId}`, phase: 'focus', startTs: s, endTs: s + minutes * MIN, plannedMin: minutes, taskId });
   }
   for (let i = 0; i < breakCount; i++) {
     const s = base + (focusCount + i) * 30 * MIN;
-    day.sessions.push({ id: `b${dayKeyStr}${i}`, phase: 'short', startTs: s, endTs: s + 5 * MIN, plannedMin: 5 });
+    day.sessions.push({ id: `b${dayKeyStr}${i}`, phase: 'short', startTs: s, endTs: s + 5 * MIN, plannedMin: 5, taskId: '' });
   }
   return state;
 }
@@ -392,6 +392,283 @@ group('历史超过保留天数，读档时剪掉最旧的', () => {
   eq(keys.length, core.KEEP_DAYS, `只留 ${core.KEEP_DAYS} 天`);
   eq(keys[0], core.dayKey(new Date(2026, 0, 11)), '剪掉的是最旧的十天');
   eq(keys[keys.length - 1], core.dayKey(new Date(2026, 0, 1 + core.KEEP_DAYS + 9)), '最新的那天留着');
+});
+
+/* ── 任务 ─────────────────────────────────────────── */
+group('加任务：标题去空格、超长截断、空标题不要', () => {
+  const s = core.defaultState();
+  const a = core.addTask(s, '  写周报  ', 3, T0);
+  eq(a.title, '写周报', '首尾空格被去掉');
+  eq(a.estimate, 3, '预估番茄数');
+  eq(a.done, false, '新建是未完成');
+  eq(s.tasks.length, 1, '进了列表');
+  eq(s.activeTaskId, a.id, '第一个任务自动成为当前任务');
+
+  eq(core.addTask(s, '   ', 1, T0), null, '全空格不算任务');
+  eq(core.addTask(s, null, 1, T0), null, 'null 不算任务');
+  eq(s.tasks.length, 1, '没有多出来');
+
+  const long = core.addTask(s, 'x'.repeat(200), 1, T0);
+  eq(long.title.length, core.LIMITS.taskTitle[1], '超长标题被截断');
+
+  const weird = core.addTask(s, '预估越界', 999, T0);
+  eq(weird.estimate, core.LIMITS.taskEstimate[1], '预估被夹到上限');
+  eq(core.addTask(s, '预估负数', -5, T0).estimate, core.LIMITS.taskEstimate[0], '预估被夹到下限');
+  eq(core.addTask(s, '预估不是数', 'abc', T0).estimate, 1, '非数字回落到 1');
+});
+
+group('改任务：标题不能被改成空的，预估会被夹住', () => {
+  const s = core.defaultState();
+  const t = core.addTask(s, '原标题', 2, T0);
+  eq(core.updateTask(s, t.id, { title: '新标题' }).title, '新标题', '改标题');
+  eq(core.updateTask(s, t.id, { title: '   ' }), null, '空标题被拒绝');
+  eq(core.taskById(s, t.id).title, '新标题', '原标题没被改坏');
+  eq(core.updateTask(s, t.id, { estimate: 50 }).estimate, core.LIMITS.taskEstimate[1], '预估被夹住');
+  eq(core.updateTask(s, '不存在的 id', { title: 'x' }), null, '改不存在的任务返回 null');
+});
+
+group('勾完一个任务，当前任务自动让给下一条', () => {
+  const s = core.defaultState();
+  const a = core.addTask(s, 'A', 1, T0);
+  const b = core.addTask(s, 'B', 1, T0 + 1);
+  eq(s.activeTaskId, a.id, '当前是 A');
+
+  core.toggleTaskDone(s, a.id, T0 + 100);
+  eq(core.taskById(s, a.id).done, true, 'A 标记完成');
+  eq(core.taskById(s, a.id).doneAt, T0 + 100, '记了完成时间');
+  eq(s.activeTaskId, b.id, '当前任务让给 B');
+
+  core.toggleTaskDone(s, b.id, T0 + 200);
+  eq(s.activeTaskId, '', '全做完了就没有当前任务');
+
+  core.toggleTaskDone(s, a.id, T0 + 300);
+  eq(core.taskById(s, a.id).done, false, '再点一下取消完成');
+  eq(core.taskById(s, a.id).doneAt, 0, '完成时间被清掉');
+});
+
+group('任务列表：没做完的排前面', () => {
+  const s = core.defaultState();
+  const a = core.addTask(s, 'A', 1, T0);
+  const b = core.addTask(s, 'B', 1, T0 + 1);
+  const c = core.addTask(s, 'C', 1, T0 + 2);
+  core.toggleTaskDone(s, b.id, T0 + 10);
+  eq(core.taskList(s).map((t) => t.title), ['A', 'C', 'B'], 'A、C 在前，做完的 B 垫底');
+  void a;
+});
+
+group('删任务：当前任务跟着清掉，历史记录不受影响', () => {
+  const s = core.defaultState();
+  const t = core.addTask(s, '会被删掉', 1, T0);
+  s.activeTaskId = t.id;
+  ok(core.removeTask(s, t.id), '删除成功');
+  eq(s.tasks.length, 0, '列表空了');
+  eq(s.activeTaskId, '', '当前任务被清空');
+  no(core.removeTask(s, t.id), '再删一次返回 false');
+});
+
+/* ── 番茄与任务的归属 ─────────────────────────────── */
+group('开工时把任务冻结下来，中途换任务不追溯本轮', () => {
+  const s = core.defaultState();
+  const a = core.addTask(s, '任务 A', 1, T0);
+  const b = core.addTask(s, '任务 B', 1, T0 + 1);
+  core.setActiveTask(s, a.id);
+
+  core.start(s, T0);
+  eq(s.roundTaskId, a.id, '本轮记给 A');
+
+  core.setActiveTask(s, b.id); // 中途改主意
+  eq(s.activeTaskId, b.id, '当前选中变成 B');
+  eq(s.roundTaskId, a.id, '但本轮仍然记给 A');
+
+  const res = core.complete(s, at(25));
+  eq(res.record.taskId, a.id, '记录归属 A');
+  eq(s.roundTaskId, '', '换阶段后冻结被清掉');
+
+  // 再跑一轮，这回该记给 B
+  core.start(s, at(25));
+  eq(s.roundTaskId, b.id, '下一轮记给 B');
+  const res2 = core.complete(s, at(25));
+  eq(res2.record.taskId, '', '短休不归任何任务');
+});
+
+group('重置会把冻结的任务清掉', () => {
+  const s = core.defaultState();
+  const a = core.addTask(s, '任务 A', 1, T0);
+  core.setActiveTask(s, a.id);
+  core.start(s, T0);
+  eq(s.roundTaskId, a.id, '先记给 A');
+  core.reset(s);
+  eq(s.roundTaskId, '', '重置后清空');
+  core.start(s, T0 + 1000);
+  eq(s.roundTaskId, a.id, '重新开工时再冻结一次');
+});
+
+group('没选任务也能跑，只是记录里没有归属', () => {
+  const s = core.defaultState();
+  core.start(s, T0);
+  eq(s.roundTaskId, '', '没有归属');
+  const res = core.complete(s, at(25));
+  eq(res.record.taskId, '', '记录里 taskId 为空');
+  eq(core.todayStats(s, new Date(T0)).pomodoros, 1, '番茄照样算');
+});
+
+group('删掉任务之后，历史番茄仍然数得出来', () => {
+  const s = core.defaultState();
+  const t = core.addTask(s, '临时任务', 1, T0);
+  core.setActiveTask(s, t.id);
+  core.start(s, T0);
+  core.complete(s, at(25));
+  core.removeTask(s, t.id);
+
+  const row = core.taskBreakdown(s, 7, new Date(at(25))).find((r) => r.id === t.id);
+  ok(row, '这个任务在统计里还在');
+  eq(row.pomodoros, 1, '仍然记着 1 个番茄');
+  eq(row.title, '已删除的任务', '标题标成已删除');
+  eq(row.known, false, '标记为已不存在的任务');
+});
+
+/* ── 效率统计 ─────────────────────────────────────── */
+group('区间记录：7 天和 30 天都能取', () => {
+  const s = core.defaultState();
+  for (let i = 0; i < 20; i++) {
+    const d = new Date(2026, 2, 10 - i);
+    seed(s, core.dayKey(d), 0, 1);
+  }
+  eq(core.sessionsInRange(s, 7, new Date(T0)).length, 7, '7 天里 7 条');
+  eq(core.sessionsInRange(s, 30, new Date(T0)).length, 20, '30 天里 20 条');
+  eq(core.series(s, 30, new Date(T0)).length, 30, '30 天序列 30 项');
+});
+
+group('时段分布：按开始时间落到 24 个小时桶里', () => {
+  const s = core.defaultState();
+  // 手工塞三条：9 点两条、14 点一条
+  s.days['2026-03-10'] = { sessions: [
+    { id: 'a', phase: 'focus', startTs: new Date(2026, 2, 10, 9, 5).getTime(), endTs: new Date(2026, 2, 10, 9, 30).getTime(), plannedMin: 25, taskId: '' },
+    { id: 'b', phase: 'focus', startTs: new Date(2026, 2, 10, 9, 40).getTime(), endTs: new Date(2026, 2, 10, 10, 5).getTime(), plannedMin: 25, taskId: '' },
+    { id: 'c', phase: 'focus', startTs: new Date(2026, 2, 10, 14, 0).getTime(), endTs: new Date(2026, 2, 10, 14, 25).getTime(), plannedMin: 25, taskId: '' },
+    { id: 'd', phase: 'short', startTs: new Date(2026, 2, 10, 20, 0).getTime(), endTs: new Date(2026, 2, 10, 20, 5).getTime(), plannedMin: 5, taskId: '' },
+  ] };
+  const hist = core.hourHistogram(s, 7, new Date(T0));
+  eq(hist.length, 24, '24 个小时桶');
+  eq(hist[9].count, 2, '9 点两个');
+  eq(hist[14].count, 1, '14 点一个');
+  eq(hist[20].count, 0, '休息不算进效率');
+  eq(Math.max(...hist.map((h) => h.count)), 2, '峰值是 2');
+});
+
+group('效率指标：只按有记录的天算日均', () => {
+  const s = core.defaultState();
+  core.applySettings(s, { goal: 4 });
+  seed(s, '2026-03-08', 0, 2);  // 没达标
+  seed(s, '2026-03-09', 0, 4);  // 达标
+  seed(s, '2026-03-10', 1, 6);  // 达标（多一个短休）
+
+  const e = core.efficiency(s, 7, new Date(T0));
+  eq(e.pomodoros, 12, '共 12 个番茄');
+  eq(e.focusMin, 300, '共 300 分钟专注');
+  eq(e.breakMin, 5, '休息 5 分钟');
+  eq(e.activeDays, 3, '3 天有记录');
+  eq(e.idleDays, 4, '7 天里 4 天空着');
+  eq(e.goalHitDays, 2, '2 天达标');
+  eq(e.avgPerDay, 12 / 7, '按 7 天摊');
+  eq(e.avgPerActiveDay, 4, '按有记录的 3 天摊 = 4');
+  eq(e.focusRatio, 300 / 305, '专注占比');
+  eq(e.best.key, '2026-03-10', '最好的一天是今天');
+  eq(e.best.pomodoros, 6, '那天 6 个');
+});
+
+group('任务完成率与任务消耗排行', () => {
+  const s = core.defaultState();
+  const a = core.addTask(s, '大任务', 5, T0);
+  const b = core.addTask(s, '小任务', 2, T0 + 1);
+  core.addTask(s, '还没开始的', 1, T0 + 2);
+  core.toggleTaskDone(s, b.id, T0 + 10);
+
+  seed(s, '2026-03-10', 0, 3, 25, a.id);
+  seed(s, '2026-03-09', 0, 1, 25, a.id);
+  seed(s, '2026-03-10', 0, 2, 25, b.id);
+  seed(s, '2026-03-10', 0, 1, 25, ''); // 没指派
+
+  const e = core.efficiency(s, 7, new Date(T0));
+  eq(e.doneTasks, 1, '完成 1 个任务');
+  eq(e.totalTasks, 3, '共 3 个任务');
+  eq(e.completionRate, 1 / 3, '完成率 1/3');
+
+  const rank = core.taskBreakdown(s, 7, new Date(T0));
+  eq(rank.map((r) => r.title), ['大任务', '小任务', '未指派'], '按番茄数从多到少');
+  eq(rank[0].pomodoros, 4, '大任务吃了 4 个');
+  eq(rank[0].focusMin, 100, '合 100 分钟');
+  eq(rank[0].estimate, 5, '带上预估');
+  eq(rank[1].done, true, '小任务已完成');
+  eq(rank[2].id, '', '未指派的 id 是空串');
+
+  eq(core.taskStats(s, a.id).pomodoros, 4, '单任务全期统计');
+  eq(core.taskStats(s, a.id).focusMin, 100, '单任务全期分钟');
+});
+
+/* ── 环境音 ───────────────────────────────────────── */
+group('环境音只跟着计时状态走', () => {
+  const s = core.defaultState();
+  no(core.ambienceShouldPlay(s), '默认关闭时不响');
+
+  core.applySettings(s, { ambience: 'rain' });
+  no(core.ambienceShouldPlay(s), '选了下雨但还没开始计时，不响');
+
+  core.start(s, T0);
+  ok(core.ambienceShouldPlay(s), '专注计时中要响');
+
+  core.pause(s, at(5));
+  no(core.ambienceShouldPlay(s), '暂停就静音');
+
+  core.start(s, at(5));
+  // 让短休自动接上，否则"计时没在跑"本身就意味着静音，测不出「仅专注时段」这一条
+  core.applySettings(s, { ambienceFocusOnly: false, autoNext: true });
+  core.complete(s, at(25));
+  eq(s.phase, 'short', '现在是短休');
+  ok(s.running, '短休已经自动开始了');
+  ok(core.ambienceShouldPlay(s), '关掉「仅专注时段」后，休息也响');
+
+  core.applySettings(s, { ambienceFocusOnly: true });
+  no(core.ambienceShouldPlay(s), '打开「仅专注时段」后，休息静音');
+
+  core.applySettings(s, { ambience: '不存在的场景' });
+  ok(s.running, '这里计时还在跑');
+  no(core.ambienceShouldPlay(s), '非法场景不响');
+});
+
+/* ── 读档容错（任务部分） ─────────────────────────── */
+group('存档里的任务脏数据也能扛住', () => {
+  const store = fakeStorage({
+    'pomodoro/v1': JSON.stringify({
+      tasks: [
+        { id: 'ok', title: '正常任务', estimate: 3, done: false, createdAt: T0 },
+        { title: '没有 id' },
+        { id: 'empty', title: '   ' },
+        null,
+        { id: 'bad', title: '预估越界', estimate: 99 },
+      ],
+      activeTaskId: 'ok',
+      roundTaskId: 'ok',
+      running: false,
+      settings: { ambience: 'rain', ambienceVolume: 5, range: 999 },
+    }),
+  });
+  const s = core.load(store);
+  eq(s.tasks.length, 3, '空标题和 null 被丢掉，剩下的补上 id');
+  ok(s.tasks.every((t) => t.id && t.title), '每个任务都有 id 和标题');
+  eq(s.tasks.find((t) => t.id === 'bad').estimate, core.LIMITS.taskEstimate[1], '预估被夹住');
+  eq(s.activeTaskId, 'ok', '当前任务保留');
+  eq(s.roundTaskId, '', '没在计时 → 冻结的任务不该留到下一次');
+  eq(s.settings.ambience, 'rain', '环境音场景保留');
+  eq(s.settings.ambienceVolume, 1, '音量夹到 [0,1]');
+  eq(s.settings.range, 7, '非法区间回落到 7 天');
+});
+
+group('当前任务指向一个不存在的 id 时会被清掉', () => {
+  const store = fakeStorage({
+    'pomodoro/v1': JSON.stringify({ tasks: [{ id: 'a', title: 'A' }], activeTaskId: '幽灵' }),
+  });
+  eq(core.load(store).activeTaskId, '', '幽灵 id 被清空');
 });
 
 /* ── 收尾 ──────────────────────────────────────────── */

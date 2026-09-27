@@ -80,6 +80,13 @@
           <span class="counter__round" id="roundLine">第 1 / 4 个番茄</span>
         </p>
 
+        <button class="slip" id="slip" type="button" aria-describedby="slipCount">
+          <span class="slip__tape" aria-hidden="true"></span>
+          <span class="slip__tag">在办</span>
+          <span class="slip__title" id="slipTitle">未选择任务</span>
+          <span class="slip__count" id="slipCount"></span>
+        </button>
+
         <div class="pushers">
           <button class="pusher pusher--main" type="button" id="startBtn">开始</button>
           <button class="pusher" type="button" id="resetBtn">重置</button>
@@ -90,8 +97,22 @@
       <p class="instrument__hint" id="dialHint">拖动表盘上弦，或选中表盘后按 ↑ ↓ 调整分钟。空格键开始 / 暂停。</p>
     </section>
 
-    <!-- ── 记录与设置 ────────────────────────────────── -->
+    <!-- ── 任务、记录、效率与声音 ────────────────────── -->
     <div class="column">
+
+      <section class="card" aria-labelledby="tasksTitle">
+        <div class="card__head">
+          <h2 class="card__title" id="tasksTitle">任务</h2>
+          <span class="card__meta" id="tasksMeta"></span>
+        </div>
+        <form class="task-add" id="taskForm" novalidate>
+          <input class="task-add__input" id="taskInput" type="text" maxlength="80"
+                 placeholder="要做的事，回车加入" aria-label="新任务" autocomplete="off">
+          <button class="btn btn--add" type="submit">加入</button>
+        </form>
+        <ul class="tasks" id="taskList"></ul>
+        <p class="empty" id="tasksEmpty">还没有任务。把今天要做的事写进来，选中一条，专注时走的番茄就会记到它头上。</p>
+      </section>
 
       <section class="card card--tape" aria-labelledby="tapeTitle">
         <div class="card__head">
@@ -104,11 +125,59 @@
 
       <section class="card" aria-labelledby="chartTitle">
         <div class="card__head">
-          <h2 class="card__title" id="chartTitle">最近 7 天</h2>
-          <span class="card__meta" id="chartMeta"></span>
+          <h2 class="card__title" id="chartTitle">效率</h2>
+          <div class="range" id="rangeSwitch" role="group" aria-label="统计区间">
+            <button class="range__btn" type="button" data-days="7" aria-pressed="true">7 天</button>
+            <button class="range__btn" type="button" data-days="30" aria-pressed="false">30 天</button>
+          </div>
         </div>
+
+        <p class="caption">每日番茄 <span class="caption__note" id="chartMeta"></span></p>
         <div class="chart" id="chart"></div>
+
+        <p class="caption">几点最出活 <span class="caption__note" id="hoursMeta"></span></p>
+        <div class="hours" id="hours"></div>
+        <div class="hours__axis" aria-hidden="true"><span>0</span><span>6</span><span>12</span><span>18</span><span>24</span></div>
+
+        <p class="caption">番茄花在哪儿了 <span class="caption__note" id="rankMeta"></span></p>
+        <ol class="rank" id="taskRank"></ol>
+
         <ul class="figures" id="figures"></ul>
+      </section>
+
+      <section class="card" aria-labelledby="soundTitle">
+        <div class="card__head">
+          <h2 class="card__title" id="soundTitle">背景声音</h2>
+          <span class="card__meta" id="soundMeta"></span>
+        </div>
+
+        <div class="scenes" id="scenes" role="group" aria-label="环境音"></div>
+
+        <div class="knobs">
+          <label class="knob">
+            <span class="knob__label">环境音音量</span>
+            <input class="knob__input" type="range" id="ambVolume" min="0" max="100" step="1" value="45">
+            <span class="knob__value" id="ambVolumeText">45%</span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="setAmbFocusOnly" data-boolean="ambienceFocusOnly">
+            <span class="switch__track" aria-hidden="true"></span>
+            <span class="switch__text">仅专注时段播放</span>
+          </label>
+        </div>
+
+        <p class="note" id="soundHint"></p>
+
+        <div class="local">
+          <span class="local__label">我的音乐</span>
+          <label class="btn btn--file">
+            <input type="file" id="musicFile" accept="audio/*">
+            <span>选择本地音频</span>
+          </label>
+          <button class="btn" type="button" id="musicToggle" disabled>播放</button>
+          <span class="local__name" id="musicName">未选择</span>
+        </div>
+        <p class="note note--tiny">音频只在你的浏览器里播放，不会上传，也不会被保存下来——刷新页面需要重新选一次。</p>
       </section>
 
       <section class="card" aria-labelledby="setTitle">
