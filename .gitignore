@@ -87,3 +87,6 @@ maven-settings.xml
 # cloud-atlas / pomodoro 等项目的 scripts/ 会往这里写截图、
 # 无头浏览器配置目录和测量报告。都是本机产物，不进仓库。
 **/.screens/
+
+# 服务端兜底保存的对话副本（运行时数据，不入库）
+data/

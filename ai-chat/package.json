@@ -1,0 +1,30 @@
+{
+  "name": "ai-chat",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "对谈录 · AI 聊天助手：多轮记忆、逐字流式输出、本地保存、一键清空（零依赖，Node 原生 + 原生前端）",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node server.mjs",
+    "test": "node test/run-tests.mjs && node test/store-tests.mjs",
+    "test:server": "node test/run-tests.mjs",
+    "test:store": "node test/store-tests.mjs",
+    "verify:sse": "node test/verify-sse.mjs",
+    "verify:turns": "node test/verify-turns.mjs",
+    "verify:models": "node test/verify-models.mjs",
+    "check:upstream": "node test/check-upstream.mjs"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "keywords": [
+    "ai",
+    "chat",
+    "sse",
+    "streaming",
+    "deepseek"
+  ],
+  "license": "MIT"
+}

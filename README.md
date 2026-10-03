@@ -422,8 +422,8 @@ http://localhost:5173
 <!-- 维护约定：本节只保留下面这张项目索引表，不要再往下写各项目的详细介绍。
      每个项目的细节都在它自己的 README.md 里，在这里重复一遍只会让仓库总览变得难读。
      - 新增项目：只往表里加一行。
-     - 表格最后一行之后必须留一个空行，否则后面紧接的文字会被 Markdown 当成表格行（会渲染成残缺的列）。
-     详见各项目目录下的 README.md。 -->
+          - 表格最后一行之后必须留一个空行，否则后面紧接的文字会被 Markdown 当成表格行（会渲染成残缺的列）。
+          详见各项目目录下的 README.md。 -->
 
 仓库持续沉淀新项目，各自独立、便于单独运行：
 
@@ -439,12 +439,7 @@ http://localhost:5173
 | **校样 · Markdown 笔记台** | `markdown-notes/` | 零依赖 HTML + CSS + 原生 JS + Node 服务 | `cd markdown-notes && node server.js` → http://127.0.0.1:5220 |
 | **番茄钟 · 专注计时** | `pomodoro/` | 零依赖 HTML + CSS + 原生 JS + Node 服务 | `cd pomodoro && node server.js` → http://127.0.0.1:5230 |
 | **云图 · 天气台** | `cloud-atlas/` | 零依赖 HTML + CSS + 原生 JS + Node 服务（含 API 代理） | `cd cloud-atlas && node server.js` → http://127.0.0.1:5240 |
-
-`cloud-atlas/` 除了城市天气查询与 7 日预报，还包含：AQI（按中国国标 HJ 633—2012 计算）、
-天气提示（按预警分级标准推算，界面明确标注非官方）、多城市对比、历史天气趋势（30 天～5 年）。
-细节见 `cloud-atlas/README.md`。
-
-后续新增项目会继续追加到本表。
+| **对谈录 · AI 聊天助手** | `ai-chat/` | 零依赖 HTML + CSS + 原生 JS + Node 服务（SSE 流式 + 本地持久化） | `cd ai-chat && node server.mjs` → http://127.0.0.1:5250 |
 
 后续新增项目会继续追加到本表。
 
