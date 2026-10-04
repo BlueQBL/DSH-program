@@ -298,6 +298,27 @@ let configMode = 'model';
 let configDefault = 'deepseek-v3.2';
 /** 最近一次 /api/chat 的请求体：用来验证「引用真的发出去了」 */
 let lastChatBody = null;
+/** 最近一次 /api/title 的请求体，以及要回给客户端的标题 */
+let lastTitleBody = null;
+let titleReply = { ok: true, title: '变量未声明的报错' };
+/** 聊天是否走「正常流式回答」这条路（默认关，老用例依赖失败分支） */
+let chatStreams = false;
+/** 流式回答里 meta 帧报告的运行模式（离线用例会把它设成 mock） */
+let chatMode = 'model';
+
+/** 造一个能用的 SSE 响应体：app.js 的 readEventStream 要 getReader() */
+function sseResponse(frames) {
+  const chunks = frames.map((f) => new TextEncoder().encode(`data: ${JSON.stringify(f)}\n\n`));
+  let i = 0;
+  return {
+    ok: true,
+    body: {
+      getReader: () => ({
+        read: async () => (i < chunks.length ? { value: chunks[i++], done: false } : { value: undefined, done: true }),
+      }),
+    },
+  };
+}
 
 globalThis.fetch = async (url, init) => {
   const target = String(url);
@@ -316,8 +337,20 @@ globalThis.fetch = async (url, init) => {
   if (target.includes('/api/history')) {
     return { ok: true, json: async () => ({ turns: [] }) };
   }
+  if (target.includes('/api/title')) {
+    lastTitleBody = JSON.parse(init?.body ?? '{}');
+    return { ok: true, json: async () => titleReply };
+  }
   if (target.includes('/api/chat')) {
     lastChatBody = JSON.parse(init?.body ?? '{}');
+    if (chatStreams) {
+      return sseResponse([
+        { type: 'meta', mode: chatMode, model: 'deepseek-v3.2', sessionId: 's_test' },
+        { type: 'delta', text: '报错是因为' },
+        { type: 'delta', text: '变量没声明。' },
+        { type: 'done', reason: 'stop' },
+      ]);
+    }
     // 故意不给 body：send() 会走「请求失败」分支，正好验证失败路径不会把引用搞丢
     return { ok: false, json: async () => ({ error: 'stub' }) };
   }
@@ -977,6 +1010,94 @@ console.log('\n⑨ 引用回答：划中一段接着问');
     JSON.stringify(lastChatBody?.messages?.at(-1)));
   check('重新生成发出去的仍然是原来那一问',
     String(activeSession.messages[answerIndex - 1]?.content ?? '').length > 0);
+}
+
+console.log('\n⑩ 会话标题：先本地兜底，再让模型换一个');
+{
+  const input = getEl('composer-input');
+  const sessionsIn = () => {
+    const raw = JSON.parse(storage.get('duitanlu.sessions.v2'));
+    return { raw, active: raw.sessions.find((s) => s.id === raw.activeId) };
+  };
+
+  // 这一节要的是「正常答完一轮」，所以把聊天打开成流式的正常分支
+  chatStreams = true;
+  lastTitleBody = null;
+  titleReply = { ok: true, title: '"变量未声明的报错。"' }; // 带引号和句号，看客户端会不会洗
+
+  dispatch(getEl('new-session-button'), 'click');
+  check('新建之后是占位标题', sessionsIn().active.title === '新对话', sessionsIn().active.title);
+
+  input.value = '帮我看看这段代码为什么报错';
+  dispatch(getEl('composer'), 'submit');
+  await new Promise((r) => setTimeout(r, 120));
+
+  const afterFirstTurn = sessionsIn().active;
+  // 第一问发出去时本地就先算好一个兜底标题 —— 侧栏不会出现空的「新对话」
+  check('回答写完之后标题已经能认了（本地兜底或模型标题都可以）',
+    afterFirstTurn.title.length > 2 && afterFirstTurn.title !== '新对话', afterFirstTurn.title);
+
+  check('回答写完之后去问了模型要标题', lastTitleBody !== null, JSON.stringify(lastTitleBody));
+  check('起标题的原料是开头的一问一答',
+    String(lastTitleBody?.question ?? '').includes('这段代码为什么报错') &&
+      String(lastTitleBody?.answer ?? '').includes('变量没声明'),
+    JSON.stringify(lastTitleBody));
+  check('模型标题洗掉了引号和句号', afterFirstTurn.title === '变量未声明的报错', afterFirstTurn.title);
+  check('来源标成模型起的', afterFirstTurn.titleSource === 'auto', String(afterFirstTurn.titleSource));
+
+  // 用户自己改名之后，自动改名不能再动它
+  const manualId = afterFirstTurn.id;
+  const renameButton = makeElement('button');
+  renameButton.dataset.action = 'rename';
+  const item = makeElement('li');
+  item.className = 'session-item';
+  item.dataset.id = manualId;
+  renameButton.parentElement = item;
+  globalThis.window.prompt = () => '我的调试记录';
+  dispatch(getEl('session-list'), 'click', { target: renameButton });
+  check('手动改名生效', sessionsIn().active.title === '我的调试记录', sessionsIn().active.title);
+  check('手动改名后来源是用户', sessionsIn().active.titleSource === 'manual', sessionsIn().active.titleSource);
+
+  // 再问一轮：不该再自动起标题（已经是 manual）
+  lastTitleBody = null;
+  input.value = '再帮我看看别的地方';
+  dispatch(getEl('composer'), 'submit');
+  await new Promise((r) => setTimeout(r, 120));
+  check('用户改过名字之后不再自动请求标题', lastTitleBody === null, JSON.stringify(lastTitleBody));
+  check('用户的名字没被改掉', sessionsIn().active.title === '我的调试记录', sessionsIn().active.title);
+
+  // 明确点「起名」时才换
+  titleReply = { ok: true, title: '代码报错排查' };
+  const retitleButton = makeElement('button');
+  retitleButton.dataset.action = 'retitle';
+  const retitleItem = makeElement('li');
+  retitleItem.className = 'session-item';
+  retitleItem.dataset.id = manualId;
+  retitleItem.dataset.turns = '2';
+  retitleButton.parentElement = retitleItem;
+  dispatch(getEl('session-list'), 'click', { target: retitleButton });
+  await new Promise((r) => setTimeout(r, 120));
+  check('点「起名」会带上后来问过的事（标题不该只描述开头）',
+    Array.isArray(lastTitleBody?.laterQuestions) && lastTitleBody.laterQuestions.length > 0,
+    JSON.stringify(lastTitleBody?.laterQuestions));
+  check('点「起名」可以覆盖用户自己起的名字',
+    sessionsIn().active.title === '代码报错排查', sessionsIn().active.title);
+
+  // 离线模式：没有模型可用，保留本地兜底标题
+  configMode = 'mock';
+  chatMode = 'mock';
+  lastTitleBody = null;
+  dispatch(getEl('new-session-button'), 'click');
+  input.value = '离线模式也要有个名字';
+  dispatch(getEl('composer'), 'submit');
+  await new Promise((r) => setTimeout(r, 120));
+  check('离线模式不去请求模型标题', lastTitleBody === null);
+  check('离线模式用的是本地算的名字',
+    sessionsIn().active.title === '离线模式也要有个名字', sessionsIn().active.title);
+  check('离线模式的来源是兜底', sessionsIn().active.titleSource === 'fallback', sessionsIn().active.titleSource);
+  configMode = 'model';
+  chatMode = 'model';
+  chatStreams = false;
 }
 
 console.log(`\n${'─'.repeat(52)}`);

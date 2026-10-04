@@ -24,6 +24,9 @@ import {
   visionModels,
 } from './lib/error-mapping.mjs';
 import { writeJson, readJsonBody, openEventStream, sleep, isAbort } from './lib/http-utils.mjs';
+// 提示词与清洗规则放在 public/lib/title.js：浏览器和服务端 import 同一份，
+// 免得两边各写一套提示词然后慢慢分叉
+import { buildTitleMessages, titleFromModel } from './public/lib/title.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(HERE, 'public');
@@ -568,6 +571,88 @@ async function* streamWithFallback(messages, signal, requested = '', { systemPro
   yield { failure: lastFailure ?? { reason: 'upstream', retryable: true, message: '本轮没有任何产出。' } };
 }
 
+// ---------------------------------------------------------------- 会话标题
+
+/** 起标题是后台小请求：慢一点只是标题晚到，不该拖太久 */
+const TITLE_TIMEOUT_MS = Number(process.env.AI_TITLE_TIMEOUT_MS || 15000);
+
+/**
+ * 给一段对话起标题。
+ *
+ * 与 /api/chat 的三点不同，都是刻意的：
+ *  · **非流式**：只要一行字，流式反而更麻烦；
+ *  · **不换模型、不重试**：失败就失败，客户端保留本地兜底标题 ——
+ *    这是后台小事，不该像正文那样惊动用户；
+ *  · **失败也返回 200**：调用方不需要区分「离线」「超时」「上游抽风」，
+ *    它只关心「有没有拿到一个干净标题」。
+ */
+async function handleTitle(req, res, body) {
+  const question = typeof body?.question === 'string' ? body.question.trim().slice(0, LIMITS.maxMessageChars) : '';
+  if (!question) {
+    writeJson(res, 400, { error: '缺少 question' });
+    return;
+  }
+  const answer = typeof body?.answer === 'string' ? body.answer.slice(0, LIMITS.maxMessageChars) : '';
+  const laterQuestions = (Array.isArray(body?.laterQuestions) ? body.laterQuestions : [])
+    .filter((q) => typeof q === 'string')
+    .slice(-4);
+
+  if (!HAS_MODEL) {
+    // 离线模式没有模型可用：让客户端继续用它自己算的兜底标题
+    writeJson(res, 200, { ok: false, mode: 'mock', reason: 'offline', title: '' });
+    return;
+  }
+
+  const requestedModel =
+    typeof body?.model === 'string' && /^[A-Za-z0-9._:\/-]{1,80}$/.test(body.model.trim())
+      ? body.model.trim()
+      : '';
+  const model = requestedModel || preferredModel();
+
+  const messages = buildTitleMessages({ question, answer, laterQuestions });
+
+  let upstream;
+  try {
+    upstream = await fetch(`${API_BASE}/chat/completions`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(TITLE_TIMEOUT_MS),
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${API_KEY}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        stream: false,
+        // 标题就那么长：给足 48 个 token 已很宽裕，也顺手压住乱说话的空间
+        max_tokens: 48,
+        temperature: 0.2,
+      }),
+    });
+  } catch (err) {
+    writeJson(res, 200, { ok: false, reason: 'network', message: err.cause?.code || err.message, title: '' });
+    return;
+  }
+
+  const text = await upstream.text().catch(() => '');
+  if (!upstream.ok) {
+    const classified = classifyUpstreamError({ status: upstream.status, body: text, model, baseUrl: API_BASE });
+    writeJson(res, 200, { ok: false, reason: classified.reason, message: classified.message, title: '' });
+    return;
+  }
+
+  let content = '';
+  try {
+    content = JSON.parse(text)?.choices?.[0]?.message?.content ?? '';
+  } catch {
+    content = '';
+  }
+
+  const title = titleFromModel(content);
+  // 模型这次没说人话（空、或只吐了「对话」这种空词）→ 明确告诉调用方没拿到
+  writeJson(res, 200, title ? { ok: true, title, model } : { ok: false, reason: 'empty', title: '', model });
+}
+
 async function handleChat(req, res, body) {
   const incoming = normalizeMessages(body.messages);
   const sessionId = typeof body.sessionId === 'string' && /^[A-Za-z0-9_-]{4,64}$/.test(body.sessionId)
@@ -807,6 +892,11 @@ const server = createServer(async (req, res) => {
 
     if (pathname === '/api/chat' && req.method === 'POST') {
       await handleChat(req, res, await readJsonBody(req));
+      return;
+    }
+
+    if (pathname === '/api/title' && req.method === 'POST') {
+      await handleTitle(req, res, await readJsonBody(req));
       return;
     }
 

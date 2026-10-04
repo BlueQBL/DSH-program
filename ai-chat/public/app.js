@@ -41,6 +41,9 @@ import {
   buildRequestHistory,
 } from './lib/versions.js';
 import { hasQuote, quoteFromSelection, quoteLabel, quotePreview } from './lib/quote.js';
+// 起标题的提示词与清洗都在 lib/title.js 里（服务端 import 同一份）；
+// 这里只用得到「该不该起」和「洗一遍」两个
+import { needsAutoTitle, titleFromModel } from './lib/title.js';
 import {
   resolveStartingSession as resolveStartingSessionDecide,
   shouldCreateSession,
@@ -143,8 +146,10 @@ const runtime = {
   availableModels: [],
   chosenModel: readModelPreference(),
   pendingImages: [],
-  /** 待发送的引用（在回答里划中一段），发送后清空 */
+  /** 待发送的引用（在回答中划中一段），发送后清空 */
   pendingQuote: null,
+  /** 正在等模型起标题的会话 id，避免同一会话重复请求 */
+  titlingSessions: new Set(),
   exportAll: false,
   pendingDelete: null,
   speech: null,
@@ -387,6 +392,7 @@ function renderSessionList() {
 
       frag.querySelector('[data-field="name"]').textContent = session.title || '新对话';
       const turns = session.messages.filter((m) => m.role === 'user').length;
+      item.dataset.turns = String(turns);
       frag.querySelector('[data-field="meta"]').textContent =
         `${formatClock(session.updatedAt)} · ${turns} 轮 · ${personaLabel(session.personaId)}`;
       return frag;
@@ -395,9 +401,18 @@ function renderSessionList() {
 
   // 只有一个会话时不允许删，按钮就别装作能点
   const deletable = sessions.length > 1;
-  for (const button of els.sessionList.querySelectorAll('[data-action="delete"]')) {
-    button.disabled = !deletable;
-    if (!deletable) button.title = '至少保留一个会话';
+  for (const item of els.sessionList.querySelectorAll('.session-item')) {
+    const deleteButton = item.querySelector('[data-action="delete"]');
+    if (deleteButton) {
+      deleteButton.disabled = !deletable;
+      if (!deletable) deleteButton.title = '至少保留一个会话';
+    }
+    // 还没说过话的会话没什么可命名的
+    const retitleButton = item.querySelector('[data-action="retitle"]');
+    if (retitleButton && item.dataset.turns === '0') {
+      retitleButton.disabled = true;
+      retitleButton.title = '这个会话还没有内容';
+    }
   }
 }
 
@@ -427,6 +442,23 @@ els.sessionList.addEventListener('click', (event) => {
     return;
   }
 
+  if (action === 'retitle') {
+    const session = store.sessions.find((s) => s.id === id);
+    if (!session?.messages.length) {
+      flashHint('这个会话还没有内容，起不了名', 2400);
+      return;
+    }
+    if (runtime.config.mode === 'mock') {
+      flashHint('离线模式的名字是本地算的；接上模型后可以让 AI 起名', 3600);
+      return;
+    }
+    flashHint('正在让 AI 起名…', 1600);
+    void requestTitle(id, { force: true }).then((ok) => {
+      if (!ok) flashHint('这次没起出新名字，稍后再试', 2600);
+    });
+    return;
+  }
+
   // 切到已有对话前，先把「进来时自动开的那个空白会话」清掉 ——
   // 留着它只会让列表里堆一串没用的「新对话」。
   // 注意 keepId：如果点的那个会话本身是空的（也是新建的），要留着它。
@@ -442,6 +474,72 @@ els.sessionList.addEventListener('click', (event) => {
     if (dropped > 0) flashHint('已清掉空白的「新对话」', 2200);
   }
 });
+
+// ---------------------------------------------------------------- 会话标题
+//
+// 标题分两步走，和 ChatGPT 的做法一致：
+//   1. 第一次发消息时，本地**立刻**算一个兜底标题（lib/title.js 的 fallbackTitle）——
+//      侧栏任何时候都不会是空的，也不用等网络；
+//   2. 这一轮回答写完之后，后台再问模型要一个更像样的标题来替换它。
+//
+// 三个约束：
+//   · **只替换兜底标题**。用户自己改过的名字永远不动（titleSource === 'manual'）；
+//     只有他明确点「起名」时才允许覆盖 —— 那一次传 force。
+//   · **绝不挡正文**。这是后台小请求，失败、超时、离线都只是「标题保持兜底那版」，
+//     不弹错误、不影响对话。
+//   · 不重试、不换模型：上游挂了就让它挂着，反正标题已经有一个能用的了。
+
+/** 拼这次请求要用的原料：开头的一问一答，加上后来问过的几件事 */
+function titleInputFor(session) {
+  const texts = (role) =>
+    session.messages.filter((m) => m.role === role).map((m) => m.content ?? '').filter((t) => t.trim());
+  const questions = texts('user');
+  return {
+    question: questions[0] ?? '',
+    answer: texts('assistant')[0] ?? '',
+    laterQuestions: questions.slice(1),
+  };
+}
+
+/**
+ * 要一个模型标题并写回会话。
+ * @returns {Promise<boolean>} 是否真的换上了新标题
+ */
+async function requestTitle(sessionId, { force = false } = {}) {
+  const session = store.sessions.find((s) => s.id === sessionId);
+  if (!session) return false;
+  if (!force && !needsAutoTitle(session)) return false;
+  // 离线模式没有模型可用，本地兜底标题就是最终标题
+  if (runtime.config.mode === 'mock') return false;
+  // 同一个会话已经在起了：重复发请求只会浪费一次调用
+  if (runtime.titlingSessions.has(sessionId)) return false;
+
+  const input = titleInputFor(session);
+  if (!input.question) return false;
+
+  runtime.titlingSessions.add(sessionId);
+  try {
+    const response = await fetch('/api/title', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        ...input,
+        model: session.model || runtime.chosenModel || runtime.serverDefaultModel || undefined,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    // 服务端已经洗过一遍，这里再洗一次：两边的规则是同一份（lib/title.js），是幂等的
+    const title = titleFromModel(data?.title);
+    if (!title) return false;
+    return store.applyTitle(sessionId, title, { force });
+  } catch {
+    // 起标题失败不是错误：兜底标题已经显示着了
+    return false;
+  } finally {
+    runtime.titlingSessions.delete(sessionId);
+    renderSessionList();
+  }
+}
 
 // ---------------------------------------------------------------- 角色与提示词
 
@@ -1323,6 +1421,8 @@ async function send(rawText, { edit = null, version = null, reuse = false } = {}
   const question = asked.message;
   const versionNumber = asked.version;
   store.renameFromFirstMessage();
+  // 记下这一轮属于哪个会话：用户可能在中途切走，标题要按当时那个会话来起
+  const sessionIdAtSend = store.sessionId;
 
   const answered = store.pushAssistant({
     model: currentModelForRequest(),
@@ -1436,6 +1536,9 @@ async function send(rawText, { edit = null, version = null, reuse = false } = {}
     setBusy(false);
     if (runtime.pinned) scrollToBottom();
     els.input.focus();
+    // 这一轮真的答完了，才值得拿它去起标题 —— 用半截回答或错误信息起出来的名字会更糟。
+    // 不 await：起标题是后台的事，用户看到正文结束就该能继续操作。
+    if (placeholder.status === 'done') void requestTitle(sessionIdAtSend);
     if (switchedNote) {
       flashHint(`所选模型 ${switchedNote} 不可用，已自动改用 ${runtime.activeModel || '可用模型'}`, 4200);
     } else if (!sawDone && !streamError && meta === null) {

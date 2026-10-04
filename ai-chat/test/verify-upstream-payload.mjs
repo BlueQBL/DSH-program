@@ -73,9 +73,10 @@ const fake = createServer((req, res) => {
         'content-type': 'text/event-stream',
         'cache-control': 'no-store',
       });
-      // 探测用的非流式请求：直接给一个 JSON 响应
+      // 非流式请求（模型探测、起标题）：直接给一个 JSON 响应。
+      // 内容特意带引号和句号 —— 正好验证服务端会把标题洗干净再返回。
       if (parsed && parsed.stream === false) {
-        res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }));
+        res.end(JSON.stringify({ choices: [{ message: { content: '"闭包与作用域。"' } }] }));
         return;
       }
       // 流式请求：分两帧吐出
@@ -306,6 +307,48 @@ try {
     const hit = streamed().at(-1);
     check('请求开启了 stream', hit?.body?.stream === true);
     check('指定了模型名', typeof hit?.body?.model === 'string' && hit.body.model.length > 0, hit?.body?.model);
+  }
+
+  // 放在最后：这一节会把抓包清空，前面的「流式参数」需要用到之前那批流式请求
+  console.log('\n会话标题：一次独立的非流式小请求');
+  {
+    captured.length = 0;
+    const res = await fetch(`${BASE}/api/title`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        question: '闭包是什么？顺便讲讲作用域',
+        answer: '闭包是函数记住它出生时的环境。',
+        laterQuestions: ['那变量提升呢'],
+      }),
+    });
+    const data = await res.json();
+
+    check('起标题接口可用', res.status === 200, String(res.status));
+    check('返回的标题已经洗干净（引号和句号都去掉了）',
+      data.title === '闭包与作用域', JSON.stringify(data));
+
+    const hit = await waitForCapture((c) => c.body?.stream === false);
+    const msgs = hit?.body?.messages ?? [];
+    check('起标题是非流式请求', hit?.body?.stream === false);
+    check('提示词要求只输出标题', /只输出标题/.test(msgs[0]?.content ?? ''), String(msgs[0]?.content).slice(0, 60));
+    check('提示词要求用同一种语言', /相同的语言/.test(msgs[0]?.content ?? ''));
+    check('把开头的一问一答都给了模型',
+      String(msgs[1]?.content ?? '').includes('闭包是什么') && String(msgs[1]?.content ?? '').includes('闭包是函数'),
+      String(msgs[1]?.content));
+    check('后来问过的事也带上了（标题不用只描述开头）',
+      String(msgs[1]?.content ?? '').includes('变量提升'));
+    check('输出很短（标题不该烧 token）', Number(hit?.body?.max_tokens) <= 64, String(hit?.body?.max_tokens));
+
+    // 没有 question 时不该去打扰上游
+    captured.length = 0;
+    const bad = await fetch(`${BASE}/api/title`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ answer: '只有回答' }),
+    });
+    check('缺 question 直接拒绝', bad.status === 400, String(bad.status));
+    check('拒绝时没有发上游请求', captured.length === 0, String(captured.length));
   }
 } catch (err) {
   failures.push(`测试中断：${err.message}`);

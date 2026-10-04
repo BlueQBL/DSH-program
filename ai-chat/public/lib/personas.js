@@ -137,13 +137,3 @@ export function resolveSystemPrompt(personaId, customPrompt) {
 export function personaLabel(personaId) {
   return getPersona(personaId).name;
 }
-
-/** 用首条提问给会话起个名字；列表里要能一眼认出来 */
-export function deriveTitle(text, max = 24) {
-  const clean = String(text ?? '')
-    .replace(/\s+/g, ' ')
-    .replace(/[「」"'`]/g, '')
-    .trim();
-  if (!clean) return '新对话';
-  return clean.length <= max ? clean : `${clean.slice(0, max)}…`;
-}

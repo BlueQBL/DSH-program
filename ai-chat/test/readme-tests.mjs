@@ -80,6 +80,7 @@ const COUNTS_FILE = path.join(ROOT, '.tmp-mutations', 'counts.json');
 const docLines = {
   'run-tests': 'node test/run-tests.mjs',
   'store-tests': 'node test/store-tests.mjs',
+  'title-tests': 'node test/title-tests.mjs',
   'quote-tests': 'node test/quote-tests.mjs',
   'ui-tests': 'node test/ui-tests.mjs',
   'verify-upstream-payload': 'node test/verify-upstream-payload.mjs',
@@ -153,6 +154,8 @@ const CONTRACTS = [
   ['引用一段回答接着问（有独立说明）', /### 引用一段回答，接着问/],
   ['引用只认回答那一侧', /只认回答那一侧/],
   ['引用不混进用户原话', /库里存的仍然只是你打的那句话|引用是单独一个字段/],
+  ['会话标题由 AI 起', /\/api\/title|让模型给会话起/],
+  ['用户改过的标题不会被 AI 覆盖', /不会覆盖你改过的名字|AI 起的标题永远不会覆盖/],
 ];
 for (const [name, pattern] of CONTRACTS) {
   check(`文档写明了「${name}」`, pattern.test(readme));

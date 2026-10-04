@@ -17,8 +17,9 @@
 //
 // 流式中的半截文本也照样落盘，所以刷新后能看到「写到哪里断的」，而不是整条消息消失。
 
-import { DEFAULT_PERSONA_ID, deriveTitle, resolveSystemPrompt } from './personas.js';
+import { DEFAULT_PERSONA_ID, resolveSystemPrompt } from './personas.js';
 import { normalizeQuote } from './quote.js';
+import { fallbackTitle, inferTitleSource, needsAutoTitle, titleFromModel } from './title.js';
 
 const STORAGE_KEY = 'duitanlu.sessions.v2';
 const LEGACY_KEY = 'duitanlu.conversation.v1';
@@ -202,7 +203,7 @@ function normalizeSession(raw) {
   if (!isSessionId(raw.id)) return null;
 
   const createdAt = Number(raw.createdAt) || Date.now();
-  return {
+  const session = {
     id: raw.id,
     title: typeof raw.title === 'string' && raw.title.trim() ? raw.title.trim().slice(0, 60) : '新对话',
     createdAt,
@@ -212,6 +213,10 @@ function normalizeSession(raw) {
     model: typeof raw.model === 'string' ? raw.model : '',
     messages: (Array.isArray(raw.messages) ? raw.messages : []).map(normalizeMessage).filter(Boolean),
   };
+  // 这个名字是谁起的。老数据没有这个字段，靠标题内容反推（见 lib/title.js）——
+  // 反推错了会把用户自己起的名字当成机器起的，所以那一步是保守的：认不出来就当用户起的。
+  session.titleSource = inferTitleSource({ ...session, titleSource: raw.titleSource });
+  return session;
 }
 
 /**
@@ -225,7 +230,7 @@ function migrateLegacy() {
 
   const session = normalizeSession({
     id: isSessionId(legacyId) ? legacyId : newSessionId(),
-    title: deriveTitle(legacy.messages.find((m) => m.role === 'user')?.content) || '过去的对话',
+    title: fallbackTitle(legacy.messages.find((m) => m.role === 'user')?.content) || '过去的对话',
     createdAt: legacy.messages[0]?.createdAt ?? Date.now(),
     updatedAt: Date.now(),
     messages: legacy.messages,
@@ -238,6 +243,9 @@ function makeSession(overrides = {}) {
   return {
     id: newSessionId(),
     title: '新对话',
+    // none = 还没有名字（空会话）。第一次发消息时才会算一个兜底标题，
+    // 随后可以被模型标题替换 —— 见 lib/title.js 的 titleSource 说明。
+    titleSource: 'none',
     createdAt: now,
     updatedAt: now,
     personaId: DEFAULT_PERSONA_ID,
@@ -462,14 +470,52 @@ export function createStore() {
       return true;
     },
 
+    /**
+     * 用户手动改名。
+     *
+     * 改完把 titleSource 标成 `manual` —— 从此**任何自动改名都不许再动它**。
+     * 这是「AI 起的标题」和「我自己起的名字」之间唯一的界线，别绕过去。
+     */
     renameSession(id, title) {
       const session = sessions.find((s) => s.id === id);
       if (!session) return false;
       const clean = String(title ?? '').trim().slice(0, 60);
       session.title = clean || '新对话';
+      session.titleSource = 'manual';
       touch(session);
       commit();
       return true;
+    },
+
+    /**
+     * 模型起的标题。
+     *
+     * 规则：`fallback`（本地兜底）可以被替换；`auto` 不重复替换；
+     * `manual`（用户改过）只有 `force: true` 才能动 —— 那对应界面上
+     * 用户自己点了「起名」，是他明确要求才换的。
+     */
+    applyTitle(id, title, { force = false } = {}) {
+      const session = sessions.find((s) => s.id === id);
+      if (!session) return false;
+
+      const clean = titleFromModel(title);
+      if (!clean) return false;
+
+      const source = inferTitleSource(session);
+      if (!force && source !== 'fallback') return false;
+
+      session.title = clean;
+      session.titleSource = 'auto';
+      // 刻意不 touch()：换个名字不算「用过这个会话」。
+      // 会话行里显示的时钟时间跟着 updatedAt 走，改标题顺手把它推后几秒会显得莫名其妙。
+      commit();
+      return true;
+    },
+
+    /** 这个会话现在该不该去问模型要个标题（纯判断，见 lib/title.js） */
+    needsAutoTitle(id) {
+      const session = sessions.find((s) => s.id === id);
+      return session ? needsAutoTitle(session) : false;
     },
 
     /** 删除会话；最后一个不允许删（否则界面没有可显示的东西） */
@@ -484,12 +530,19 @@ export function createStore() {
       return true;
     },
 
+    /**
+     * 用首条提问给会话起个**兜底**名字（本地算，立刻就有）。
+     *
+     * 只在「这个名字还没起过」时生效：一旦有了名字（兜底或模型或用户），
+     * 后面再发消息都不该把它改回首条提问的截断版本。
+     */
     renameFromFirstMessage() {
       const session = active();
-      if (session.title !== '新对话') return false;
+      if (inferTitleSource(session) !== 'none') return false;
       const firstUser = session.messages.find((m) => m.role === 'user');
       if (!firstUser) return false;
-      session.title = deriveTitle(firstUser.content || firstUser.attachments?.[0]?.name || '');
+      session.title = fallbackTitle(firstUser.content || firstUser.attachments?.[0]?.name || '');
+      session.titleSource = 'fallback';
       commit();
       return true;
     },
@@ -600,9 +653,11 @@ export function createStore() {
       };
       syncFlatFields(msg);
       session.messages.push(msg);
-      // 第一次说话就顺手把「新对话」换成真实标题，列表里才认得出这个会话
-      if (session.title === '新对话') {
-        session.title = deriveTitle(content || cleanAttachments[0]?.name || '');
+      // 第一次说话就顺手起个**兜底**标题（本地算，立刻就有），列表里才认得出这个会话。
+      // 等这一轮回答写完，客户端会再去问模型要一个更像样的标题来替换它。
+      if (inferTitleSource(session) === 'none') {
+        session.title = fallbackTitle(content || cleanAttachments[0]?.name || '');
+        session.titleSource = 'fallback';
       }
       touch(session);
       commit();
@@ -758,6 +813,9 @@ export function createStore() {
       const session = active();
       session.messages = [];
       session.title = '新对话';
+      // 名字也跟着作废：消息都清空了，旧标题（模型起的或用户起的）已经没有意义，
+      // 下一轮提问应当重新起一个
+      session.titleSource = 'none';
       touch(session);
       commit();
       fetch(`/api/history/${session.id}`, { method: 'DELETE' }).catch(() => {});

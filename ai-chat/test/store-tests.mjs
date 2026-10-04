@@ -184,7 +184,7 @@ group('多会话 · 每会话独立设置');
 group('角色提示词');
 
 {
-  const { resolveSystemPrompt, getPersona, deriveTitle, PERSONAS } = await loadModule('personas.js');
+  const { resolveSystemPrompt, getPersona, PERSONAS } = await loadModule('personas.js');
 
   check('未选角色时返回空（由服务端用自己的默认提示词）', resolveSystemPrompt('default', '') === '');
   check('内置角色能取到提示词', getPersona('coding').prompt.includes('工程师'));
@@ -194,9 +194,7 @@ group('角色提示词');
   check('提示词过长会被截断', resolveSystemPrompt('custom', 'x'.repeat(9000)).length === 4000);
   check('未知角色回落到第一个', getPersona('nope').id === 'default');
 
-  check('标题取首句并截断', deriveTitle('帮我看看这段代码为什么报错啊啊啊啊啊啊啊啊啊啊').length <= 25);
-  check('空内容给出占位标题', deriveTitle('') === '新对话');
-  check('标题去掉换行与引号', deriveTitle('  「你好\n世界」  ') === '你好 世界', deriveTitle('  「你好\n世界」  '));
+  // 标题相关的断言搬去了 test/title-tests.mjs（那里有完整的起名规则）
 
   check('每个内置角色都有名字与说明', PERSONAS.every((p) => p.id && p.name && p.tagline));
   check('内置角色里包含题目要求的几类',
