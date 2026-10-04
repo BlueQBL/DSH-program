@@ -1205,6 +1205,24 @@ group('缺陷回归 · 进入页面默认开新会话');
   check('刷新时不给多余提示', startNotice('reload') === '');
 }
 
+group('会话列表的收放：用户选过就听用户的');
+
+{
+  const { resolveRailVisible } = await loadModule('startup.js');
+
+  check('没存过偏好时：宽屏展开', resolveRailVisible({ narrow: false }) === true);
+  check('没存过偏好时：窄屏收起（一栏列表挤在手机上，正文才是主角）',
+    resolveRailVisible({ narrow: true }) === false);
+  // 这条是这次改动的原因：原来窄屏一律强制收起、而且不记用户的选择，
+  // 于是在宽屏上把列表收起来之后，刷一次页面它又自己弹出来
+  check('存过「收起」→ 听用户的（宽屏也保持收起）',
+    resolveRailVisible({ stored: 'hidden', narrow: false }) === false);
+  check('存过「展开」→ 听用户的（窄屏也保持展开）',
+    resolveRailVisible({ stored: 'shown', narrow: true }) === true);
+  check('脏值当成没存过', resolveRailVisible({ stored: 'maybe', narrow: true }) === false);
+  check('参数缺省也不炸', resolveRailVisible() === true);
+}
+
 // ---------------------------------------------------------------- 汇总
 
 // 把失败项写进文件：变异测试要读它判断「这个缺陷有没有被测到」。

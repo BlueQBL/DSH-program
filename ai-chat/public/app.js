@@ -57,6 +57,7 @@ import {
 import { buildSummaryMessages, compressionPlan, normalizeSummary, summaryLabel } from './lib/compress.js';
 import {
   resolveStartingSession as resolveStartingSessionDecide,
+  resolveRailVisible as resolveRailVisibleDecide,
   shouldCreateSession,
   startNotice,
 } from './lib/startup.js';
@@ -69,6 +70,8 @@ const els = {
   sessionCount: document.getElementById('session-count'),
   sessionTemplate: document.getElementById('session-template'),
   newSession: document.getElementById('new-session-button'),
+  // 列表收起（或窄屏）时，报头上的备用入口
+  newSessionCompact: document.getElementById('new-session-compact'),
   exportAll: document.getElementById('export-all-button'),
 
   modeChip: document.getElementById('mode-chip'),
@@ -141,6 +144,32 @@ function writeModelPreference(model) {
   try {
     if (model) localStorage.setItem(MODEL_PREF_KEY, model);
     else localStorage.removeItem(MODEL_PREF_KEY);
+  } catch {
+    /* 隐私模式下忽略 */
+  }
+}
+
+/**
+ * 会话列表是收起还是展开。
+ *
+ * 存起来，因为它是一次「偏好」而不是临时状态：收起之后每次刷新又自己弹出来，
+ * 会让人反复去收（原来的行为就是这样）。存的是 'shown' / 'hidden'，
+ * 没存过就交给 resolveRailVisible 按屏幕宽度决定（窄屏默认收起）。
+ */
+const RAIL_PREF_KEY = 'duitanlu.rail.v1';
+
+function readRailPreference() {
+  try {
+    const saved = localStorage.getItem(RAIL_PREF_KEY);
+    return saved === 'shown' || saved === 'hidden' ? saved : '';
+  } catch {
+    return '';
+  }
+}
+
+function writeRailPreference(visible) {
+  try {
+    localStorage.setItem(RAIL_PREF_KEY, visible ? 'shown' : 'hidden');
   } catch {
     /* 隐私模式下忽略 */
   }
@@ -2167,9 +2196,21 @@ els.exportAll.addEventListener('click', () => {
 
 // ---------------------------------------------------------------- 会话栏开关
 
+/**
+ * 收起 / 展开会话列表。
+ *
+ * 三件事一起做，少一件都会让人困惑：
+ *  · 列表那一栏显不显示（`.board[data-rail]`）；
+ *  · 图标开关自己长什么样（`data-state` 让图标镜像一下，指向列表在哪边）；
+ *  · **备用入口露不露**：新建会话的主按钮在列表里，列表收起来了就得在报头上留一个，
+ *    否则用户收起来之后就没地方开新对话了。
+ */
 function setRailVisible(visible) {
   els.board.dataset.rail = visible ? 'shown' : 'hidden';
   els.sidebarToggle.setAttribute('aria-expanded', String(visible));
+  els.sidebarToggle.dataset.state = visible ? 'shown' : 'hidden';
+  if (els.newSessionCompact) els.newSessionCompact.hidden = visible;
+  writeRailPreference(visible);
 }
 
 els.sidebarToggle.addEventListener('click', () => {
@@ -2209,6 +2250,8 @@ function startNewSession({ announce = false } = {}) {
 }
 
 els.newSession.addEventListener('click', () => startNewSession({ announce: true }));
+// 列表收起时的备用入口，做的是同一件事
+els.newSessionCompact?.addEventListener('click', () => startNewSession({ announce: true }));
 
 // ---------------------------------------------------------------- 事件委托
 
@@ -2459,8 +2502,13 @@ async function boot() {
   renderComposerQuote();
   setupSpeech();
 
-  // 窄屏默认收起会话栏：它会把正文挤得没法读
-  if (window.matchMedia('(max-width: 1000px)').matches) setRailVisible(false);
+  // 会话列表一开始收不收：用户选过就听他的，没选过才按屏幕宽度决定（见 startup.js）
+  setRailVisible(
+    resolveRailVisibleDecide({
+      stored: readRailPreference(),
+      narrow: window.matchMedia('(max-width: 1000px)').matches,
+    }),
+  );
 
   // 1) 问服务端现在是哪种模式
   try {

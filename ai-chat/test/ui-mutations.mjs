@@ -9,11 +9,12 @@ import { createMutationRunner } from './mutation-harness.mjs';
 
 const APP = 'public/app.js';
 const CSS = 'public/styles.css';
+const HTML = 'public/index.html';
 
 const runner = createMutationRunner({
   label: '界面状态',
   suite: 'test/ui-tests.mjs',
-  files: [APP, CSS],
+  files: [APP, CSS, HTML],
 });
 
 // promptSave 现在分成三条分支（未改动 / 改过预设 / 自定义），每条各自收起面板。
@@ -155,6 +156,65 @@ runner.run('会话列表不再自己滚（会话一多就把页面撑高、压�
 
 runner.run('去掉会话栏的高度上限（列表长到和输入区重叠）', CSS, (src) =>
   src.replace('  max-height: calc(100dvh - var(--masthead-h, 108px) - 32px);', ''),
+);
+
+// ---- 列表收起之后，得留着开新对话的入口（参考 ChatGPT 的图标开关）
+
+runner.run('收起列表时不在报头露出备用入口（收起后就没地方开新对话了）', APP, (src) =>
+  src.replace('  if (els.newSessionCompact) els.newSessionCompact.hidden = visible;', '  void visible;'),
+);
+
+runner.run('收起状态不记住（刷新一次又自己弹出来）', APP, (src) =>
+  src.replace('  writeRailPreference(visible);', '  void visible;'),
+);
+
+runner.run('把收起/展开开关从右端解下来（改成跟着标题走）', CSS, (src) =>
+  src.replace(
+    '.masthead-brand .icon-toggle {\n  position: absolute;',
+    '.masthead-brand .icon-toggle {\n  position: static;',
+  ),
+);
+
+// 把开关从原位剪下来、插到指定锚点前，用来模拟「它又跑回某个位置」。
+// 用 id 定位、再前后找标签边界，不写多行字面量 —— 源码一重排就会静默失配。
+function moveToggle(source, anchor) {
+  const idAt = source.indexOf('id="sidebar-toggle"');
+  if (idAt < 0) return source;
+  const start = source.lastIndexOf('<button', idAt);
+  const end = source.indexOf('</button>', idAt) + '</button>'.length;
+  const tag = source.slice(start, end);
+  const without = source.slice(0, start) + source.slice(end);
+  const at = without.indexOf(anchor);
+  if (at < 0) return source;
+  return `${without.slice(0, at)}${tag}\n          ${without.slice(at)}`;
+}
+
+runner.run('把开关挪回大标题左边（用户说这个最难看）', HTML, (src) =>
+  moveToggle(src, '<div class="masthead-title">'),
+);
+
+runner.run('把开关放回右格（和备用入口、模型框挤在一起，点一下就被推着挪）', HTML, (src) =>
+  moveToggle(src, '<span class="mode-chip"'),
+);
+
+runner.run('报头左格改窄（开关不再对准会话栏和正文之间那道缝）', CSS, (src) =>
+  src.replace(
+    '  grid-template-columns: 292px minmax(0, 1fr);\n  column-gap: 28px;\n  align-items: end;',
+    '  grid-template-columns: 260px minmax(0, 1fr);\n  column-gap: 28px;\n  align-items: end;',
+  ),
+);
+
+runner.run('左格不再是定位祖先（开关会飘到整页右上角去）', CSS, (src) =>
+  // 连同上一行的注释一起换：`position: relative` 在样式表里出现过很多次，
+  // 只有带上这一格的注释才是唯一的靶点。
+  src.replace(
+    '  /* 定位祖先：开关相对这一格钉右端（见下一条） */\n  position: relative;',
+    '  position: static;',
+  ),
+);
+
+runner.run('「新对话」改回黑底实心', CSS, (src) =>
+  src.replace('.rail-new {\n  display: block;', '.rail-new {\n  background: var(--ink);\n  display: block;'),
 );
 
 runner.finish();

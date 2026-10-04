@@ -1502,6 +1502,40 @@ console.log('\n⑭ 布局：会话列表与聊天框各占各的列，互不干�
     /@media \(max-width: 1000px\)[\s\S]*?\.rail\s*\{[\s\S]*?position:\s*static/.test(css));
   check('列表滚到头不会把整页带着滚', /overscroll-behavior:\s*contain/.test(listRule), listRule);
 
+  // 报头左格：大标题 + 钉在这一格右端的开关
+  const brandRule = css.match(/\.masthead-brand\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+  const brandToggleRule = css.match(/\.masthead-brand \.icon-toggle\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+  check('报头左格是一条横向排列的容器', /display:\s*flex/.test(brandRule), brandRule);
+  check('左格不会因为内容长而撑破报头（min-width: 0）', /min-width:\s*0/.test(brandRule));
+  check('左格是定位祖先（开关要相对它钉右端，否则会飘到整页去）',
+    /position:\s*relative/.test(brandRule), brandRule);
+  check('开关钉在左格右端（绝对定位 + right: 0），不是跟在标题后面',
+    /position:\s*absolute/.test(brandToggleRule) && /right:\s*0/.test(brandToggleRule),
+    brandToggleRule);
+  check('开关脱离文档流（标题进紧凑态、字号变小也推不动它）',
+    !/position:\s*static/.test(brandToggleRule), brandToggleRule);
+
+  // 报头第一行和 .board 一样是两格：列宽和缝必须逐字一致，
+  // 否则开关就落不到「正文左边缘的左边一点」那个位置上了。
+  const mastheadCols = css.match(/\.masthead\s*\{[\s\S]*?\n\}/)?.[0].match(/grid-template-columns:[^;]+;/)?.[0] ?? '';
+  const boardCols = boardRule.match(/grid-template-columns:[^;]+;/)?.[0] ?? '';
+  check('报头第一行也是两格（会话栏一格 + 正文一格）',
+    /grid-template-columns:\s*292px\s+minmax\(0,\s*1fr\)/.test(mastheadCols), mastheadCols);
+  check('报头两格的列宽和 .board 逐字一致（改一处就得改另一处）',
+    mastheadCols === boardCols && mastheadCols !== '', `${mastheadCols} / ${boardCols}`);
+  check('两处的缝也一样宽', /column-gap:\s*28px/.test(css.match(/\.masthead\s*\{[\s\S]*?\n\}/)?.[0] ?? ''));
+  check('右格贴右边缘（模型框还在页面最右边，不是停在正文左边）',
+    /justify-content:\s*flex-end/.test(css.match(/\.masthead-tools\s*\{[\s\S]*?\n\}/)?.[0] ?? ''));
+  check('副标题不换行（换行会把报头顶高，整页跟着跳）',
+    /white-space:\s*nowrap/.test(css.match(/\.masthead-title p\s*\{[\s\S]*?\n\}/)?.[0] ?? ''));
+
+  // 「新对话」用描边的淡样式，不是黑底实心
+  const railNewRule = css.match(/\.rail-new\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+  check('「新对话」不是黑底实心按钮',
+    !/background:\s*var\(--ink\)/.test(railNewRule) && !/background:\s*var\(--accent\)/.test(railNewRule),
+    railNewRule.slice(0, 100));
+  check('它仍然占满会话栏的宽度（是这一栏的主入口）', /width:\s*100%/.test(railNewRule));
+
   // 会话多了之后，新建/切换到的会话可能停在可视区外 —— 要主动滚一下。
   // 替身里「列表元素」就是按选择器缓存的那个占位元素，app 对谁调了 scrollIntoView，
   // 测试就从同一个选择器把它取回来查（这正是那处缓存的意义）。
@@ -1511,6 +1545,64 @@ console.log('\n⑭ 布局：会话列表与聊天框各占各的列，互不干�
   await new Promise((r) => setTimeout(r, 60));
   check('新建会话后把当前会话滚进可视区（列表很长时才看得见）',
     activeStub.__scrolledIntoView === true);
+
+  // ---- 新建会话在会话列表里；收起/展开是一个图标开关（参考 ChatGPT）
+  const mastheadBlock = sliceBlock(html, '<header class="masthead">', 'header');
+  const brandBlock = sliceBlock(html, '<div class="masthead-brand">', 'div');
+  const toolsBlock = sliceBlock(html, '<div class="masthead-tools">', 'div');
+  check('新建会话按钮在会话列表里（它就是从那儿生出来的）',
+    railBlock.includes('id="new-session-button"'));
+  check('新建会话不再是黑底实心按钮（用描边的淡样式）',
+    /class="ghost-button rail-new"[^>]*id="new-session-button"/.test(railBlock), railBlock.slice(0, 0) + '找的是 ghost-button rail-new');
+  check('报头里不再重复放一个主入口，只留收起时的备用入口',
+    !mastheadBlock.includes('id="new-session-button"') && mastheadBlock.includes('id="new-session-compact"'));
+  check('收起/展开是图标开关（内联 SVG，没有任何图标字体）',
+    /id="sidebar-toggle"[\s\S]{0,500}<svg/.test(mastheadBlock));
+  check('它不再是一行字', !/对话列表<\/button>/.test(mastheadBlock), mastheadBlock.slice(0, 120));
+  check('没有文字也要说得清自己是什么（aria-label + title）',
+    /aria-label="收起或展开会话列表"/.test(mastheadBlock) && /title="收起 \/ 展开会话列表"/.test(mastheadBlock));
+
+  // 开关在左格、模型框在右格：一个钉在左格右端，一个钉在页面右端，互不推动
+  check('切得出报头左格（.masthead-brand）', brandBlock.includes('id="sidebar-toggle"'));
+  check('开关不在右格（否则右侧一多出按钮，它就被推着挪）',
+    !toolsBlock.includes('id="sidebar-toggle"'));
+  check('开关写在大标题后面（不再压在大标题左边 —— 那一条最难看的）',
+    brandBlock.indexOf('<h1>') >= 0 &&
+      brandBlock.indexOf('<h1>') < brandBlock.indexOf('id="sidebar-toggle"'),
+    brandBlock.slice(0, 160));
+  check('模型框在右格里，并且在最后一位（右边缘钉死，不会跟着挪）',
+    toolsBlock.includes('id="mode-chip"') &&
+      toolsBlock.indexOf('id="mode-chip"') > toolsBlock.indexOf('id="new-session-compact"'),
+    toolsBlock.slice(0, 200));
+  check('窄屏（≤1000px）把开关放回标题旁边（窄屏没有左右两格可对，钉右端会孤零零挂在最右边）',
+    /@media \(max-width: 1000px\)[\s\S]*?\.masthead-brand \.icon-toggle\s*\{[\s\S]*?position:\s*static/.test(css));
+  check('窄屏报头也只剩一栏（和 .board 用同一个断点，两边列数始终一致）',
+    /@media \(max-width: 1000px\)[\s\S]*?\.masthead\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\)/.test(css));
+
+  const toggle = getEl('sidebar-toggle');
+  const compactNew = getEl('new-session-compact');
+  const board = getEl('board');
+  check('默认是展开的（宽屏、又没存过偏好）', board.dataset.rail === 'shown', String(board.dataset.rail));
+
+  dispatch(toggle, 'click');
+  check('点图标收起列表', board.dataset.rail === 'hidden', String(board.dataset.rail));
+  check('图标跟着翻面（指向列表在哪边）', toggle.dataset.state === 'hidden', String(toggle.dataset.state));
+  check('收起后报头露出备用入口（否则就没地方开新对话了）', compactNew.hidden === false);
+  check('aria-expanded 如实反映状态', toggle.getAttribute('aria-expanded') === 'false');
+  check('这个选择被记住了（刷新后不会自己弹回来）',
+    storage.get('duitanlu.rail.v1') === 'hidden', String(storage.get('duitanlu.rail.v1')));
+
+  // 备用入口做的是同一件事
+  const sessionsBefore = JSON.parse(storage.get('duitanlu.sessions.v2')).sessions.length;
+  dispatch(compactNew, 'click');
+  await new Promise((r) => setTimeout(r, 60));
+  const sessionsAfter = JSON.parse(storage.get('duitanlu.sessions.v2')).sessions.length;
+  check('收起状态下的备用入口也能开新对话', sessionsAfter >= sessionsBefore, `${sessionsBefore} → ${sessionsAfter}`);
+
+  dispatch(toggle, 'click');
+  check('再点一次展开', board.dataset.rail === 'shown', String(board.dataset.rail));
+  check('展开后备用入口又藏起来（不重复摆两个）', compactNew.hidden === true);
+  check('展开也被记住了', storage.get('duitanlu.rail.v1') === 'shown', String(storage.get('duitanlu.rail.v1')));
 }
 
 console.log(`\n${'─'.repeat(52)}`);

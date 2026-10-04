@@ -34,3 +34,20 @@ export function startNotice(reason) {
   if (reason === 'recover') return '上次有一轮没写完，已停在那个会话';
   return '';
 }
+
+/**
+ * 会话列表一开始是收起还是展开。
+ *
+ * 规则：**用户选过就听用户的**；没选过才按屏幕宽度猜（窄屏默认收起 ——
+ * 一栏列表挤在手机上说不上话，正文才是主角）。
+ * 之前是「窄屏一律强制收起」、而且不记用户的选择，于是在宽屏上把列表收起来之后，
+ * 刷一次页面它又自己弹出来，得反复去收 —— 那是把偏好当成了临时状态。
+ *
+ * @param {{stored?: string, narrow?: boolean}} state
+ * @returns {boolean} 是否展开
+ */
+export function resolveRailVisible({ stored = '', narrow = false } = {}) {
+  if (stored === 'shown') return true;
+  if (stored === 'hidden') return false;
+  return !narrow;
+}

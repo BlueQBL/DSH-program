@@ -177,6 +177,25 @@ body::before {
   border-bottom: 1px solid var(--rule);
 }
 
+/* 「新对话」在会话列表头上：占满这一栏，但用描边的淡样式 ——
+   它天天在那儿，实心黑块在这一列里太抢眼（用户反馈：用背景色就行）。
+   悬停时才浮出一层底色，仍然看得出是能点的。 */
+.rail-new {
+  display: block;
+  width: 100%;
+  margin-top: 18px;
+  padding: 8px 12px;
+  text-align: center;
+  color: var(--ink-soft);
+}
+.rail-new:hover {
+  color: var(--ink);
+}
+/* 上面那个按钮自己带间距，头部就不用再留那么多了 */
+.rail-new + .rail-head {
+  padding-top: 16px;
+}
+
 .rail-title {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -601,11 +620,16 @@ body::before {
   margin-top: -40px;
   padding-top: 40px;
   z-index: 4; /* 要高于侧栏（3）和输入区（2），否则滚起来会被压住 */
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 20px;
-  flex-wrap: wrap;
+  /*
+   * 报头第一行分成两格，列宽和下面 .board 的列宽**一模一样**（292px 的会话栏 + 28px 的缝）：
+   * 左格对着会话栏，右格对着正文。这一行于是成了「会话栏的顶栏 + 正文的顶栏」，
+   * 收起/展开开关就钉在左格的右端 —— 会话栏和正文之间那道缝的左边一点。
+   * 两处的列宽必须一致，改一个就得改另一个（test/ui-tests.mjs ⑭ 盯着这条）。
+   */
+  display: grid;
+  grid-template-columns: 292px minmax(0, 1fr);
+  column-gap: 28px;
+  align-items: end;
   padding-bottom: 14px;
   border-bottom: 2px solid var(--ink);
   background: color-mix(in srgb, var(--paper) 88%, transparent);
@@ -652,8 +676,15 @@ body::before {
 .masthead-title p {
   margin: 6px 0 0;
   font-size: 12.5px;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.12em;
   color: var(--ink-soft);
+  /*
+   * 这一格只有 292px（和会话栏同宽），这句话比它略宽一点点。
+   * 不许换行：一换行这一格就高一截、报头跟着变高，而报头高度是会话栏吸顶偏移的依据
+   * （见 .masthead 里那段关于抖动的说明）。略微溢出的部分会落进右边那道 28px 的缝里，
+   * 看不见 —— 那道缝本来就是留白的。
+   */
+  white-space: nowrap;
 }
 
 /* 紧凑态：标题缩小、副标题收起 —— 按钮和「对话列表」必须留着，那是固定的意义所在 */
@@ -666,11 +697,29 @@ body::before {
   display: none;
 }
 
+/* 报头左格：大标题 + 钉在这一格右端的开关。
+   这一格和会话栏同宽（见 .masthead 的列宽），所以开关正好落在正文左边缘的左边一点。 */
+.masthead-brand {
+  /* 定位祖先：开关相对这一格钉右端（见下一条） */
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.masthead-brand .masthead-title {
+  min-width: 0;
+}
+
+/* 报头右格：收起时的备用入口在前、**模型框在后**，整组贴着右边缘。
+   右对齐 + 模型框排最后 = 模型框的右边缘是钉死的，备用入口从它左边长出来，
+   这两个谁出现谁消失都不会把模型框推走。 */
 .masthead-tools {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
   flex-wrap: wrap;
+  min-width: 0;
 }
 
 .mode-chip {
@@ -687,6 +736,44 @@ body::before {
   color: var(--ink-soft);
   background: var(--paper-lift);
   white-space: nowrap;
+}
+
+/* 会话列表的收起 / 展开：一个方形图标按钮，不用任何图标字体 */
+.icon-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.icon-toggle:hover {
+  color: var(--ink);
+  border-color: var(--rule-strong);
+}
+.icon-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* 收起时把图标整体镜像：左边那一栏翻到右侧，指向「列表在那边」 */
+.icon-toggle[data-state="hidden"] svg {
+  transform: scaleX(-1);
+}
+
+/* 开关钉在报头左格的右端（那一格与会话栏同宽，所以它就在正文左边缘的左边一点）。
+   用绝对定位是为了让它彻底脱离标题的宽度 —— 标题进紧凑态、字号变小也推不动它。
+   「点收起/展开」和「往下滚进紧凑态」这两件事都不会让它挪窝。 */
+.masthead-brand .icon-toggle {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
 }
 
 .mode-dot {
@@ -1790,6 +1877,20 @@ body::before {
   .board {
     grid-template-columns: minmax(0, 1fr);
   }
+  /* 报头跟着变成一栏（同一处断点，两边的列数始终一致）。
+     窄屏上「左格对着会话栏、右格对着正文」这层对应关系不存在了，
+     把开关钉在左边那格的右端会变成孤零零挂在报头最右边，于是让它回到标题旁边。 */
+  .masthead {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 10px;
+  }
+  .masthead-brand {
+    position: static;
+  }
+  .masthead-brand .icon-toggle {
+    position: static;
+    transform: none;
+  }
   /* 窄屏把会话栏改成正文上方的一段，不再占一整列 */
   .rail {
     position: static;
@@ -1821,7 +1922,7 @@ body::before {
     display: none;
   }
   .masthead {
-    align-items: flex-start;
+    align-items: start;
   }
   /* 窄屏上副标题一直收起：固定报头在手机上占地太宝贵 */
   .masthead-title p {
