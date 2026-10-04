@@ -40,6 +40,7 @@ import {
   editHint,
   buildRequestHistory,
 } from './lib/versions.js';
+import { hasQuote, quoteFromSelection, quoteLabel, quotePreview } from './lib/quote.js';
 import {
   resolveStartingSession as resolveStartingSessionDecide,
   shouldCreateSession,
@@ -96,6 +97,12 @@ const els = {
   attachmentTemplate: document.getElementById('attachment-template'),
   voiceButton: document.getElementById('voice-button'),
 
+  composerQuote: document.getElementById('composer-quote'),
+  composerQuoteLabel: document.getElementById('composer-quote-label'),
+  composerQuoteText: document.getElementById('composer-quote-text'),
+  composerQuoteRemove: document.getElementById('composer-quote-remove'),
+  quoteFloat: document.getElementById('quote-float'),
+
   exportButton: document.getElementById('export-button'),
   exportPopup: document.getElementById('export-popup'),
 };
@@ -136,6 +143,8 @@ const runtime = {
   availableModels: [],
   chosenModel: readModelPreference(),
   pendingImages: [],
+  /** 待发送的引用（在回答里划中一段），发送后清空 */
+  pendingQuote: null,
   exportAll: false,
   pendingDelete: null,
   speech: null,
@@ -247,6 +256,7 @@ function flashHint(text, ms = 2200) {
 function defaultHint() {
   if (runtime.listening) return '正在听…再点一次「结束」';
   if (runtime.busy) return '正在生成…按 Esc 可以停下来';
+  if (hasQuote(runtime.pendingQuote)) return '已引用一段回答，接着说你的问题 · Enter 发送';
   return 'Enter 发送 · Shift + Enter 换行';
 }
 
@@ -345,6 +355,8 @@ function onViewportChange() {
   try {
     updateMastheadHeight();
     updatePinned();
+    // 引用浮标是按屏幕坐标摆的，页面一滚它就会停在原地和选区错开
+    hideQuoteFloat();
   } finally {
     handlingViewport = false;
   }
@@ -669,6 +681,9 @@ function buildTurnNode(message, number) {
   node.__answerVersion = frag.querySelector('[data-field="answer-version"]');
   node.__questionBody = frag.querySelector('[data-field="question"]');
   node.__questionImages = frag.querySelector('[data-field="question-images"]');
+  node.__questionQuote = frag.querySelector('[data-field="question-quote"]');
+  node.__questionQuoteLabel = frag.querySelector('[data-field="question-quote-label"]');
+  node.__questionQuoteText = frag.querySelector('[data-field="question-quote-text"]');
   node.__askedAt = frag.querySelector('[data-field="asked-at"]');
   node.__userTag = frag.querySelector('[data-field="user-tag"]');
   node.__versionBar = frag.querySelector('[data-field="question-versions"]');
@@ -733,6 +748,18 @@ function paintTurn(node) {
     node.__askedAt.textContent = formatClock(qv.createdAt);
     node.__questionBody.textContent = qv.content ?? '';
     node.__questionBody.hidden = !qv.content;
+
+    // 这一问引用了回答里的哪一段。引用跟着版本走：翻回旧的一页，
+    // 看到的就是当时引的那段，而不是最新版引的内容。
+    const quote = qv.quote;
+    const quoting = hasQuote(quote);
+    node.__questionQuote.hidden = !quoting;
+    if (quoting) {
+      node.__questionQuoteLabel.textContent = quoteLabel(quote);
+      node.__questionQuoteText.textContent = quote.truncated ? `${quote.text}\n…` : quote.text;
+      // 正文里最多显示六行（见 styles.css 的 .turn-quote-text），完整原文放在悬停提示里
+      node.__questionQuote.title = quote.text;
+    }
 
     const images = qv.attachments ?? [];
     node.__questionImages.hidden = images.length === 0;
@@ -840,6 +867,8 @@ function renderAll() {
 /** 切会话：提示词框必须换成新会话的内容 */
 function renderAfterSessionSwitch() {
   forcePromptText = true;
+  // 挂着的引用属于上一个会话里的一段回答，换会话后它已经没有出处了
+  setPendingQuote(null);
   renderAll();
 }
 
@@ -995,6 +1024,177 @@ els.composer.addEventListener('drop', async (event) => {
   await addImages(files);
 });
 
+// ---------------------------------------------------------------- 引用回答
+//
+// 在回答里划中一段 → 选区旁边浮出「引用这段」→ 点它，那段话就挂到输入框上方，
+// 你接着问的问题会带着它一起发给模型（见 lib/quote.js 与 lib/versions.js）。
+//
+// 三个刻意的取舍：
+//  1. **只认回答那一侧**。提问也可以划，但「引用」的语义是「引用它说过的话」；
+//     允许引用自己的提问没有意义，还会让「引的是谁」变得含糊。
+//  2. **不动用户的选择**：浮标按钮出现在选区旁边，点之前不改变任何东西，
+//     用户想用浏览器自带的复制也照常能用。
+//  3. **引用挂在输入区，不直接发送**。它只是一段待发送的上下文，
+//     用户还要说自己想问什么 —— 点一下就直接发出去会很意外。
+
+/** 选中的文字落在哪条回答的正文里；不在回答里返回 null */
+function answerBodyOf(node) {
+  const el = node?.nodeType === 1 ? node : node?.parentElement;
+  const body = el?.closest?.('.turn-body') ?? null;
+  if (!body) return null;
+  return body.closest('.turn-assistant') ? body : null;
+}
+
+/** 这段引用来自哪条消息、第几页（用户可能正停在旧的一页上） */
+function quoteSourceOf(body) {
+  const node = body?.closest?.('.exchange') ?? null;
+  const id = node?.dataset?.id ?? null;
+  const message = id ? store.messages.find((m) => m.id === id) : null;
+  if (!message) return { page: 1, messageId: id };
+
+  const index = store.messages.indexOf(message);
+  const question = store.messages[index - 1];
+  const page = question ? resolveShownPage(question, store.viewVersion(question)) : 1;
+  return { page, messageId: message.id };
+}
+
+function currentSelection() {
+  return globalThis.getSelection?.() ?? document.getSelection?.() ?? null;
+}
+
+/** 当前选区够不够格当引用；够的话连它的位置一起返回 */
+function readSelectionQuote() {
+  const selection = currentSelection();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return null;
+
+  const range = selection.getRangeAt(0);
+  const body = answerBodyOf(range.commonAncestorContainer ?? selection.anchorNode);
+  const quote = quoteFromSelection({
+    text: selection.toString(),
+    inAnswer: Boolean(body),
+    ...quoteSourceOf(body),
+  });
+  if (!quote) return null;
+
+  return { quote, rect: range.getBoundingClientRect?.() ?? null };
+}
+
+function hideQuoteFloat() {
+  if (els.quoteFloat) els.quoteFloat.hidden = true;
+}
+
+/**
+ * 浮标出现时那一段引用。
+ *
+ * **点击时绝不能再读一次选区**：按下去这个动作本身就会把浏览器的选区清掉，
+ * 那时再读只会拿到空字符串 —— 功能会直接失效，而且看起来像「点了没反应」。
+ * 所以引用在「浮标出现」的那一刻就存下来，点击只是取用它。
+ */
+let floatQuote = null;
+
+/**
+ * 把浮标按钮放到选区旁边。
+ * 先取消隐藏再量尺寸 —— 隐藏的元素量出来是 0，位置会算错。
+ */
+function placeQuoteFloat(rect) {
+  const button = els.quoteFloat;
+  if (!button || !rect) return;
+  button.hidden = false;
+
+  const size = button.getBoundingClientRect?.() ?? { width: 0, height: 0 };
+  const vw = window.innerWidth || 0;
+  const vh = window.innerHeight || 0;
+  const width = size.width || 0;
+  const height = size.height || 0;
+  const gap = 10;
+
+  const anchor = rect.left + rect.width / 2 - width / 2;
+  const left = Math.max(8, Math.min(anchor, vw - width - 8));
+  // 优先浮在选区上方；上面放不下就落到下面
+  const above = rect.top - height - gap;
+  const top = above > 8 ? above : rect.bottom + gap;
+
+  button.style.left = `${Math.round(left)}px`;
+  button.style.top = `${Math.round(Math.max(8, Math.min(top, vh - height - 8)))}px`;
+}
+
+function refreshQuoteFloat() {
+  const found = readSelectionQuote();
+  // 选区分明在、只是在提问那一侧（或者已经空了）→ 一并把上一次的候选清掉，
+  // 免得留下一个「已经不该引用」的旧值等着被点
+  floatQuote = found ? found.quote : null;
+  if (!found) {
+    hideQuoteFloat();
+    return;
+  }
+  placeQuoteFloat(found.rect);
+}
+
+/** 把一段引用挂到输入区（发送前一直留着） */
+function setPendingQuote(quote) {
+  runtime.pendingQuote = hasQuote(quote) ? quote : null;
+  renderComposerQuote();
+  updateSendState();
+  els.hint.textContent = defaultHint();
+}
+
+function renderComposerQuote() {
+  const quote = runtime.pendingQuote;
+  const show = hasQuote(quote);
+  els.composerQuote.hidden = !show;
+  if (!show) {
+    els.composerQuoteLabel.textContent = '';
+    els.composerQuoteText.textContent = '';
+    els.composerQuote.title = '';
+    return;
+  }
+  // 截断了要说一声：不然用户会以为引用条显示的是全部
+  els.composerQuoteLabel.textContent = quote.truncated
+    ? `${quoteLabel(quote)} · 过长，只带上前面一段`
+    : quoteLabel(quote);
+  els.composerQuoteText.textContent = quote.text;
+  els.composerQuote.title = quotePreview(quote, 80);
+}
+
+/**
+ * 选区变化。
+ *
+ * 用 selectionchange + 防抖：拖动选择的过程中这个事件会连着来几十次，
+ * 每次都去量位置会让拖动发涩。等手停下来再算一次就够。
+ */
+let quoteFloatTimer = null;
+document.addEventListener('selectionchange', () => {
+  clearTimeout(quoteFloatTimer);
+  quoteFloatTimer = setTimeout(() => {
+    quoteFloatTimer = null;
+    refreshQuoteFloat();
+  }, 120);
+});
+
+// 按下就先拦掉默认行为：不让这次点击把浏览器的选区清掉。
+// 这样即使后面还有别的路径要读选区，也仍然读得到。
+els.quoteFloat.addEventListener('pointerdown', (event) => event.preventDefault());
+
+els.quoteFloat.addEventListener('click', () => {
+  // 用浮标出现时存下的那段，**不**重读选区（点击已经把它清掉了）
+  const quote = floatQuote;
+  floatQuote = null;
+  hideQuoteFloat();
+  if (!hasQuote(quote)) return;
+
+  setPendingQuote(quote);
+  // 选中的高亮收掉：引用已经落到输入区，留在正文里会让人以为还能再点一次
+  currentSelection()?.removeAllRanges?.();
+  els.input.focus();
+  flashHint('已引用这一段，接着说你的问题', 2600);
+});
+
+els.composerQuoteRemove.addEventListener('click', () => {
+  setPendingQuote(null);
+  els.input.focus();
+  flashHint('已取消引用', 1800);
+});
+
 // ---------------------------------------------------------------- 语音输入
 
 /** 每次开始识别都新建一个会话：SpeechRecognition 实例不能重用同一个 onend 状态 */
@@ -1104,8 +1304,14 @@ async function send(rawText, { edit = null, version = null, reuse = false } = {}
   const images = [...runtime.pendingImages];
   if ((!text && !images.length) || runtime.busy) return;
 
+  // 引用只跟着**新提问**走。编辑和重新生成动的是「原来那一问」，
+  // 那一问引用了什么早已存进它自己的版本里（见 store.pushUser），
+  // 这时再套上输入区里挂着的引用就串了。
+  const quote = edit ? null : runtime.pendingQuote;
+
   els.input.value = '';
   runtime.pendingImages = [];
+  if (quote) setPendingQuote(null);
   renderAttachments();
   autoGrow();
   updateSendState();
@@ -1113,7 +1319,7 @@ async function send(rawText, { edit = null, version = null, reuse = false } = {}
   // 编辑重发时，被编辑的位置之后的所有轮次在新一页里不再适用（那一页只到这次问答为止）。
   // 但因为我们是「追加版本」而不是「替换」，旧页仍然完整保留，所以这里不需要删任何东西。
 
-  const asked = store.pushUser(text, { attachments: images, edit, version, reuse });
+  const asked = store.pushUser(text, { attachments: images, edit, version, reuse, quote });
   const question = asked.message;
   const versionNumber = asked.version;
   store.renameFromFirstMessage();
@@ -1427,6 +1633,8 @@ els.confirmClear.addEventListener('click', () => {
 
   runtime.liveTurn = null;
   runtime.renderNode = null;
+  // 清空之后，挂着的引用已经没有出处了
+  setPendingQuote(null);
   renderAll();
   setBusy(false);
   els.input.focus();
@@ -1450,7 +1658,9 @@ document.addEventListener('click', (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && !els.exportPopup.hidden) {
+  if (event.key !== 'Escape') return;
+  if (!els.quoteFloat.hidden) hideQuoteFloat();
+  if (!els.exportPopup.hidden) {
     els.exportPopup.hidden = true;
     els.exportButton.setAttribute('aria-expanded', 'false');
   }
@@ -1708,6 +1918,7 @@ async function boot() {
   setBusy(false);
   autoGrow();
   renderAttachments();
+  renderComposerQuote();
   setupSpeech();
 
   // 窄屏默认收起会话栏：它会把正文挤得没法读

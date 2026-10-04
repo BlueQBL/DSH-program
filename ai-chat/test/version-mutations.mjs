@@ -169,10 +169,9 @@ run('buildRequestHistory 丢掉旧版本对应的回答', VERSIONS, (src) =>
 );
 
 run('buildRequestHistory 把图片也塞给历史消息', VERSIONS, (src) =>
-  src.replace(
-    "    history.push({ role: m.role, content: versionText(current), images: [] });",
-    "    history.push({ role: m.role, content: versionText(current), images: versionImages(current) });",
-  ),
+  // 目标是**单行、无转义**的一段：照抄多行字面量的替换很脆，
+  // 引用功能调整过这里的写法之后就静默失配过一次
+  src.replace('    const images = [];', '    const images = versionImages(current);'),
 );
 
 // ---- 复制反馈（用户反馈：点了复制看不出成功）
@@ -206,6 +205,11 @@ run('失败时不给补救提示（用户不知道怎么手动复制）', COPY_F
 const restored = restoreAll();
 if (existsSync(SENTINEL)) unlinkSync(SENTINEL);
 if (existsSync(RESULT)) unlinkSync(RESULT);
+
+// 变异那一轮会把「改坏过的源码跑出来的断言数」写进 .tmp-mutations/counts.json，
+// 留着会让 readme-tests 报出「文档写 267，实际 265」这种莫名其妙的失败。
+// 所以还原之后再干净地跑一遍。
+if (restored) spawnSync(process.execPath, ['test/store-tests.mjs'], { stdio: 'ignore' });
 
 console.log('');
 console.log(restored ? '已还原源码（内容与开工时快照一致）' : '⚠ 还原后内容与快照不一致，请手动检查');

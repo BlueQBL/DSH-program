@@ -209,10 +209,39 @@ run('删掉报头的滚动锚定抑制', CSS, (src) =>
   src.replace('  overflow-anchor: none;\n', ''),
 );
 
+// ---- 引用回答（用户提出：回答里的一段可以划出来引用，接着问）
+//
+// 这条盯的是一个真实浏览器行为：按下浮标按钮本身就会清掉文档选区。
+// 所以「引用」必须在浮标出现时就存下来 —— 点的时候再读选区只会读到空字符串，
+// 表现是「点了没反应」，而且本地很难想到是这个原因。
+
+run('点引用时重读选区（按钮按下已清空选区，会导致点了没反应）', APP, (src) =>
+  src.replace('  const quote = floatQuote;', '  const quote = readSelectionQuote()?.quote ?? null;'),
+);
+
+run('把引用只挂进输入区、不随提问发出去', APP, (src) =>
+  src.replace(
+    "  const asked = store.pushUser(text, { attachments: images, edit, version, reuse, quote });",
+    '  const asked = store.pushUser(text, { attachments: images, edit, version, reuse });',
+  ),
+);
+
+run('点「重新生成」时把输入区挂着的引用一并吃掉', APP, (src) =>
+  // 注意：这条不是「引用会串到旧那一问」——那一层由 store 守着（编辑/重生成时它
+  // 一律忽略传进来的 quote，store-tests 有断言）。这里守的是**更轻但用户能看见**的一半：
+  // 重试不该把用户刚挑好的那段引用顺手清掉。
+  src.replace('  const quote = edit ? null : runtime.pendingQuote;', '  const quote = runtime.pendingQuote;'),
+);
+
 // 最后再整体还原一次（每个变异之后已经还原过了，这里是双保险）
 const restored = restoreAll();
 if (existsSync(SENTINEL)) unlinkSync(SENTINEL);
 if (existsSync(RESULT)) unlinkSync(RESULT);
+
+// 变异那一轮会把「改坏过的源码跑出来的断言数」写进 .tmp-mutations/counts.json，
+// 留着会让 readme-tests 报出「文档写 90，实际 86」这种莫名其妙的失败。
+// 所以还原之后再干净地跑一遍。
+if (restored) spawnSync(process.execPath, ['test/ui-tests.mjs'], { stdio: 'ignore' });
 
 console.log('');
 console.log(restored ? '已还原源码（内容与开工时快照一致）' : '⚠ 还原后内容与快照不一致，请手动检查');

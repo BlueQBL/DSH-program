@@ -18,6 +18,7 @@
 // 流式中的半截文本也照样落盘，所以刷新后能看到「写到哪里断的」，而不是整条消息消失。
 
 import { DEFAULT_PERSONA_ID, deriveTitle, resolveSystemPrompt } from './personas.js';
+import { normalizeQuote } from './quote.js';
 
 const STORAGE_KEY = 'duitanlu.sessions.v2';
 const LEGACY_KEY = 'duitanlu.conversation.v1';
@@ -92,6 +93,9 @@ function normalizeVersion(raw, fallbackContent = '', fallbackAttachments = []) {
       .map(normalizeAttachment)
       .filter(Boolean)
       .slice(0, MAX_IMAGES_PER_MESSAGE),
+    // 引用只在用户消息上：它属于「这一次提问」，所以跟着版本走 ——
+    // 编辑重发时旧版本连它当时引用的那段一起留档，翻回第 1 页看到的还是原样
+    quote: normalizeQuote(raw.quote),
     // 助手回答才有
     finishedAt: Number(raw.finishedAt) || null,
     status: ['done', 'streaming', 'interrupted', 'error'].includes(raw.status) ? raw.status : 'done',
@@ -133,6 +137,7 @@ function normalizeMessage(raw) {
         content: typeof raw.content === 'string' ? raw.content : '',
         createdAt: Number(raw.createdAt) || Date.now(),
         attachments,
+        quote: normalizeQuote(raw.quote),
         finishedAt: Number(raw.finishedAt) || null,
         status: ['done', 'streaming', 'interrupted', 'error'].includes(raw.status) ? raw.status : 'done',
         error: typeof raw.error === 'string' ? raw.error : null,
@@ -159,6 +164,7 @@ function normalizeMessage(raw) {
     model: current.model,
     personaId: typeof raw.personaId === 'string' ? raw.personaId : null,
     attachments: current.attachments,
+    quote: current.quote,
   };
 }
 
@@ -185,6 +191,7 @@ function syncFlatFields(message) {
   message.mode = current.mode;
   message.model = current.model;
   message.attachments = current.attachments;
+  message.quote = current.quote;
 }
 
 function normalizeSession(raw) {
@@ -512,20 +519,25 @@ export function createStore() {
      * 用户提问。text 可以为空（纯图片消息）。
      *
      * @param {string} content
-     * @param {{attachments?: object[], edit?: object, version?: number, reuse?: boolean}} options
+     * @param {{attachments?: object[], edit?: object, version?: number, reuse?: boolean, quote?: object|null}} options
      *   `edit` + `version`：编辑后重新回答。**一律追加新版本，绝不覆盖旧版** ——
      *   这是这个功能的全部意义：用户既要看到本次的内容，也要能看到上一次生成的内容。
      *   早先按「改最新一版就原地覆盖」实现，结果旧内容直接丢了，是错的。
      *
      *   `reuse: true`：只把那一版的内容换掉，不新增页。给「重新生成」用 ——
      *   它是「同样的问题再要一次答案」，不该凭空多出一页。
+     *
+     *   `quote`：这一轮引用了回答里的一段（见 lib/quote.js）。只在**新提问**上生效；
+     *   编辑与重新生成都不接受它 —— 那两种动作改的是「问什么」，
+     *   引用属于那一次提问本身，跟着旧版本原样留着。
      */
-    pushUser(content, { attachments = [], edit = null, version = null, reuse = false } = {}) {
+    pushUser(content, { attachments = [], edit = null, version = null, reuse = false, quote = null } = {}) {
       const session = active();
       const cleanAttachments = (attachments ?? [])
         .map(normalizeAttachment)
         .filter(Boolean)
         .slice(0, MAX_IMAGES_PER_MESSAGE);
+      const cleanQuote = normalizeQuote(quote);
       const now = Date.now();
 
       if (edit && Array.isArray(edit.versions) && edit.versions.length) {
@@ -545,11 +557,13 @@ export function createStore() {
           return { message: edit, version: target, replaced: true };
         }
 
-        // 追加新版本；被编辑的是哪一版只记录来源，不影响「旧页保留」这个约定
+        // 追加新版本；被编辑的是哪一版只记录来源，不影响「旧页保留」这个约定。
+        // 引用跟着被编辑的那一版走：用户改的是文字，不是「引用的是哪一段」。
         edit.versions.push({
           content: content ?? '',
           createdAt: now,
           attachments: cleanAttachments,
+          quote: edit.versions[target - 1]?.quote ?? null,
           finishedAt: now,
           status: 'done',
           error: null,
@@ -573,6 +587,7 @@ export function createStore() {
             content: content ?? '',
             createdAt: now,
             attachments: cleanAttachments,
+            quote: cleanQuote,
             finishedAt: now,
             status: 'done',
             error: null,

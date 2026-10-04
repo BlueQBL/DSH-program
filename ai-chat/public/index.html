@@ -118,6 +118,16 @@
         <!-- 待发送的图片 -->
         <ul class="attachment-strip" id="attachment-strip" hidden></ul>
 
+        <!-- 待发送的引用：在回答里划中一段就会出现，发出去后挂在提问上方 -->
+        <div class="composer-quote" id="composer-quote" hidden>
+          <span class="composer-quote-mark" aria-hidden="true">引</span>
+          <div class="composer-quote-main">
+            <span class="composer-quote-label" id="composer-quote-label"></span>
+            <p class="composer-quote-text" id="composer-quote-text"></p>
+          </div>
+          <button type="button" class="composer-quote-remove" id="composer-quote-remove" title="取消引用" aria-label="取消引用">×</button>
+        </div>
+
         <label class="sr-only" for="composer-input">想问什么</label>
         <textarea
           id="composer-input"
@@ -154,6 +164,9 @@
         </p>
       </footer>
     </div>
+
+    <!-- 在回答里划中一段时，出现在选区旁边的「引用这段」 -->
+    <button type="button" class="quote-float" id="quote-float" hidden>引用这段</button>
 
     <!-- 会话列表项 -->
     <template id="session-template">
@@ -194,6 +207,12 @@
                 <button type="button" class="link-button" data-action="edit">编辑</button>
               </span>
             </p>
+            <!-- 这条提问引用了上一条回答里的哪一段 -->
+            <blockquote class="turn-quote" data-field="question-quote" hidden>
+              <span class="turn-quote-mark" aria-hidden="true">引</span>
+              <span class="turn-quote-label" data-field="question-quote-label"></span>
+              <span class="turn-quote-text" data-field="question-quote-text"></span>
+            </blockquote>
             <div class="turn-body" data-field="question"></div>
             <ul class="turn-images" data-field="question-images" hidden></ul>
             <!-- 编辑态：改完可以选择「重新回答」（产生新的一页）或「只改不发」 -->

@@ -2,14 +2,14 @@
 //
 //   node test/readme-tests.mjs
 //
-// 为什么文档也要测：README 里「开发过程中修掉的几个真问题」这一节
-// **被我的大段文本替换失手弄丢过两次**。它载着整个项目的排查记录，
-// 丢了以后光靠肉眼很难发现（README 本身还是完整的、也还能读）。
-//
-// 顺带守住几条「文档说的和代码做的是否一致」：
-//  · 测试数字与真实断言数是否对得上
+// 守住三件事：
+//  · 章节是否齐全，以及 **README 里不许出现「缺陷修复记录」**（这是明确要求：
+//    README 只讲现在是什么样、怎么用、为什么这么设计；排查过程留在代码注释和测试里）
 //  · 文件树里提到的文件是否真的存在
-//  · 关键行为约定有没有被写进文档
+//  · 文档写的断言数是否等于实际跑出来的数
+//
+// 数字一致性刻意不去数字面 `check(` 的调用数：有的断言在条件分支里（只走一条路），
+// 有的在循环里（一次调用产生多条断言）—— 静态数出来的和实际执行的对不上。
 
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
@@ -38,7 +38,7 @@ console.log('文档结构');
 // ---------------------------------------------------------------- 章节完整性
 
 const REQUIRED_SECTIONS = [
-  '## 六个主要功能',
+  '## 七个主要功能',
   '## 运行',
   '## 需求对照',
   '## 结构',
@@ -47,7 +47,6 @@ const REQUIRED_SECTIONS = [
   '## 设计说明',
   '## 已知限制',
   '## 数据与隐私',
-  '## 开发过程中修掉的几个真问题',
 ];
 
 check('README 存在', readme.length > 2000);
@@ -55,16 +54,15 @@ for (const section of REQUIRED_SECTIONS) {
   check(`章节还在：${section.replace('## ', '')}`, readme.includes(section));
 }
 
-// 这一节被弄丢过两次，单独钉死
-const fixesIdx = readme.indexOf('## 开发过程中修掉的几个真问题');
-check('「修掉的问题」章节在文件末尾区域', fixesIdx > readme.length * 0.6,
-  `位置 ${fixesIdx} / ${readme.length}`);
-const fixEntries = (readme.slice(fixesIdx).match(/^\d+\. \*\*/gm) ?? []).length;
-check('「修掉的问题」条目足够多（≥ 25）', fixEntries >= 25, `实际 ${fixEntries} 条`);
-check('没有重复编号', (() => {
-  const nums = [...readme.slice(fixesIdx).matchAll(/^(\d+)\. \*\*/gm)].map((m) => Number(m[1]));
-  return new Set(nums).size === nums.length;
-})());
+// README 不承担缺陷史。这条不是洁癖：一旦把「修过什么」写进来，
+// 它就会不断生长，最后把「这东西现在怎么用」淹没掉。
+// 这条断言同时也是给以后的自己看的 —— 别再往里加。
+const forbiddenHeadings = readme.match(/^#{2,3}.*(修掉的问题|修复记录|缺陷修复|踩过的坑)/m);
+check('README 不写缺陷修复记录（章节层面）', forbiddenHeadings === null,
+  forbiddenHeadings ? `出现了「${forbiddenHeadings[0].trim()}」` : '');
+const forbiddenBlocks = readme.match(/^>.*踩过的坑/m);
+check('README 不写缺陷修复记录（引用块层面）', forbiddenBlocks === null,
+  forbiddenBlocks ? `出现了「${forbiddenBlocks[0].trim()}」` : '');
 
 // ---------------------------------------------------------------- 数字一致性
 
@@ -82,6 +80,7 @@ const COUNTS_FILE = path.join(ROOT, '.tmp-mutations', 'counts.json');
 const docLines = {
   'run-tests': 'node test/run-tests.mjs',
   'store-tests': 'node test/store-tests.mjs',
+  'quote-tests': 'node test/quote-tests.mjs',
   'ui-tests': 'node test/ui-tests.mjs',
   'verify-upstream-payload': 'node test/verify-upstream-payload.mjs',
 };
@@ -150,6 +149,10 @@ const CONTRACTS = [
   ['新会话角色是通用助手', /通用助手/],
   ['DeepSeek 不支持图片', /DeepSeek 全系不支持图片/],
   ['刷新是开新会话的例外', /刷新是例外/],
+  ['顶部固定且滚动时收窄', /固定在页面顶部[\s\S]{0,400}?自动收窄/],
+  ['引用一段回答接着问（有独立说明）', /### 引用一段回答，接着问/],
+  ['引用只认回答那一侧', /只认回答那一侧/],
+  ['引用不混进用户原话', /库里存的仍然只是你打的那句话|引用是单独一个字段/],
 ];
 for (const [name, pattern] of CONTRACTS) {
   check(`文档写明了「${name}」`, pattern.test(readme));

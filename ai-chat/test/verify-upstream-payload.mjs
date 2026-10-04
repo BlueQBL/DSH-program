@@ -14,6 +14,10 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// 用真实的「请求历史构造函数」拼出这一轮：这样「引用」是走完整链路
+// （会话里的消息 → buildRequestHistory → HTTP → 服务端 → 上游）才被验证的，
+// 而不是我在测试里手工拼一段字符串再断言它原样到达。
+import { buildRequestHistory } from '../public/lib/versions.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -143,6 +147,10 @@ async function ask(body) {
   return {
     reply: frames.filter((f) => f.type === 'delta').map((f) => f.text).join(''),
     error: frames.find((f) => f.type === 'error')?.message ?? null,
+    // 原始响应留着：出错时断言的详情里能直接看到服务端到底回了什么，
+    // 否则「reply 为空」这种情况只能靠猜（400 的 JSON 体也是空 reply）
+    status: res.status,
+    raw: text.slice(0, 300),
   };
 }
 
@@ -258,6 +266,39 @@ try {
     check('历史顺序正确',
       msgs[1]?.content === '第一句' && msgs[2]?.content === '第一答' && msgs[3]?.content === '第二句',
       JSON.stringify(msgs.map((m) => m.content)));
+  }
+
+  console.log('\n引用回答：划中的那一段必须真的发给模型');
+  {
+    captured.length = 0;
+    const v = (content, extra = {}) => ({ content, attachments: [], createdAt: 0, ...extra });
+    // 按客户端的真实调用方式搭这一轮：历史里已有一问一答，末尾是这一轮的新提问，
+    // 后面跟一条**空内容**的助手占位消息（它会被跳过 —— 这正是真实流程的样子）
+    const q1 = { role: 'user', versions: [v('先解释一下闭包')] };
+    const a1 = { role: 'assistant', versions: [v('闭包是函数记住它出生时的环境。')] };
+    const q2 = {
+      role: 'user',
+      versions: [v('那第三点再展开讲讲', { quote: { text: '第三，要注意边界情况。', page: 2 } })],
+    };
+    const a2 = { role: 'assistant', versions: [v('')] };
+
+    const res = await ask({
+      sessionId: 'payload_quote',
+      messages: buildRequestHistory([q1, a1, q2, a2], q2, a2),
+    });
+    check('引用这一轮真的得到了回答', res.reply === '收到了。', JSON.stringify(res));
+
+    const hit = await waitForCapture((c) => c.body?.stream !== false);
+    const msgs = hit?.body?.messages ?? [];
+    const userMsg = msgs.at(-1);
+    check('整轮历史按顺序到达（system + 一问一答 + 带引用的提问）', msgs.length === 4, `${msgs.length} 条`);
+    check('引用原文真的到了上游', userMsg?.content?.includes('第三，要注意边界情况。'), String(userMsg?.content));
+    check('引用写成 Markdown 引用块（模型能认出这是转引）', /^> /m.test(userMsg?.content ?? ''));
+    check('引用的出处（第 2 页）也带上了', userMsg?.content?.includes('第 2 页'), String(userMsg?.content));
+    check('用户自己打的问题在引用之后',
+      userMsg?.content?.trimEnd().endsWith('那第三点再展开讲讲'), String(userMsg?.content));
+    check('引用只加在用户消息上，助手的历史回答原样',
+      msgs[2]?.content === '闭包是函数记住它出生时的环境。', String(msgs[2]?.content));
   }
 
   console.log('\n流式参数');

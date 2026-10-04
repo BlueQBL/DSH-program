@@ -6,6 +6,10 @@
 //   纯文本   —— 贴进任何地方都不会带格式噪声
 //
 // 图片只导出文件名与尺寸：base64 写进导出文件会让它大到没法用。
+// 引用（用户划中回答里的一段接着问）在三种格式里都保留 ——
+// 少了它，「这句话在问什么」就读不出来了。
+
+import { hasQuote, quoteLabel } from './quote.js';
 
 const pad = (n) => String(n).padStart(2, '0');
 
@@ -25,6 +29,16 @@ function attachmentNote(attachments) {
   return attachments
     .map((a) => `[图片：${a.name}${a.width ? ` ${a.width}×${a.height}` : ''}]`)
     .join(' ');
+}
+
+/** 引用在文字导出里的表示：一行出处 + 引用块 */
+function quoteLines(quote) {
+  if (!hasQuote(quote)) return [];
+  const body = quote.text
+    .split('\n')
+    .map((line) => (line ? `> ${line}` : '>'))
+    .join('\n');
+  return [`> 【${quoteLabel(quote)}】`, body, ''];
 }
 
 /** 导出为 Markdown */
@@ -57,6 +71,7 @@ export function toMarkdown(session, { exportAll = false, sessions = [] } = {}) {
         turn += 1;
         lines.push(`### ${String(turn).padStart(2, '0')} · 问`, '');
         lines.push(`*${formatStamp(msg.createdAt)}*`, '');
+        lines.push(...quoteLines(msg.quote));
         if (msg.content) lines.push(msg.content, '');
         if (note) lines.push(`> ${note}`, '');
       } else {
@@ -81,7 +96,10 @@ export function toPlainText(session) {
     const note = attachmentNote(msg.attachments);
     if (msg.role === 'user') {
       turn += 1;
-      lines.push(`【问 ${turn}】${msg.content || ''}${note ? ` ${note}` : ''}`);
+      const quoted = hasQuote(msg.quote)
+        ? `（${quoteLabel(msg.quote)}：${msg.quote.text.replace(/\s+/g, ' ')}）`
+        : '';
+      lines.push(`【问 ${turn}】${quoted}${msg.content || ''}${note ? ` ${note}` : ''}`);
     } else {
       lines.push(`【答】${msg.content || ''}`);
       if (msg.error) lines.push(`（出错：${msg.error}）`);
@@ -118,6 +136,11 @@ export function toJson(session, { exportAll = false, sessions = [] } = {}) {
           id: m.id,
           role: m.role,
           content: m.content,
+          // 引用单独一个字段：导入方要的是「用户说了什么」和「他引用了哪一段」两件事，
+          // 拼进 content 就再也分不开了
+          quote: hasQuote(m.quote)
+            ? { text: m.quote.text, page: m.quote.page ?? 1, truncated: Boolean(m.quote.truncated) }
+            : null,
           createdAt: new Date(m.createdAt).toISOString(),
           status: m.status,
           error: m.error ?? null,

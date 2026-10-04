@@ -41,6 +41,8 @@ function makeElement(tag = 'div', attrs = {}) {
     dataset: {},
     style: {},
     children: [],
+    className: attrs.className ?? '',
+    parentElement: null,
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
     attributes: { ...attrs },
     _text: '',
@@ -100,8 +102,28 @@ function makeElement(tag = 'div', attrs = {}) {
     getAttribute(k) {
       return this.attributes[k];
     },
-    closest() {
+    closest(selector) {
+      // 只支持单类选择器（`.turn-body`）和单属性选择器（`[data-action]`）：
+      // app.js 里用到的就是这两种。要判断祖先链，测试会自己把 parentElement 接起来。
+      const want = String(selector ?? '').trim();
+      const attr = /^\[([\w-]+)\]$/.exec(want);
+      const cls = want.startsWith('.') ? want.slice(1) : null;
+      if (!cls && !attr) return null;
+      const key = attr && attr[1].startsWith('data-')
+        ? attr[1].slice(5).replace(/-([a-z])/g, (_m, c) => c.toUpperCase())
+        : null;
+
+      let node = this;
+      while (node) {
+        if (cls && String(node.className ?? '').split(/\s+/).includes(cls)) return node;
+        if (key && node.dataset && node.dataset[key] !== undefined) return node;
+        if (attr && !key && node.attributes && node.attributes[attr[1]] !== undefined) return node;
+        node = node.parentElement ?? null;
+      }
       return null;
+    },
+    getBoundingClientRect() {
+      return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 };
     },
     requestSubmit() {},
     // 模拟给 select 灌选项：app.js 用 createElement + selected 实现
@@ -177,6 +199,11 @@ for (const m of html.matchAll(/id="([^"]+)"/g)) getEl(m[1]);
 // 真实 DOM 里 document.getElementById 不会返回「另一个同 id 的新对象」，
 // 替身如果做不到这点，就会出现「处理器挂在 A 上、测试点到 B 上」这种假失败。
 const created = [];
+/** document 上的监听（selectionchange / keydown 这些），测试可以主动触发 */
+const documentHandlers = [];
+/** 当前假选区：测试设好之后再触发 selectionchange */
+let activeSelection = null;
+
 globalThis.document = {
   getElementById: (id) => getEl(id),
   createElement: (tag) => {
@@ -184,7 +211,8 @@ globalThis.document = {
     created.push(el);
     return el;
   },
-  addEventListener: () => {},
+  addEventListener: (type, fn) => documentHandlers.push({ type, fn }),
+  getSelection: () => activeSelection,
   body: makeElement('body'),
   activeElement: null,
   visibilityState: 'visible',
@@ -215,6 +243,7 @@ globalThis.window = {
   prompt: () => null,
   scrollY: 0,
   innerHeight: 800,
+  innerWidth: 1200,
   location: { href: 'http://localhost/' },
 };
 
@@ -267,6 +296,8 @@ for (const id of ['model-select', 'persona-select']) {
 let upstreamModels = ['deepseek-v3.2', 'gpt-4o', 'gemini-2.5-flash'];
 let configMode = 'model';
 let configDefault = 'deepseek-v3.2';
+/** 最近一次 /api/chat 的请求体：用来验证「引用真的发出去了」 */
+let lastChatBody = null;
 
 globalThis.fetch = async (url, init) => {
   const target = String(url);
@@ -284,6 +315,11 @@ globalThis.fetch = async (url, init) => {
   }
   if (target.includes('/api/history')) {
     return { ok: true, json: async () => ({ turns: [] }) };
+  }
+  if (target.includes('/api/chat')) {
+    lastChatBody = JSON.parse(init?.body ?? '{}');
+    // 故意不给 body：send() 会走「请求失败」分支，正好验证失败路径不会把引用搞丢
+    return { ok: false, json: async () => ({ error: 'stub' }) };
   }
   void init;
   return { ok: true, json: async () => ({}) };
@@ -776,6 +812,171 @@ console.log('\n⑧ 报头固定：滚到任何位置都能开新会话 / 切会�
     !/transition:\s*font-size/.test(css));
   check('报头不做滚动锚定候选（免得这个易出问题的角落再多一个变量）',
     /overflow-anchor:\s*none/.test(mastheadRule));
+}
+
+console.log('\n⑨ 引用回答：划中一段接着问');
+{
+  const settle = () => new Promise((r) => setTimeout(r, 180));
+  const fireDocument = (type, event = {}) => {
+    for (const h of documentHandlers) if (h.type === type) h.fn({ ...event, preventDefault() {} });
+  };
+
+  const quoteFloat = getEl('quote-float');
+  const composerQuote = getEl('composer-quote');
+  const composerQuoteLabel = getEl('composer-quote-label');
+  const composerQuoteText = getEl('composer-quote-text');
+  const input = getEl('composer-input');
+  const hint = getEl('composer-hint');
+
+  // 造一条「回答正文」元素链：.turn-body → .turn-assistant。
+  // 引用的规则是「只认回答那一侧」，所以祖先链必须是真的。
+  const answerBody = makeElement('div');
+  answerBody.className = 'turn-body markdown';
+  const answerTurn = makeElement('div');
+  answerTurn.className = 'turn-assistant';
+  answerBody.parentElement = answerTurn;
+  const answerText = makeElement('span');
+  answerText.parentElement = answerBody;
+
+  const rect = { top: 300, left: 100, width: 200, height: 40, bottom: 340, right: 300 };
+  const selectIn = (node, text) => {
+    activeSelection = {
+      isCollapsed: false,
+      rangeCount: 1,
+      anchorNode: node,
+      toString: () => text,
+      getRangeAt: () => ({ commonAncestorContainer: node, getBoundingClientRect: () => rect }),
+      removeAllRanges: () => {
+        activeSelection.isCollapsed = true;
+      },
+    };
+  };
+
+  // 初始：没有引用条，也没有浮标
+  check('一开始输入区没有引用条', composerQuote.hidden === true);
+
+  // 替身量出来的按钮尺寸是 0，位置就算不准 —— 给一个真实尺寸再验算定位
+  quoteFloat.getBoundingClientRect = () => ({ width: 90, height: 28, top: 0, left: 0, right: 90, bottom: 28 });
+
+  // 划中回答里的一段
+  selectIn(answerText, '第三，要注意边界情况。');
+  fireDocument('selectionchange');
+  await settle();
+  check('划中回答里的一段后浮出「引用」按钮', quoteFloat.hidden === false);
+  // 选区 100..300 宽、300..340 高；按钮 90×28 → 水平居中在 155，浮到选区长上方 262
+  check('浮标居中浮在选区上方',
+    quoteFloat.style.left === '155px' && quoteFloat.style.top === '262px',
+    `${quoteFloat.style.left} / ${quoteFloat.style.top}`);
+
+  // 贴到屏幕最上边时，上方放不下就要翻到下方；贴到右边要被拦回来
+  rect.top = 4;
+  rect.bottom = 44;
+  rect.left = 1180;
+  rect.right = 1190;
+  selectIn(answerText, '边缘的一段');
+  fireDocument('selectionchange');
+  await settle();
+  check('上方放不下时翻到选区下方', quoteFloat.style.top === '54px', quoteFloat.style.top);
+  check('靠右边缘时不会跑出屏幕', quoteFloat.style.left === '1102px', quoteFloat.style.left);
+  rect.top = 300;
+  rect.bottom = 340;
+  rect.left = 100;
+  rect.right = 300;
+
+  // 点的这一下才是「引用」真正落地的时刻。
+  // 这里**故意在点击前把选区清掉**，模拟真实浏览器：按下按钮这个动作本身就会清掉选区。
+  // 如果处理函数是「点的时候再读一次选区」，它只会拿到空字符串 —— 功能看起来就是点了没反应。
+  selectIn(answerText, '第三，要注意边界情况。');
+  fireDocument('selectionchange');
+  await settle();
+  activeSelection = null;
+  dispatch(quoteFloat, 'click');
+  check('点「引用这段」后输入区挂上引用条', composerQuote.hidden === false);
+  check('引用条里是选中的原文', composerQuoteText.textContent === '第三，要注意边界情况。');
+  check('引用条标了出处', composerQuoteLabel.textContent.includes('引用回答'), composerQuoteLabel.textContent);
+  check('点完浮标就收起来', quoteFloat.hidden === true);
+  check('提示语告诉用户接下来做什么', hint.textContent.includes('引用'), hint.textContent);
+  check('只引用还没打字时发送仍然是禁用的', getEl('send-button').disabled === true);
+
+  // 只认回答那一侧：划在自己的提问里不该出现引用
+  const userBody = makeElement('div');
+  userBody.className = 'turn-body';
+  const userTurn = makeElement('div');
+  userTurn.className = 'turn-user';
+  userBody.parentElement = userTurn;
+  const userText = makeElement('span');
+  userText.parentElement = userBody;
+  selectIn(userText, '我自己问的话');
+  fireDocument('selectionchange');
+  await settle();
+  check('划中自己的提问时不给引用按钮', quoteFloat.hidden === true);
+  check('引用条也没被替换成提问内容', composerQuoteText.textContent === '第三，要注意边界情况。');
+
+  // 取消引用
+  dispatch(getEl('composer-quote-remove'), 'click');
+  check('点 × 之后引用条收起', composerQuote.hidden === true);
+  check('取消后正文也清空了', composerQuoteText.textContent === '');
+  check('取消后不再提示「接着说你的问题」', !hint.textContent.includes('接着说你的问题'), hint.textContent);
+
+  // 重新引用一次，然后发出去：引用必须真的进请求体
+  selectIn(answerText, '第三，要注意边界情况。');
+  fireDocument('selectionchange');
+  await settle();
+  dispatch(quoteFloat, 'click');
+  input.value = '那第三点再展开讲讲';
+  lastChatBody = null;
+  dispatch(getEl('composer'), 'submit');
+  await new Promise((r) => setTimeout(r, 60));
+
+  const sent = lastChatBody?.messages ?? [];
+  const lastUser = [...sent].reverse().find((m) => m.role === 'user');
+  check('请求体里能找到这一轮提问', Boolean(lastUser), JSON.stringify(sent));
+  check('引用原文出现在发给模型的正文里',
+    typeof lastUser?.content === 'string' && lastUser.content.includes('第三，要注意边界情况。'),
+    String(lastUser?.content));
+  check('用户自己打的话也在，且排在引用之后',
+    typeof lastUser?.content === 'string' && lastUser.content.trimEnd().endsWith('那第三点再展开讲讲'),
+    String(lastUser?.content));
+  check('引用用 Markdown 引用块包住（模型知道这是转引）',
+    typeof lastUser?.content === 'string' && /^> /m.test(lastUser.content), String(lastUser?.content));
+  check('发出去之后引用条收起来了（不会跟着下一轮）', composerQuote.hidden === true);
+  check('发出去的正文被清空', input.value === '');
+
+  // ---- 「重新生成」不能动输入区挂着的引用
+  //
+  // 重新生成改的是原来那一问，引用是「用户此刻正打算引的那段」。
+  // 它既不该被这次重试带走（用户会发现自己挑的那段没了），
+  // 也不该被塞进旧那一问（那一问引过什么早已存在它自己的版本里）。
+  const sessionsRaw = JSON.parse(storage.get('duitanlu.sessions.v2'));
+  const activeSession = sessionsRaw.sessions.find((s) => s.id === sessionsRaw.activeId);
+  const answerMsg = [...activeSession.messages].reverse().find((m) => m.role === 'assistant');
+  const answerIndex = activeSession.messages.indexOf(answerMsg);
+
+  selectIn(answerText, '这次重试不该动的那一段');
+  fireDocument('selectionchange');
+  await settle();
+  dispatch(quoteFloat, 'click');
+  check('重试之前输入区确实挂着引用', composerQuote.hidden === false);
+
+  const exchangeNode = makeElement('li');
+  exchangeNode.className = 'exchange';
+  exchangeNode.dataset.id = answerMsg.id;
+  const retryButton = makeElement('button');
+  retryButton.dataset.action = 'retry';
+  retryButton.parentElement = exchangeNode;
+
+  lastChatBody = null;
+  dispatch(getEl('exchanges'), 'click', { target: retryButton });
+  await new Promise((r) => setTimeout(r, 80));
+
+  check('重新生成之后，输入区挂着的引用还在', composerQuote.hidden === false);
+  check('重新生成不会把引用塞进原来那一问',
+    !String(
+      ([...(lastChatBody?.messages ?? [])].reverse().find((m) => m.role === 'user')?.content) ?? '',
+    ).includes('这次重试不该动的那一段'),
+    JSON.stringify(lastChatBody?.messages?.at(-1)));
+  check('重新生成发出去的仍然是原来那一问',
+    String(activeSession.messages[answerIndex - 1]?.content ?? '').length > 0);
 }
 
 console.log(`\n${'─'.repeat(52)}`);

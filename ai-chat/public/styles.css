@@ -1059,6 +1059,135 @@ body::before {
   min-width: 0;
 }
 
+/* ------------------------------------------------------------ 引用回答
+ *
+ * 引用是「这条提问指着上面哪一段问的」，所以它排在提问上方、字号更小、
+ * 左边一道墨线 —— 读起来像稿子上的旁批，不会被误认成提问本身。
+ * 不用红墨：红墨在这一页只表示「问」标和正在写的光标。
+ */
+
+.turn-quote {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 9px;
+  margin: 0 0 9px;
+  padding: 7px 0 7px 11px;
+  border-left: 3px solid color-mix(in srgb, var(--ink) 30%, transparent);
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: color-mix(in srgb, var(--ink) 72%, transparent);
+}
+
+.turn-quote-mark {
+  grid-row: span 2;
+  align-self: start;
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--ink) 26%, transparent);
+  border-radius: 3px;
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  line-height: 1.4;
+  color: var(--ink-soft);
+}
+
+.turn-quote-label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  color: color-mix(in srgb, var(--ink) 45%, transparent);
+}
+
+.turn-quote-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* 引得过长时最多显示六行，剩下的收起来 —— 完整内容在悬停的提示里 */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+  line-clamp: 6;
+  overflow: hidden;
+}
+
+/* 划中回答里的一段时浮出的按钮 */
+.quote-float {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 5; /* 高于输入区与会话栏，低于导出弹层 */
+  padding: 5px 12px;
+  border: 1px solid var(--ink);
+  border-radius: 999px;
+  background: var(--paper-lift);
+  box-shadow: var(--shadow);
+  font: inherit;
+  font-size: 12.5px;
+  letter-spacing: 0.1em;
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.quote-float:hover {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+/* 输入区上方的待发送引用 */
+.composer-quote {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: 9px;
+  margin: 0 0 8px;
+  padding: 9px 11px;
+  border-left: 3px solid color-mix(in srgb, var(--ink) 34%, transparent);
+  background: color-mix(in srgb, var(--paper-lift) 80%, transparent);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+.composer-quote-mark {
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--ink) 26%, transparent);
+  border-radius: 3px;
+  font-family: var(--font-display);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink-soft);
+}
+.composer-quote-main {
+  min-width: 0;
+}
+.composer-quote-label {
+  display: block;
+  margin-bottom: 3px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  color: color-mix(in srgb, var(--ink) 45%, transparent);
+}
+.composer-quote-text {
+  margin: 0;
+  max-height: 4.9em;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.6;
+  color: color-mix(in srgb, var(--ink) 76%, transparent);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.composer-quote-remove {
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  color: color-mix(in srgb, var(--ink) 45%, transparent);
+  cursor: pointer;
+}
+.composer-quote-remove:hover {
+  color: var(--ink);
+}
+
 .turn-user .turn-body {
   font-size: 16.5px;
   line-height: 1.75;

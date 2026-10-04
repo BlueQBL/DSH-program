@@ -6,6 +6,8 @@
 //
 // 术语：一条消息可以有多个**版本**，界面上呈现为「第 N 页」。
 
+import { composeUserContent } from './quote.js';
+
 /**
  * 该显示第几页。
  *
@@ -92,6 +94,22 @@ function versionImages(v) {
   return (v?.attachments ?? []).map((a) => a.dataUrl).filter(Boolean);
 }
 
+/** 这一版有没有东西可发（文字 / 图片 / 引用） */
+function versionHasContent(v) {
+  return Boolean(versionText(v)) || versionImages(v).length > 0 || Boolean(v?.quote?.text);
+}
+
+/**
+ * 这一版发给上游时的正文。
+ *
+ * 用户消息要把引用拼进去（见 lib/quote.js）；助手回答原样发 ——
+ * 引用只可能是用户引了回答里的一段，反过来没有意义。
+ */
+function outboundContent(role, version) {
+  if (role !== 'user') return versionText(version);
+  return composeUserContent(versionText(version), version.quote);
+}
+
 /**
  * 构造发给服务端的对话历史。
  *
@@ -102,6 +120,10 @@ function versionImages(v) {
  * 为什么要带历史版本：编辑一版等于在原对话上追加一次修正。
  * 只发新文本会让模型看到「我问了 A，它答了 B，然后我又问 B」这种自问自答；
  * 带上旧版本，上下文才自洽 —— 这是这个功能能不能用好的关键。
+ *
+ * 引用也是在这里拼进正文的（`composeUserContent`）：库里存的 content 是用户
+ * 自己打的那句话，只有发给模型的这一份带上被引用的原文 ——
+ * 界面、导出看到的都是原话，而模型知道自己被引的是哪一段。
  *
  * @param {Array} messages 会话里的消息（提问与回答交替）
  * @param {object} lastUserMessage 末尾那条提问
@@ -120,8 +142,12 @@ export function buildRequestHistory(messages, lastUserMessage, answerMessage = n
       // 历史版本（不含最新那版），每版后面跟上它对应的旧回答
       for (let i = 0; i < versions.length - 1; i += 1) {
         const v = versions[i];
-        if (versionText(v) || versionImages(v).length) {
-          history.push({ role: 'user', content: versionText(v), images: versionImages(v) });
+        if (versionHasContent(v)) {
+          history.push({
+            role: 'user',
+            content: outboundContent('user', v),
+            images: versionImages(v),
+          });
         }
         const oldAnswer = answerVersions[i];
         if (oldAnswer && versionText(oldAnswer)) {
@@ -131,16 +157,17 @@ export function buildRequestHistory(messages, lastUserMessage, answerMessage = n
       const latest = versions[versions.length - 1];
       history.push({
         role: 'user',
-        content: versionText(latest),
+        content: outboundContent('user', latest),
         images: versionImages(latest),
       });
       continue;
     }
 
     const current = versions[versions.length - 1];
-    if (!versionText(current) && !versionImages(current).length) continue;
+    if (!versionHasContent(current)) continue;
     // 图片只跟「末尾那条提问」一起发：历史里重复回传图片既费 token，也更容易被上游拒
-    history.push({ role: m.role, content: versionText(current), images: [] });
+    const images = [];
+    history.push({ role: m.role, content: outboundContent(m.role, current), images });
   }
 
   return history;
