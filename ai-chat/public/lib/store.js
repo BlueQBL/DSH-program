@@ -21,6 +21,7 @@ import { DEFAULT_PERSONA_ID, resolveSystemPrompt } from './personas.js';
 import { normalizeQuote } from './quote.js';
 import { fallbackTitle, inferTitleSource, needsAutoTitle, titleFromModel } from './title.js';
 import { normalizeFeedback } from './feedback.js';
+import { normalizeSummary } from './compress.js';
 
 const STORAGE_KEY = 'duitanlu.sessions.v2';
 const LEGACY_KEY = 'duitanlu.conversation.v1';
@@ -222,7 +223,23 @@ function normalizeSession(raw) {
   // 这个名字是谁起的。老数据没有这个字段，靠标题内容反推（见 lib/title.js）——
   // 反推错了会把用户自己起的名字当成机器起的，所以那一步是保守的：认不出来就当用户起的。
   session.titleSource = inferTitleSource({ ...session, titleSource: raw.titleSource });
+  session.summary = normalizeSessionSummary(raw.summary, session.messages);
   return session;
+}
+
+/**
+ * 会话的上下文摘要（见 lib/compress.js）。
+ *
+ * 覆盖范围越界就丢掉：消息被清空、被别处改少之后，旧摘要说的「以上 N 条」
+ * 已经对不上了。宁可从头再发一遍原文，也不能让模型看到一份对不上号的摘要 ——
+ * 更糟的是，如果摘要把所有消息都覆盖掉，请求里就只剩摘要、没有用户提问了。
+ */
+function normalizeSessionSummary(raw, messages) {
+  const summary = normalizeSummary(raw);
+  if (!summary) return null;
+  const total = (messages ?? []).length;
+  if (!total || summary.covers >= total) return null;
+  return summary;
 }
 
 /**
@@ -252,6 +269,8 @@ function makeSession(overrides = {}) {
     // none = 还没有名字（空会话）。第一次发消息时才会算一个兜底标题，
     // 随后可以被模型标题替换 —— 见 lib/title.js 的 titleSource 说明。
     titleSource: 'none',
+    /** 上下文摘要：会话太长时把前面部分压成它（见 lib/compress.js） */
+    summary: null,
     createdAt: now,
     updatedAt: now,
     personaId: DEFAULT_PERSONA_ID,
@@ -522,6 +541,33 @@ export function createStore() {
     needsAutoTitle(id) {
       const session = sessions.find((s) => s.id === id);
       return session ? needsAutoTitle(session) : false;
+    },
+
+    /**
+     * 记下（或替换）上下文摘要。
+     *
+     * 只动 session.summary 一个字段：**消息一条都不删**。
+     * 压缩改变的是「发给模型的那一份」，本地记录、界面、导出始终是完整的。
+     */
+    setSummary(summary) {
+      const session = active();
+      const clean = normalizeSessionSummary(summary, session.messages);
+      session.summary = clean;
+      commit();
+      return clean;
+    },
+
+    /** 丢掉摘要（下次会把全文重新发过去） */
+    clearSummary() {
+      const session = active();
+      session.summary = null;
+      commit();
+    },
+
+    /** 这个会话当前的摘要（没有就是 null） */
+    summaryOf(id) {
+      const session = sessions.find((s) => s.id === id) ?? active();
+      return session?.summary ?? null;
     },
 
     /** 删除会话；最后一个不允许删（否则界面没有可显示的东西） */
@@ -851,6 +897,8 @@ export function createStore() {
       // 名字也跟着作废：消息都清空了，旧标题（模型起的或用户起的）已经没有意义，
       // 下一轮提问应当重新起一个
       session.titleSource = 'none';
+      // 摘要同理：它覆盖的那些消息已经不存在了
+      session.summary = null;
       touch(session);
       commit();
       fetch(`/api/history/${session.id}`, { method: 'DELETE' }).catch(() => {});

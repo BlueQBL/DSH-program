@@ -54,6 +54,7 @@ import {
   toggleRating,
   toggleReason,
 } from './lib/feedback.js';
+import { buildSummaryMessages, compressionPlan, normalizeSummary, summaryLabel } from './lib/compress.js';
 import {
   resolveStartingSession as resolveStartingSessionDecide,
   shouldCreateSession,
@@ -116,6 +117,9 @@ const els = {
   composerQuoteRemove: document.getElementById('composer-quote-remove'),
   quoteFloat: document.getElementById('quote-float'),
 
+  compressButton: document.getElementById('compress-button'),
+  contextTemplate: document.getElementById('context-note-template'),
+
   exportButton: document.getElementById('export-button'),
   exportPopup: document.getElementById('export-popup'),
 };
@@ -163,6 +167,10 @@ const runtime = {
   /** 打开着的评价框（同时只开一个）与其草稿 */
   feedbackOpen: null,
   feedbackDraft: null,
+  /** 摘要正文是否展开着（按消息条数记忆，换会话不串） */
+  summaryOpen: false,
+  /** 正在压缩的会话 id，避免同一会话重复请求 */
+  compressing: null,
   exportAll: false,
   pendingDelete: null,
   speech: null,
@@ -391,6 +399,16 @@ els.jumpBottom.addEventListener('click', () => {
 
 // ---------------------------------------------------------------- 会话列表
 
+/**
+ * 下一次画列表时，是否要把当前会话滚进可视区。
+ *
+ * 会话多了之后列表会在自己那一格里滚动（不再撑高页面、也不会盖住输入区），
+ * 但新的会话排在最后 —— 不滚一下的话，刚建的会话可能停在可视区外面，
+ * 看起来像「点了新对话却没反应」。只在**切换/新建**时滚，平时重画不滚：
+ * 否则用户翻看老会话时，任何一次重画都会把列表拽回去。
+ */
+let railRevealPending = false;
+
 function renderSessionList() {
   const sessions = store.sessions;
   const activeId = store.sessionId;
@@ -426,6 +444,13 @@ function renderSessionList() {
       retitleButton.disabled = true;
       retitleButton.title = '这个会话还没有内容';
     }
+  }
+
+  // 切换/新建之后，把当前会话滚进可视区（见 railRevealPending 的说明）
+  if (railRevealPending) {
+    railRevealPending = false;
+    const activeItem = els.sessionList.querySelector('.session-item[data-active="true"]');
+    activeItem?.scrollIntoView?.({ block: 'nearest' });
   }
 }
 
@@ -481,6 +506,7 @@ els.sessionList.addEventListener('click', (event) => {
     runtime.pinned = true;
     runtime.liveTurn = null;
     runtime.renderNode = null;
+    railRevealPending = true; // 点的是列表里的哪一条，就把它滚进可视区
     renderAfterSessionSwitch();
     scrollToBottom();
     els.input.focus();
@@ -1080,15 +1106,131 @@ function render({ keepLive = false } = {}) {
   }
 
   els.exchanges.replaceChildren();
+  const summary = store.session.summary;
+  const covered = summary ? Math.min(summary.covers, store.messages.length) : 0;
+
   assistants.forEach((message, index) => {
     const { node } = buildTurnNode(message, index + 1);
     els.exchanges.appendChild(node);
     paintTurn(node);
+
+    // 压缩标记插在「最后一个被摘要覆盖的那一轮」后面 ——
+    // 它标的是那条界线：以上的部分模型只看到了摘要，以下的是原文。
+    // 放在列表最上面会骗人（看起来像整段都被压了）。
+    if (covered > 0 && store.messages.indexOf(message) === covered - 1) {
+      const note = buildContextNote(summary);
+      if (note) els.exchanges.appendChild(note);
+    }
   });
+
+  paintCompressButton();
 
   if (runtime.liveTurn) {
     const live = els.exchanges.querySelector(`[data-id="${runtime.liveTurn.id}"]`);
     if (live) runtime.renderNode = live;
+  }
+}
+
+/** 那道压缩标记：说明 + 展开摘要 + 取消压缩 */
+function buildContextNote(summary) {
+  const template = els.contextTemplate;
+  if (!template?.content) return null;
+  const frag = template.content.cloneNode(true);
+  const node = frag.querySelector('[data-field="context-note"]');
+  if (!node) return null;
+
+  node.querySelector('[data-field="context-note-label"]').textContent = summaryLabel(summary);
+  const text = node.querySelector('[data-field="context-note-text"]');
+  text.textContent = summary.text;
+  text.hidden = !runtime.summaryOpen;
+  const toggle = node.querySelector('[data-action="toggle-summary"]');
+  toggle.textContent = runtime.summaryOpen ? '收起摘要' : '查看摘要';
+  toggle.setAttribute('aria-expanded', String(runtime.summaryOpen));
+  return node;
+}
+
+/**
+ * 「压缩上文」按钮该不该出现、点了会发生什么。
+ *
+ * 关键：**按钮可用 ⇔ 点下去真的有东西可压**。早先这里判的是「可压切片非空」，
+ * 而切片非空的下限（几十上百字）比真正值得压的下限（1200 字）低得多，
+ * 于是会出现「按钮亮着、一点却提示没有足够内容」这种死点。
+ * 现在两边用的是同一次 compressionPlan（force），亮着就一定压得动。
+ */
+function paintCompressButton() {
+  if (!els.compressButton) return;
+  const summary = store.session.summary;
+  const plan = compressionPlan({ messages: store.messages, summary, force: true });
+  const canCompress = plan.mode !== 'none';
+  els.compressButton.hidden = !canCompress || runtime.busy;
+  els.compressButton.textContent = summary ? '再压一次' : '压缩上文';
+  if (!canCompress) return;
+
+  const rounds = Math.max(1, Math.round((plan.to - plan.from) / 2));
+  els.compressButton.title =
+    `把前面约 ${plan.chars} 字（${rounds} 轮）压成一段摘要，保留最近 ${plan.keepRecent} 条原文；` +
+    '原始消息不会删掉，只是之后不再逐条发给模型';
+}
+
+// ---------------------------------------------------------------- 上下文压缩
+//
+// 什么时候压（见 lib/compress.js 的阈值）：
+//  · **答完之后**：体量过了软线，就后台压一次 —— 不挡用户，下一轮开始就用上摘要；
+//  · **发之前**：体量过了硬线（说明后台那次没赶上或失败了），这一轮先压再发，
+//    界面上会说明「正在压缩」，而不是让服务端把最老的几轮悄悄丢掉；
+//  · **手动**：用户点「压缩上文」，随时可压，也可以「再压一次」把范围扩大。
+//
+// 压缩只改「发给模型的那一份」：消息一条不删，界面和导出始终是完整的。
+
+/**
+ * 压一次。
+ * @returns {Promise<boolean>} 是否真的换上了新摘要
+ */
+async function compressContext({ force = false, blocking = false } = {}) {
+  const session = store.session;
+  const plan = compressionPlan({ messages: store.messages, summary: session.summary, force });
+  if (plan.mode === 'none') return false;
+  // 离线模式没有模型可用：压不了，就照旧发原文
+  if (runtime.config.mode === 'mock') return false;
+  if (runtime.compressing === session.id) return false;
+
+  const slice = store.messages.slice(plan.from, plan.to);
+  if (!slice.length) return false;
+
+  runtime.compressing = session.id;
+  if (blocking) flashHint('上下文较长，正在压缩前面的对话…', 3000);
+  paintCompressButton();
+
+  try {
+    const response = await fetch('/api/summarize', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        messages: buildSummaryMessages({ messages: slice, previousSummary: session.summary }),
+        model: session.model || runtime.chosenModel || runtime.serverDefaultModel || undefined,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    // 摘要要覆盖「旧的摘要 + 这一次压的这段」，所以 covers 是累加的
+    const summary = normalizeSummary({
+      text: data?.summary,
+      covers: plan.to,
+      model: data?.model ?? null,
+      at: Date.now(),
+    });
+    if (!summary) return false;
+
+    store.setSummary(summary);
+    render();
+    const plain = estimateChars(store.messages.slice(0, plan.to));
+    flashHint(`已压缩上文：约 ${Math.round(plain / 1000)}k 字 → ${summary.text.length} 字摘要`, 3600);
+    return true;
+  } catch {
+    // 压缩失败不是错误：继续用原文发（服务端还有一层兜底裁剪）
+    return false;
+  } finally {
+    runtime.compressing = null;
+    paintCompressButton();
   }
 }
 
@@ -1174,6 +1316,28 @@ els.composer.addEventListener('submit', (event) => {
 });
 
 els.stop.addEventListener('click', stopGenerating);
+
+// 手动压缩：用户说压就压，不看阈值（但仍然要求有东西可压）
+els.compressButton.addEventListener('click', async () => {
+  if (runtime.busy) {
+    flashHint('正在生成，等这一轮结束再压缩', 2600);
+    return;
+  }
+  const session = store.session;
+  const plan = compressionPlan({ messages: store.messages, summary: session.summary, force: true });
+  if (plan.mode === 'none') {
+    flashHint('还没有足够的内容可以压缩', 2600);
+    return;
+  }
+  if (runtime.config.mode === 'mock') {
+    flashHint('离线模式压不了：压缩要模型来写摘要', 3600);
+    return;
+  }
+  els.compressButton.disabled = true;
+  const ok = await compressContext({ force: true, blocking: true });
+  els.compressButton.disabled = false;
+  if (!ok) flashHint('这次没压成，稍后再试（不影响继续对话）', 3000);
+});
 
 els.starters.addEventListener('click', (event) => {
   const button = event.target.closest('.starter');
@@ -1546,6 +1710,13 @@ async function send(rawText, { edit = null, version = null, reuse = false } = {}
   // 这时再套上输入区里挂着的引用就串了。
   const quote = edit ? null : runtime.pendingQuote;
 
+  // 体量已经过了硬线（后台那次没赶上，或者刚失败）：先压再发。
+  // 宁可这一轮多等几秒，也不要让服务端把最老的几轮悄悄丢掉 ——
+  // 用户不知道「模型已经忘了开头」才是最难查的问题。
+  if (compressionPlan({ messages: store.messages, summary: store.session.summary }).mode === 'blocking') {
+    await compressContext({ blocking: true });
+  }
+
   els.input.value = '';
   runtime.pendingImages = [];
   if (quote) setPendingQuote(null);
@@ -1579,7 +1750,9 @@ async function send(rawText, { edit = null, version = null, reuse = false } = {}
   // 发给服务端的历史交给 lib/versions.js 里的纯函数构造（那边有完整测试）：
   // 它负责「每条消息取最新一版」+「末尾提问额外补上历史版本及其旧回答」，
   // 并保证图片只跟末条一起发。
-  const history = buildRequestHistory(store.messages, question, placeholder);
+  const history = buildRequestHistory(store.messages, question, placeholder, {
+    summary: store.session.summary,
+  });
 
   const controller = new AbortController();
   runtime.controller = controller;
@@ -1678,6 +1851,12 @@ async function send(rawText, { edit = null, version = null, reuse = false } = {}
     // 这一轮真的答完了，才值得拿它去起标题 —— 用半截回答或错误信息起出来的名字会更糟。
     // 不 await：起标题是后台的事，用户看到正文结束就该能继续操作。
     if (placeholder.status === 'done') void requestTitle(sessionIdAtSend);
+    // 同理：这一轮结束后体量过了软线就后台压一次，下一轮开始就用上摘要
+    if (placeholder.status === 'done' && store.sessionId === sessionIdAtSend) {
+      const plan = compressionPlan({ messages: store.messages, summary: store.session.summary });
+      if (plan.mode !== 'none') void compressContext();
+    }
+    paintCompressButton();
     if (switchedNote) {
       flashHint(`所选模型 ${switchedNote} 不可用，已自动改用 ${runtime.activeModel || '可用模型'}`, 4200);
     } else if (!sawDone && !streamError && meta === null) {
@@ -1724,6 +1903,31 @@ async function retryLast(message) {
 }
 
 /**
+ * 改动落在「已经进了摘要的那一段」里 → 摘要作废。
+ *
+ * 为什么必须作废：摘要是对那几条消息**当时内容**的浓缩。用户回头改了其中一轮，
+ * 摘要说的就成了已经不存在的版本 —— 而模型看到的是摘要，不是本文。
+ * 这种「悄悄用了旧内容」正是最难查的一类问题，所以宁可丢掉摘要、重新发完整上文。
+ *
+ * 覆盖范围是按**消息下标**算的，而编辑是给同一条消息追加版本（下标不变），
+ * 所以「改动落在旧版本上」的情况不需要处理 —— 摘要描述的是那一轮的主题，不是某一页的措辞。
+ *
+ * @returns {boolean} 是否真的作废了摘要（调用方负责告诉用户，见下面两处调用）
+ */
+function dropSummaryIfStale(message) {
+  const summary = store.session.summary;
+  if (!summary) return false;
+  const index = store.messages.indexOf(message);
+  if (index < 0 || index >= summary.covers) return false;
+
+  store.clearSummary();
+  render();
+  return true;
+}
+
+const STALE_SUMMARY_HINT = '你改的这一轮在已压缩的部分里，摘要已作废 —— 之后会重新发完整上文';
+
+/**
  * 编辑后重新回答。
  *
  * 关键行为（用户明确要求）：**绝不覆盖原来那一页**。
@@ -1742,7 +1946,10 @@ async function resendEdited(question, version, newText) {
 
   els.input.value = '';
   runtime.pendingImages = keepImages;
+  const stale = dropSummaryIfStale(question);
   await send(text, { edit: question, version });
+  // 这句话要等 send 结束再说：send 收尾时会按状态重设提示条，早说的话会被当场冲掉
+  if (stale) flashHint(STALE_SUMMARY_HINT, 4400);
 }
 
 /** 只改不发：把这一版的内容改掉，不触发回答 */
@@ -1758,7 +1965,7 @@ function saveEditOnly(question, version, newText) {
   v.createdAt = Date.now();
   store.setMessageVersion(question, version);
   render();
-  flashHint('已保存改动（没有重新回答）', 2400);
+  flashHint(dropSummaryIfStale(question) ? STALE_SUMMARY_HINT : '已保存改动（没有重新回答）', 4400);
 }
 
 // ---------------------------------------------------------------- 模式提示
@@ -1992,6 +2199,7 @@ function startNewSession({ announce = false } = {}) {
   runtime.pinned = true;
   runtime.liveTurn = null;
   runtime.renderNode = null;
+  railRevealPending = true; // 新会话排在列表最后，滚一下才看得见
   renderAfterSessionSwitch();
   scrollToBottom();
   els.input.focus();
@@ -2022,6 +2230,23 @@ els.exchanges.addEventListener('click', (event) => {
 
   const action = event.target.closest('[data-action]');
   if (!action) return;
+
+  // 压缩标记上的动作先处理：它不在任何一条 .exchange 里（它是插在中间的独立一行），
+  // 所以不能等到下面那句「找不到对应消息就 return」之后
+  if (action.dataset.action === 'toggle-summary') {
+    runtime.summaryOpen = !runtime.summaryOpen;
+    render();
+    return;
+  }
+  if (action.dataset.action === 'drop-summary') {
+    // 丢掉摘要 = 之后重新发完整上文。本地消息本来就没动过，所以这一步是安全的
+    store.clearSummary();
+    runtime.summaryOpen = false;
+    render();
+    flashHint('已取消压缩，之后会把完整上文重新发给模型', 3200);
+    return;
+  }
+
   const node = action.closest('.exchange');
   const message = store.messages.find((m) => m.id === node?.dataset.id);
   if (!message) return;

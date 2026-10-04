@@ -9,9 +9,12 @@
 // 引用（用户划中回答里的一段接着问）在三种格式里都保留 ——
 // 少了它，「这句话在问什么」就读不出来了。
 // 评价（赞/踩 + 补充说明）同理：它是对这一轮回答的判断，也是这份记录的一部分。
+// 压缩摘要是**这份记录的一部分**：原始消息一条没删（所以正文照旧完整），
+// 但「模型当时只看到了一段摘要」这件事必须留在记录里，否则以后没法解释它的回答。
 
 import { hasQuote, quoteLabel } from './quote.js';
 import { feedbackSummary } from './feedback.js';
+import { summaryLabel } from './compress.js';
 
 const pad = (n) => String(n).padStart(2, '0');
 
@@ -66,6 +69,12 @@ export function toMarkdown(session, { exportAll = false, sessions = [] } = {}) {
       lines.push(`创建于 ${formatStamp(item.createdAt)}${item.personaName ? ` · ${item.personaName}` : ''}`, '');
     }
 
+    // 这个会话压缩过上下文：在正文最前面交代一句，读的人才知道模型看到的是什么
+    if (item.summary?.text) {
+      lines.push(`> 【上下文压缩】${summaryLabel(item.summary)}`, '');
+      lines.push(...item.summary.text.split('\n').map((line) => `> ${line}`), '');
+    }
+
     let turn = 0;
     for (const msg of item.messages ?? []) {
       const note = attachmentNote(msg.attachments);
@@ -96,6 +105,9 @@ export function toMarkdown(session, { exportAll = false, sessions = [] } = {}) {
 /** 导出为纯文本 */
 export function toPlainText(session) {
   const lines = [`${session.title || '对谈录'}`, `导出时间：${formatStamp(Date.now())}`, ''];
+  if (session.summary?.text) {
+    lines.push(`【上下文压缩】${summaryLabel(session.summary)}`, session.summary.text, '');
+  }
   let turn = 0;
   for (const msg of session.messages ?? []) {
     const note = attachmentNote(msg.attachments);
@@ -139,6 +151,16 @@ export function toJson(session, { exportAll = false, sessions = [] } = {}) {
         personaName: s.personaName ?? null,
         systemPrompt: s.systemPrompt || '',
         model: s.model || '',
+        // 压缩摘要：单独一个字段，而且**不动 messages**（本地记录始终完整）。
+        // 导入方要能看出「模型当时只看了一部分」，所以 covers 一起带上。
+        contextSummary: s.summary?.text
+          ? {
+              text: s.summary.text,
+              covers: s.summary.covers,
+              at: new Date(s.summary.at ?? Date.now()).toISOString(),
+              model: s.summary.model ?? null,
+            }
+          : null,
         messages: (s.messages ?? []).map((m) => ({
           id: m.id,
           role: m.role,

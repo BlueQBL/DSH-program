@@ -83,8 +83,13 @@ function makeElement(tag = 'div', attrs = {}) {
       listeners.push({ el: this, type, fn });
     },
     removeEventListener() {},
-    querySelector() {
-      return makeElement('span');
+    querySelector(selector) {
+      // 同一个选择器在同一个元素上要给回**同一个**替身：真实 DOM 里它就是那个子元素，
+      // 而这个替身不解析 HTML，所以只能「每个选择器一个占位元素」。
+      // 关键是稳定 —— 否则 app.js 写进去的文字，测试再读就没了。
+      if (!this.__queryCache) this.__queryCache = new Map();
+      if (!this.__queryCache.has(selector)) this.__queryCache.set(selector, makeElement('span'));
+      return this.__queryCache.get(selector);
     },
     querySelectorAll() {
       return [];
@@ -136,6 +141,11 @@ function makeElement(tag = 'div', attrs = {}) {
     getBoundingClientRect() {
       return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 };
     },
+    // 记一笔就行：断言关心的是「有没有把当前会话滚进可视区」，不是滚动本身
+    scrollIntoView(options) {
+      this.__scrolledIntoView = true;
+      this.__scrollOptions = options;
+    },
     requestSubmit() {},
     // 模拟给 select 灌选项：app.js 用 createElement + selected 实现
     insertBefore() {},
@@ -172,6 +182,8 @@ function dispatch(el, type, event = {}) {
 /** 收集 window 上的 scroll 监听，测试里主动触发。
     必须在定义 window 之前声明 —— 否则 window 的 addEventListener 闭包会撞上 TDZ。 */
 const scrollHandlers = [];
+/** window 上的全部监听（按类型），用来触发 storage 这类事件 */
+const windowHandlers = [];
 
 const registry = new Map();
 const getEl = (id) => {
@@ -245,7 +257,8 @@ globalThis.document = {
 };
 globalThis.window = {
   addEventListener: (type, fn) => {
-    // 只接住 scroll，供测试主动触发
+    windowHandlers.push({ type, fn });
+    // 只接住 scroll，供早期那些测试主动触发（它们直接遍历这个数组）
     if (type === 'scroll') scrollHandlers.push(fn);
   },
   matchMedia: () => ({ matches: false, addEventListener() {} }),
@@ -278,7 +291,7 @@ globalThis.URL.createObjectURL = () => 'blob:';
 globalThis.URL.revokeObjectURL = () => {};
 globalThis.FileReader = class {};
 
-for (const id of ['session-template', 'attachment-template', 'exchange-template']) {
+for (const id of ['session-template', 'attachment-template', 'exchange-template', 'context-note-template']) {
   const el = getEl(id);
   el.content = {
     cloneNode: () => {
@@ -291,8 +304,7 @@ for (const id of ['session-template', 'attachment-template', 'exchange-template'
         if (!cache.has(selector)) cache.set(selector, makeElement('span'));
         return cache.get(selector);
       };
-      frag.querySelectorAll = () => [];
-      return frag;
+      frag.querySelectorAll = () => [];      return frag;
     },
   };
 }
@@ -321,6 +333,9 @@ let lastTitleBody = null;
 let titleReply = { ok: true, title: '变量未声明的报错' };
 /** 每次 /api/feedback 的请求体（按顺序） */
 let feedbackPosts = [];
+/** 每次 /api/summarize 的请求体，以及要回给客户端的摘要 */
+let summarizePosts = [];
+let summarizeReply = { ok: true, summary: '前面聊了闭包与作用域。', model: 'gpt-4o' };
 /** 聊天是否走「正常流式回答」这条路（默认关，老用例依赖失败分支） */
 let chatStreams = false;
 /** 流式回答里 meta 帧报告的运行模式（离线用例会把它设成 mock） */
@@ -364,6 +379,10 @@ globalThis.fetch = async (url, init) => {
   if (target.includes('/api/feedback')) {
     feedbackPosts.push(JSON.parse(init?.body ?? '{}'));
     return { ok: true, json: async () => ({ ok: true, at: new Date().toISOString() }) };
+  }
+  if (target.includes('/api/summarize')) {
+    summarizePosts.push(JSON.parse(init?.body ?? '{}'));
+    return { ok: true, json: async () => summarizeReply };
   }
   if (target.includes('/api/chat')) {
     lastChatBody = JSON.parse(init?.body ?? '{}');
@@ -1253,6 +1272,245 @@ console.log('\n⑪ 评价回答：赞 / 踩 + 意见反馈');
   await new Promise((r) => setTimeout(r, 60));
 
   chatStreams = false;
+}
+
+console.log('\n⑫ 上下文压缩：手动压一次，看摘要有没有真的顶替上文');
+{
+  const input = getEl('composer-input');
+  const sessionsIn = () => {
+    const raw = JSON.parse(storage.get('duitanlu.sessions.v2'));
+    return { raw, active: raw.sessions.find((s) => s.id === raw.activeId) };
+  };
+  const compressButton = getEl('compress-button');
+  // 替身不解析 HTML，所以模板里的 class 不会带过来 —— 靠「app 往里面画过什么」
+  // 来认这个压缩标记：只有它自己的 label 会被写上文字
+  const contextNotes = () =>
+    getEl('exchanges').children.filter((n) => String(n.querySelector('[data-field="context-note-label"]')?.textContent ?? '').length > 0);
+
+  configMode = 'model';
+  chatMode = 'model';
+  chatStreams = true;
+
+  // 先灌一个够长的会话：手动压缩要求「有东西可压」（≥ 2000 字）
+  const seed = JSON.parse(storage.get('duitanlu.sessions.v2'));
+  const active = seed.sessions.find((s) => s.id === seed.activeId);
+  active.messages = [];
+  for (let i = 1; i <= 6; i += 1) {
+    active.messages.push({
+      id: `u_seed_${i}`,
+      role: 'user',
+      content: `第 ${i} 个问题`.padEnd(400, '问'),
+      versions: [{ content: `第 ${i} 个问题`.padEnd(400, '问'), createdAt: 0, attachments: [], quote: null, feedback: null }],
+      versionCount: 1,
+    });
+    active.messages.push({
+      id: `a_seed_${i}`,
+      role: 'assistant',
+      content: `第 ${i} 个回答`.padEnd(400, '答'),
+      versions: [{ content: `第 ${i} 个回答`.padEnd(400, '答'), createdAt: 0, attachments: [], feedback: null, status: 'done', model: 'gpt-4o' }],
+      versionCount: 1,
+    });
+  }
+  storage.set('duitanlu.sessions.v2', JSON.stringify(seed));
+  // 让 app 重新读一遍这份数据：走它自己的「跨标签页同步」通道
+  //（等价于刷新，也顺便验证了这条路真的把数据接进去了）
+  for (const h of windowHandlers.filter((x) => x.type === 'storage')) {
+    h.fn({ key: 'duitanlu.sessions.v2', newValue: JSON.stringify(seed) });
+  }
+  reloadActiveSession();
+  await new Promise((r) => setTimeout(r, 60));
+
+  check('没有压缩时正文里没有压缩标记', contextNotes().length === 0);
+  check('有内容可压时「压缩上文」按钮出现', compressButton.hidden === false);
+
+  summarizePosts = [];
+  dispatch(compressButton, 'click');
+  await new Promise((r) => setTimeout(r, 120));
+
+  const afterCompress = sessionsIn().active;
+  check('压缩后会话上有了摘要', afterCompress.summary?.text === '前面聊了闭包与作用域。', JSON.stringify(afterCompress.summary));
+  // 手动压缩只留最后一轮：12 条里压掉 10 条（自动压缩会留 6 条，压 6 条）
+  check('手动压缩覆盖到只剩最后一轮', afterCompress.summary?.covers === 10, String(afterCompress.summary?.covers));
+  check('消息一条都没少（压缩不是删除）', afterCompress.messages.length === 12, String(afterCompress.messages.length));
+  check('压缩请求发到了服务端', summarizePosts.length === 1, String(summarizePosts.length));
+  check('请求里带上待压缩的对话',
+    String(summarizePosts[0]?.messages?.[1]?.content ?? '').includes('第 1 个问题'), String(summarizePosts[0]?.messages?.[1]?.content).slice(0, 60));
+  check('提示词要求只输出摘要', /只输出摘要/.test(String(summarizePosts[0]?.messages?.[0]?.content ?? '')));
+
+  check('正文里出现了压缩标记', contextNotes().length === 1, String(contextNotes().length));
+  const note = contextNotes()[0];
+  check('标记说明了压掉多少条', String(note.querySelector('[data-field="context-note-label"]').textContent).includes('以上 10 条'),
+    String(note.querySelector('[data-field="context-note-label"]').textContent));
+  check('摘要默认收着', note.querySelector('[data-field="context-note-text"]').hidden === true);
+  check('按钮写的是「查看摘要」', note.querySelector('[data-action="toggle-summary"]').textContent === '查看摘要');
+
+  // 展开 / 收起
+  const toggle = note.querySelector('[data-action="toggle-summary"]');
+  toggle.dataset.action = 'toggle-summary';
+  toggle.parentElement = note;
+  dispatch(getEl('exchanges'), 'click', { target: toggle });
+  const noteAfter = contextNotes()[0];
+  check('点「查看摘要」能展开摘要原文',
+    noteAfter.querySelector('[data-field="context-note-text"]').hidden === false);
+  check('展开的是模型看到的那段摘要',
+    noteAfter.querySelector('[data-field="context-note-text"]').textContent === '前面聊了闭包与作用域。');
+
+  // 这一轮发出去的请求必须用摘要顶替前面八条
+  input.value = '接着说说作用域';
+  lastChatBody = null;
+  dispatch(getEl('composer'), 'submit');
+  await new Promise((r) => setTimeout(r, 120));
+  const sent = lastChatBody?.messages ?? [];
+  check('发出去的请求最前面是摘要', sent[0]?.role === 'system', JSON.stringify(sent[0])?.slice(0, 60));
+  check('摘要正文在里面', String(sent[0]?.content ?? '').includes('前面聊了闭包与作用域。'));
+  check('被压掉的那几轮不再逐条发',
+    !sent.some((m) => String(m.content).includes('第 1 个问题')), JSON.stringify(sent.map((m) => m.content?.slice(0, 12))));
+  check('最近的几轮仍然发原文',
+    sent.some((m) => String(m.content).includes('第 6 个问题')), JSON.stringify(sent.map((m) => m.content?.slice(0, 12))));
+  check('请求以 user 消息结尾', sent.at(-1)?.role === 'user');
+
+  // 取消压缩：本地消息本来就没动，所以只是「之后重新发全文」
+  const beforeCancel = sessionsIn().active.messages.length;
+  const dropButton = contextNotes()[0].querySelector('[data-action="drop-summary"]');
+  dropButton.dataset.action = 'drop-summary';
+  dropButton.parentElement = contextNotes()[0];
+  dispatch(getEl('exchanges'), 'click', { target: dropButton });
+  check('可以取消压缩', sessionsIn().active.summary === null);
+  check('取消后标记也没了', contextNotes().length === 0);
+  check('取消压缩不会删掉任何消息（它只改发给模型的那一份）',
+    sessionsIn().active.messages.length === beforeCancel,
+    `${beforeCancel} → ${sessionsIn().active.messages.length}`);
+
+  chatStreams = false;
+}
+
+console.log('\n⑬ 改动落在已压缩的部分里：摘要必须作废');
+{
+  const sessionsIn = () => {
+    const raw = JSON.parse(storage.get('duitanlu.sessions.v2'));
+    return { raw, active: raw.sessions.find((s) => s.id === raw.activeId) };
+  };
+  const contextNotes = () =>
+    getEl('exchanges').children.filter((n) => String(n.querySelector('[data-field="context-note-label"]')?.textContent ?? '').length > 0);
+
+  chatStreams = true;
+  chatMode = 'model';
+
+  // 再压一次（⑫ 结尾把摘要取消了）
+  dispatch(getEl('compress-button'), 'click');
+  await new Promise((r) => setTimeout(r, 120));
+  const compressed = sessionsIn().active;
+  check('先有了一份摘要', Boolean(compressed.summary?.text), JSON.stringify(compressed.summary));
+  const covered = compressed.summary?.covers ?? 0;
+  check('摘要覆盖了前面一段', covered >= 8, String(covered));
+
+  // 找到「被摘要覆盖的那一轮」对应的对谈节点，改它的提问
+  const targetIndex = Math.max(0, covered - 2); // 覆盖范围里的最后一条用户提问
+  const targetQuestion = compressed.messages[targetIndex];
+  const targetAnswer = compressed.messages[targetIndex + 1];
+  check('取到的是一问一答', targetQuestion?.role === 'user' && targetAnswer?.role === 'assistant');
+  const exchange = getEl('exchanges').children.find((n) => n.dataset?.id === targetAnswer.id);
+  check('这一轮在界面里有节点', Boolean(exchange?.__editInput));
+
+  exchange.className = 'exchange';
+  const resendButton = makeElement('button');
+  resendButton.dataset.action = 'edit-resend';
+  resendButton.parentElement = exchange;
+  exchange.__editInput.value = '改过的老旧问题';
+
+  const messagesBefore = sessionsIn().active.messages.length;
+  dispatch(getEl('exchanges'), 'click', { target: resendButton });
+  await new Promise((r) => setTimeout(r, 180));
+
+  check('改过已压缩的部分之后，摘要作废了', sessionsIn().active.summary === null,
+    JSON.stringify(sessionsIn().active.summary));
+  check('作废之后正文里的压缩标记也没了', contextNotes().length === 0);
+  check('消息没有因此被删（编辑是追加一页）', sessionsIn().active.messages.length === messagesBefore,
+    `${messagesBefore} → ${sessionsIn().active.messages.length}`);
+  check('提示明确说了正在发生什么',
+    getEl('composer-hint').textContent.includes('摘要已作废'), getEl('composer-hint').textContent);
+  check('改动本身生效了（新版本记下了新文字）',
+    JSON.stringify(sessionsIn().active.messages[targetIndex].versions).includes('改过的老旧问题'));
+
+  chatStreams = false;
+}
+
+/**
+ * 按标签开关配对，从 index.html 里切出一个元素的整段 HTML。
+ *
+ * 只数一种标签就够用（`div` 或 `aside`）—— 我们要判断的是「谁在谁里面」。
+ * 刻意不靠缩进匹配：缩进会变，而这类断言最怕的就是「因为格式变了就悄悄失效」。
+ */
+function sliceBlock(source, startTag, tagName = 'div') {
+  const start = source.indexOf(startTag);
+  if (start < 0) return '';
+  const openTag = `<${tagName}`;
+  const closeTag = `</${tagName}>`;
+  let depth = 0;
+  let cursor = start;
+  while (cursor < source.length) {
+    const nextOpen = source.indexOf(openTag, cursor);
+    const nextClose = source.indexOf(closeTag, cursor);
+    if (nextClose < 0) break;
+    if (nextOpen >= 0 && nextOpen < nextClose) {
+      depth += 1;
+      cursor = nextOpen + openTag.length;
+      continue;
+    }
+    depth -= 1;
+    cursor = nextClose + closeTag.length;
+    if (depth === 0) return source.slice(start, cursor);
+  }
+  return source.slice(start);
+}
+
+console.log('\n⑭ 布局：会话列表与聊天框各占各的列，互不干扰');
+{
+  // 用户实测反馈：会话一多，左栏的会话列表长到吸顶高度上限时盖住了输入区
+  // —— 因为输入区当时挂在 .board 外面、横跨整页宽度，正好和左栏处在同一条水平带上，
+  // 而会话栏的 z-index 更高（3 > 2），既挡住显示也截走点击。
+  // 修法是结构性的：把输入区（以及清空确认条）放进右栏内部，两边永远不共享空间。
+  const stageBlock = sliceBlock(html, '<div class="stage">', 'div');
+  const railBlock = sliceBlock(html, '<aside class="rail"', 'aside');
+
+  check('切得出右栏（.stage）这一段', stageBlock.length > 500, String(stageBlock.length));
+  check('切得出会话栏（.rail）这一段', railBlock.length > 200, String(railBlock.length));
+
+  check('聊天框在右栏里（与会话详情同一列）', stageBlock.includes('id="composer"'));
+  check('会话详情（.sheet）也在右栏里', stageBlock.includes('id="sheet"'));
+  check('清空确认条也在右栏里（它说的是这个会话的事）', stageBlock.includes('id="confirm-strip"'));
+  check('会话栏里没有聊天框', !railBlock.includes('id="composer"'));
+  check('会话栏里没有会话详情', !railBlock.includes('id="exchanges"'));
+  check('输入区排在会话详情之后（在右栏里位于正文下方）',
+    stageBlock.indexOf('id="sheet"') < stageBlock.indexOf('id="composer"'));
+  check('清空确认条排在输入区之前（它就在输入框上方）',
+    stageBlock.indexOf('id="confirm-strip"') < stageBlock.indexOf('id="composer"'));
+
+  const css = readFileSync(path.resolve(PUBLIC, 'styles.css'), 'utf8');
+  const boardRule = css.match(/\.board\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+  const railRule = css.match(/\.rail\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+  const listRule = css.match(/\.session-list\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+  const composerRule = css.match(/\.composer\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+
+  check('会话栏与右栏是两列（互不重叠的前提）',
+    /grid-template-columns:\s*\d+px\s+minmax\(0,\s*1fr\)/.test(boardRule), boardRule.slice(0, 80));
+  check('会话栏有高度上限（会话再多也不撑高页面）', /max-height:\s*calc\(100dvh/.test(railRule), railRule);
+  check('列表在自己那一格里滚动', /overflow-y:\s*auto/.test(listRule), listRule.slice(0, 60));
+  check('聊天框仍然吸底，滚到哪儿都能打字',
+    /position:\s*sticky/.test(composerRule) && /bottom:\s*0/.test(composerRule), composerRule.slice(0, 80));
+  check('窄屏下会话栏变成列表上的一段（不是盖在上面）',
+    /@media \(max-width: 1000px\)[\s\S]*?\.rail\s*\{[\s\S]*?position:\s*static/.test(css));
+  check('列表滚到头不会把整页带着滚', /overscroll-behavior:\s*contain/.test(listRule), listRule);
+
+  // 会话多了之后，新建/切换到的会话可能停在可视区外 —— 要主动滚一下。
+  // 替身里「列表元素」就是按选择器缓存的那个占位元素，app 对谁调了 scrollIntoView，
+  // 测试就从同一个选择器把它取回来查（这正是那处缓存的意义）。
+  const activeStub = getEl('session-list').querySelector('.session-item[data-active="true"]');
+  activeStub.__scrolledIntoView = false;
+  dispatch(getEl('new-session-button'), 'click');
+  await new Promise((r) => setTimeout(r, 60));
+  check('新建会话后把当前会话滚进可视区（列表很长时才看得见）',
+    activeStub.__scrolledIntoView === true);
 }
 
 console.log(`\n${'─'.repeat(52)}`);

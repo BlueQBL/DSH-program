@@ -104,58 +104,64 @@
               <button type="button" class="ghost-button" id="jump-bottom">回到最新 ↓</button>
             </div>
           </main>
-        </div>
-      </div>
 
-      <!-- 清空确认：就地出现在被影响内容的旁边，而不是弹一层模态 -->
-      <div class="confirm-strip" id="confirm-strip" hidden>
-        <span id="confirm-text">清空后这个会话的消息无法找回，确定吗？</span>
-        <button type="button" class="solid-button danger" id="confirm-clear">确定</button>
-        <button type="button" class="ghost-button" id="cancel-clear">返回</button>
-      </div>
-
-      <form class="composer" id="composer" autocomplete="off">
-        <!-- 待发送的图片 -->
-        <ul class="attachment-strip" id="attachment-strip" hidden></ul>
-
-        <!-- 待发送的引用：在回答里划中一段就会出现，发出去后挂在提问上方 -->
-        <div class="composer-quote" id="composer-quote" hidden>
-          <span class="composer-quote-mark" aria-hidden="true">引</span>
-          <div class="composer-quote-main">
-            <span class="composer-quote-label" id="composer-quote-label"></span>
-            <p class="composer-quote-text" id="composer-quote-text"></p>
+          <!--
+            清空确认与输入区都在**右栏内部**，和会话详情同一列。
+            以前它们挂在 .board 外面、横跨整页宽度，于是会和左栏的会话列表处在同一条水平带上：
+            会话一多，列表长到吸顶高度上限时就会盖住输入区（它 z-index 更高，还挡住点击）。
+            放进右栏之后，两边各占各的列，会话再多也碰不到输入区。
+          -->
+          <div class="confirm-strip" id="confirm-strip" hidden>
+            <span id="confirm-text">清空后这个会话的消息无法找回，确定吗？</span>
+            <button type="button" class="solid-button danger" id="confirm-clear">确定</button>
+            <button type="button" class="ghost-button" id="cancel-clear">返回</button>
           </div>
-          <button type="button" class="composer-quote-remove" id="composer-quote-remove" title="取消引用" aria-label="取消引用">×</button>
-        </div>
 
-        <label class="sr-only" for="composer-input">想问什么</label>
-        <textarea
-          id="composer-input"
-          name="message"
-          rows="1"
-          placeholder="在这里说话…（Enter 发送 / Shift + Enter 换行 / 可直接粘贴或拖入图片）"
-          maxlength="8000"
-        ></textarea>
+          <form class="composer" id="composer" autocomplete="off">
+            <!-- 待发送的图片 -->
+            <ul class="attachment-strip" id="attachment-strip" hidden></ul>
 
-        <div class="composer-actions">
-          <input type="file" id="image-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
-          <button type="button" class="ghost-button" id="image-button" title="选图片（也可以直接粘贴或拖进来）">加图片</button>
-          <button type="button" class="ghost-button" id="voice-button" title="点击开始，再点结束">语音输入</button>
-          <button type="button" class="ghost-button" id="stop-button" hidden>停止生成</button>
-          <span class="composer-hint" id="composer-hint">Enter 发送 · Shift + Enter 换行</span>
-          <button type="button" class="ghost-button" id="clear-button">清空</button>
-          <span class="export-menu">
-            <button type="button" class="ghost-button" id="export-button" aria-expanded="false">导出</button>
-            <span class="export-popup" id="export-popup" hidden>
-              <button type="button" data-export="md">Markdown（.md）</button>
-              <button type="button" data-export="txt">纯文本（.txt）</button>
-              <button type="button" data-export="json">JSON 数据（.json）</button>
-              <button type="button" data-export="copy">复制全文</button>
-            </span>
-          </span>
-          <button type="submit" class="solid-button" id="send-button">发送</button>
+            <!-- 待发送的引用：在回答里划中一段就会出现，发出去后挂在提问上方 -->
+            <div class="composer-quote" id="composer-quote" hidden>
+              <span class="composer-quote-mark" aria-hidden="true">引</span>
+              <div class="composer-quote-main">
+                <span class="composer-quote-label" id="composer-quote-label"></span>
+                <p class="composer-quote-text" id="composer-quote-text"></p>
+              </div>
+              <button type="button" class="composer-quote-remove" id="composer-quote-remove" title="取消引用" aria-label="取消引用">×</button>
+            </div>
+
+            <label class="sr-only" for="composer-input">想问什么</label>
+            <textarea
+              id="composer-input"
+              name="message"
+              rows="1"
+              placeholder="在这里说话…（Enter 发送 / Shift + Enter 换行 / 可直接粘贴或拖入图片）"
+              maxlength="8000"
+            ></textarea>
+
+            <div class="composer-actions">
+              <input type="file" id="image-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
+              <button type="button" class="ghost-button" id="image-button" title="选图片（也可以直接粘贴或拖进来）">加图片</button>
+              <button type="button" class="ghost-button" id="voice-button" title="点击开始，再点结束">语音输入</button>
+              <button type="button" class="ghost-button" id="stop-button" hidden>停止生成</button>
+              <span class="composer-hint" id="composer-hint">Enter 发送 · Shift + Enter 换行</span>
+              <button type="button" class="ghost-button" id="compress-button" title="把前面的对话压成摘要，腾出上下文空间" hidden>压缩上文</button>
+              <button type="button" class="ghost-button" id="clear-button">清空</button>
+              <span class="export-menu">
+                <button type="button" class="ghost-button" id="export-button" aria-expanded="false">导出</button>
+                <span class="export-popup" id="export-popup" hidden>
+                  <button type="button" data-export="md">Markdown（.md）</button>
+                  <button type="button" data-export="txt">纯文本（.txt）</button>
+                  <button type="button" data-export="json">JSON 数据（.json）</button>
+                  <button type="button" data-export="copy">复制全文</button>
+                </span>
+              </span>
+              <button type="submit" class="solid-button" id="send-button">发送</button>
+            </div>
+          </form>
         </div>
-      </form>
+      </div>
 
       <footer class="colophon">
         <p>
@@ -167,6 +173,21 @@
 
     <!-- 在回答里划中一段时，出现在选区旁边的「引用这段」 -->
     <button type="button" class="quote-float" id="quote-float" hidden>引用这段</button>
+
+    <!-- 压缩标记：插在「最后一个被摘要覆盖的那一轮」后面 -->
+    <template id="context-note-template">
+      <li class="context-note" data-field="context-note">
+        <div class="gutter"><span class="context-note-mark" aria-hidden="true">⌁</span></div>
+        <div class="context-note-body">
+          <p class="context-note-line">
+            <span data-field="context-note-label"></span>
+            <button type="button" class="link-button" data-action="toggle-summary">查看摘要</button>
+            <button type="button" class="link-button" data-action="drop-summary" title="丢掉摘要，之后重新发完整上文">取消压缩</button>
+          </p>
+          <pre class="context-note-text" data-field="context-note-text" hidden></pre>
+        </div>
+      </li>
+    </template>
 
     <!-- 会话列表项 -->
     <template id="session-template">
@@ -247,8 +268,7 @@
                 <button type="button" class="link-button feedback-button" data-action="rate-down" aria-pressed="false" title="这条回答没帮上忙">👎 没用</button>
               </span>
               <span class="feedback-saved" data-field="feedback-saved" hidden></span>
-            </div>
-            <!-- 评价的补充信息：点完赞/踩才展开，也可以随时收起 -->
+            </div>            <!-- 评价的补充信息：点完赞/踩才展开，也可以随时收起 -->
             <div class="feedback-box" data-field="feedback-box" hidden>
               <p class="feedback-title" data-field="feedback-title"></p>
               <div class="feedback-reasons" data-field="feedback-reasons" hidden></div>

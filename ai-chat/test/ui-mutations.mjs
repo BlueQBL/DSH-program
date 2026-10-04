@@ -131,4 +131,30 @@ runner.run('答完之后不去问模型要标题（永远只有本地兜底那�
   src.replace("    if (placeholder.status === 'done') void requestTitle(sessionIdAtSend);", ''),
 );
 
+// ---- 上下文压缩：压缩标记与「改动落在已压缩部分里」的处理
+
+runner.run('改动落在已压缩的部分里也不作废摘要', APP, (src) =>
+  // 摘要说的是那一轮**当时**的内容；用户改了它之后，摘要就成了「已不存在的版本」的浓缩，
+  // 而模型看到的正是摘要 —— 悄悄用旧内容是最难查的一类问题
+  src.replace('  if (index < 0 || index >= summary.covers) return false;', '  if (true) return false;'),
+);
+
+// ---- 布局：会话列表与聊天框互不干扰（用户反馈：会话一多就盖住输入区）
+//
+// 那次修复是**结构性**的（把输入区从 .board 外面挪进右栏，见 index.html 里的注释），
+// 对应的断言在 ui-tests ⑭ 读 index.html 判结构。这里补两条 CSS 侧的变异 ——
+// 它们同样能造出「列表盖住输入区」：把两栏并成一栏、或者让列表不再自己滚。
+
+runner.run('把两栏并成一栏（会话栏和输入区又处在同一条水平带上）', CSS, (src) =>
+  src.replace('  grid-template-columns: 292px minmax(0, 1fr);', '  grid-template-columns: minmax(0, 1fr);'),
+);
+
+runner.run('会话列表不再自己滚（会话一多就把页面撑高、压到输入区）', CSS, (src) =>
+  src.replace('  overflow-y: auto;\n  /* 会话栏自己是一格：列表滚到头就别把整个页面带着滚了 */', '  /* 会话栏自己是一格：列表滚到头就别把整个页面带着滚了 */'),
+);
+
+runner.run('去掉会话栏的高度上限（列表长到和输入区重叠）', CSS, (src) =>
+  src.replace('  max-height: calc(100dvh - var(--masthead-h, 108px) - 32px);', ''),
+);
+
 runner.finish();

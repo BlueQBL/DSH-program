@@ -423,6 +423,74 @@ try {
     check('没有档位的「记下」被拒绝', bad.status === 400, String(bad.status));
     check('被拒绝的请求没有写进日志', readEntries().length === before, String(readEntries().length - before));
   }
+  console.log('\n上下文压缩：摘要顶替掉前面几轮');
+  {
+    captured.length = 0;
+    const v = (content, extra = {}) => ({ content, attachments: [], createdAt: 0, ...extra });
+    const q1 = { role: 'user', versions: [v('第一问：闭包是什么')] };
+    const a1 = { role: 'assistant', versions: [v('第一答：闭包是函数记住它出生时的环境。')] };
+    const q2 = { role: 'user', versions: [v('第二问：那作用域呢')] };
+    const a2 = { role: 'assistant', versions: [v('')] };
+
+    const history = buildRequestHistory([q1, a1, q2, a2], q2, a2, {
+      summary: { text: '前面聊过闭包：它是函数记住出生时的环境。', covers: 2 },
+    });
+
+    const res = await ask({ sessionId: 'payload_compress', messages: history });
+    check('压缩后这一轮能正常跑通', res.reply === '收到了。', JSON.stringify(res));
+
+    const hit = await waitForCapture((c) => c.body?.stream !== false);
+    const msgs = hit?.body?.messages ?? [];
+    // 第 0 条是服务端拼的角色提示词，摘要是紧跟在它后面的那条 system
+    const base = msgs[0];
+    const summaryMsg = msgs[1];
+    check('第一条仍然是服务端拼的角色提示词', base?.role === 'system' && /对谈录/.test(String(base?.content)),
+      String(base?.content).slice(0, 40));
+    check('摘要当成 system 消息跟在它后面', summaryMsg?.role === 'system', JSON.stringify(summaryMsg)?.slice(0, 80));
+    check('摘要正文真的到了上游',
+      String(summaryMsg?.content ?? '').includes('函数记住出生时的环境'), String(summaryMsg?.content).slice(0, 80));
+    check('摘要标明了这是压缩过的上文', /较早对话的摘要/.test(summaryMsg?.content ?? ''));
+    check('被覆盖的那两轮不再逐条发送',
+      !msgs.some((m) => String(m.content).includes('第一问：闭包是什么')), JSON.stringify(msgs.map((m) => m.content)));
+    check('没被覆盖的提问照常发送', msgs.at(-1)?.content === '第二问：那作用域呢', String(msgs.at(-1)?.content));
+    check('请求仍然以 user 消息结尾', msgs.at(-1)?.role === 'user');
+    check('整轮消息变短了（这就是压缩的意义）', msgs.length === 3, `${msgs.length} 条：角色 + 摘要 + 提问`);
+
+    // 摘要 + 提问就是全部，不该把被压掉的内容又漏回来
+    const all = JSON.stringify(msgs);
+    check('被压掉的内容没有从别处漏回来', !all.includes('第一答'), all);
+  }
+
+  console.log('\n压缩接口：非流式小请求');
+  {
+    captured.length = 0;
+    const res = await fetch(`${BASE}/api/summarize`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        messages: [
+          { role: 'system', content: '你负责把一段对话压缩成摘要。' },
+          { role: 'user', content: '用户：闭包是什么\n\n助手：闭包是函数记住它出生时的环境。' },
+        ],
+      }),
+    });
+    const data = await res.json();
+    check('压缩接口可用', res.status === 200, String(res.status));
+    check('拿到了摘要', typeof data.summary === 'string' && data.summary.length > 0, JSON.stringify(data));
+
+    const hit = await waitForCapture((c) => c.body?.stream === false && c.body?.max_tokens >= 1000);
+    check('压缩是非流式请求', hit?.body?.stream === false);
+    check('提示词原样转发给上游',
+      String(hit?.body?.messages?.[0]?.content ?? '').includes('压缩成摘要'), String(hit?.body?.messages?.[0]?.content).slice(0, 60));
+    check('输出上限留得比标题大（摘要本来就长）', Number(hit?.body?.max_tokens) >= 1000, String(hit?.body?.max_tokens));
+
+    const bad = await fetch(`${BASE}/api/summarize`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'assistant', content: '没有提问' }] }),
+    });
+    check('不以 user 结尾的压缩请求被拒绝', bad.status === 400, String(bad.status));
+  }
 } catch (err) {
   failures.push(`测试中断：${err.message}`);
   console.log(`\n测试中断：${err.stack}`);

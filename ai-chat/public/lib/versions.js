@@ -7,6 +7,7 @@
 // 术语：一条消息可以有多个**版本**，界面上呈现为「第 N 页」。
 
 import { composeUserContent } from './quote.js';
+import { coveredCount, summaryBlock } from './compress.js';
 
 /**
  * 该显示第几页。
@@ -125,16 +126,40 @@ function outboundContent(role, version) {
  * 自己打的那句话，只有发给模型的这一份带上被引用的原文 ——
  * 界面、导出看到的都是原话，而模型知道自己被引的是哪一段。
  *
+ * 压缩过的部分（`options.summary`）换成一条 system 摘要放在最前面，
+ * 被它覆盖的那几条就不再逐条发送 —— 这是「压缩」唯一真正起作用的地方：
+ * **只改发给模型的那一份**，本地消息一条不动。
+ *
  * @param {Array} messages 会话里的消息（提问与回答交替）
  * @param {object} lastUserMessage 末尾那条提问
  * @param {object} [answerMessage] 与它配对的那条助手消息（用来取旧版本的回答）
+ * @param {{summary?: object|null}} [options]
  * @returns {Array<{role: string, content: string, images: string[]}>}
  */
-export function buildRequestHistory(messages, lastUserMessage, answerMessage = null) {
+export function buildRequestHistory(messages, lastUserMessage, answerMessage = null, options = {}) {
+  const { summary = null } = options;
   const history = [];
   const answerVersions = Array.isArray(answerMessage?.versions) ? answerMessage.versions : [];
 
-  for (const m of messages ?? []) {
+  // 被压缩覆盖的那几条不再逐条发，改为最前面一条摘要。
+  //
+  // 两处防守，都是「宁可多发几条也不能发出一个坏请求」：
+  //  · 摘要正文为空 = 没有摘要（否则会塞一条空的 system 进去）；
+  //  · **绝不允许压掉这一轮要回答的那条提问**。请求必须以 user 消息结尾，
+  //    把提问也压进摘要的话服务端会直接 400（手改过的 localStorage 就可能这样）。
+  const all = messages ?? [];
+  const total = all.length;
+  const lastIndex = all.indexOf(lastUserMessage);
+  const ceiling = lastIndex >= 0 ? lastIndex : Math.max(0, total - 1);
+  const covered = Math.min(coveredCount(all, summary), ceiling);
+  const block = summaryBlock(summary);
+  if (covered > 0 && block) {
+    history.push({ role: 'system', content: block, images: [] });
+  }
+
+  for (let index = 0; index < all.length; index += 1) {
+    const m = all[index];
+    if (index < covered) continue; // 已经进了摘要
     const versions = Array.isArray(m?.versions) ? m.versions : [];
     if (!versions.length) continue;
 

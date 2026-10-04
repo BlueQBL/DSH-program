@@ -196,6 +196,8 @@ body::before {
   margin: 0;
   padding: 6px 0;
   overflow-y: auto;
+  /* 会话栏自己是一格：列表滚到头就别把整个页面带着滚了 */
+  overscroll-behavior: contain;
   flex: 1;
 }
 
@@ -1081,6 +1083,64 @@ body::before {
   font-size: 11.5px;
   line-height: 1.5;
   color: color-mix(in srgb, var(--ink) 46%, transparent);
+}
+
+/* ------------------------------------------------------------ 压缩标记
+ *
+ * 插在「最后一个被摘要覆盖的那一轮」后面：它标的是一条界线 ——
+ * 上面的部分模型只看到了摘要，下面的是原文。所以它长得像一道**接线**，
+ * 而不是一张卡片：一道虚线 + 一个 ⌁ 记号，和这一页的稿纸语言一致。
+ */
+
+.context-note {
+  display: grid;
+  grid-template-columns: var(--margin-col) 1fr;
+  gap: var(--gap-col);
+  align-items: start;
+  margin: 4px 0 22px;
+  list-style: none;
+}
+
+.context-note-mark {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 20px;
+  line-height: 1;
+  text-align: right;
+  color: color-mix(in srgb, var(--ink) 34%, transparent);
+}
+
+.context-note-body {
+  padding-top: 8px;
+  border-top: 1px dashed color-mix(in srgb, var(--ink) 28%, transparent);
+}
+
+.context-note-line {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: color-mix(in srgb, var(--ink) 46%, transparent);
+}
+
+/* 摘要原文：等宽、可滚动 —— 它是「模型看到的原文」，不是正文 */
+.context-note-text {
+  margin: 10px 0 0;
+  padding: 11px 13px;
+  max-height: 260px;
+  overflow-y: auto;
+  border-left: 3px solid color-mix(in srgb, var(--ink) 26%, transparent);
+  background: color-mix(in srgb, var(--paper-lift) 70%, transparent);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: color-mix(in srgb, var(--ink) 78%, transparent);
 }
 
 /* ------------------------------------------------------------ 版本分页 */

@@ -92,14 +92,21 @@ const IMAGE_DATA_URL = /^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/
  *
  * 有图片的消息会被转成多模态格式（content 数组）。图片只允许放在最后一条用户消息上：
  * 历史里的图片没必要反复回传，既费 token 又容易被上游拒绝。
+ *
+ * 允许一条 **system** 消息，且只允许在最前面：那是客户端压缩上下文之后
+ * 用来顶替前面若干轮的那段摘要（见 public/lib/compress.js）。
+ * 后面的位置出现 system 一律丢掉 —— 那是客户端出了问题，不是我们要支持的能力。
  */
 function normalizeMessages(input) {
   if (!Array.isArray(input)) return [];
   const clean = [];
   for (const item of input) {
     if (!item || typeof item !== 'object') continue;
-    const role = item.role === 'assistant' ? 'assistant' : item.role === 'user' ? 'user' : null;
+    const role =
+      item.role === 'assistant' ? 'assistant' : item.role === 'user' ? 'user' : item.role === 'system' ? 'system' : null;
     if (!role) continue;
+    // system 只能打头：后面再冒出来的就跳过
+    if (role === 'system' && clean.length > 0) continue;
     const content = String(item.content ?? '').slice(0, LIMITS.maxMessageChars).trim();
     const images = (Array.isArray(item.images) ? item.images : [])
       .filter((src) => typeof src === 'string' && src.length <= LIMITS.maxImageChars && IMAGE_DATA_URL.test(src))
@@ -107,11 +114,13 @@ function normalizeMessages(input) {
     if (!content && !images.length) continue;
     clean.push({ role, content, images });
   }
-  // 只保留最近 N 条，并让第一条一定是 user（上游对首条角色更宽容）
-  let sliced = clean.slice(-LIMITS.maxMessages);
+  // 只保留最近 N 条，并让第一条一定是 user（上游对首条角色更宽容）——
+  // 但如果开头是一条压缩摘要，就把它留下，从它后面的第一条 user 开始算。
+  const leading = clean[0]?.role === 'system' ? [clean[0]] : [];
+  let sliced = [...leading, ...clean.slice(leading.length).slice(-(LIMITS.maxMessages - leading.length))];
   const firstUser = sliced.findIndex((m) => m.role === 'user');
-  if (firstUser > 0) sliced = sliced.slice(firstUser);
-  // 总量保护：从最早的一条开始丢
+  if (firstUser > leading.length) sliced = [...leading, ...sliced.slice(firstUser)];
+  // 总量保护：从最早的一条开始丢（摘要也一起丢 —— 它本来就是「较早的部分」）
   let total = sliced.reduce((sum, m) => sum + m.content.length + m.images.reduce((n, i) => n + i.length, 0), 0);
   while (total > LIMITS.maxTotalChars && sliced.length > 2) {
     const dropped = sliced.shift();
@@ -659,6 +668,79 @@ async function handleTitle(req, res, body) {
   writeJson(res, 200, title ? { ok: true, title, model } : { ok: false, reason: 'empty', title: '', model });
 }
 
+// ---------------------------------------------------------------- 上下文压缩
+
+/** 压缩也是后台小请求：慢一点只是摘要晚到，不该拖太久 */
+const SUMMARY_TIMEOUT_MS = Number(process.env.AI_SUMMARY_TIMEOUT_MS || 45000);
+
+/**
+ * 把一段对话压成摘要。
+ *
+ * 与 /api/chat、/api/title 同一套路：非流式、失败返回 200 + ok:false、
+ * 不换模型不重试。客户端拿不到摘要就继续用原文发 —— 压缩失败最多是这一轮多花点上下文，
+ * 不该让用户发不出消息。
+ *
+ * 提示词由客户端拼（`buildSummaryMessages`，与清洗规则同在 public/lib/compress.js）：
+ * 这里只负责转发和错误分类，保持「服务端是薄代理」这条线。
+ */
+async function handleSummarize(req, res, body) {
+  const incoming = normalizeMessages(body?.messages);
+  if (incoming.length < 1 || incoming.at(-1).role !== 'user') {
+    writeJson(res, 400, { error: 'messages 必须以一条 user 消息结尾' });
+    return;
+  }
+  if (!HAS_MODEL) {
+    writeJson(res, 200, { ok: false, mode: 'mock', reason: 'offline', summary: '' });
+    return;
+  }
+
+  const requestedModel =
+    typeof body?.model === 'string' && /^[A-Za-z0-9._:\/-]{1,80}$/.test(body.model.trim())
+      ? body.model.trim()
+      : '';
+  const model = requestedModel || preferredModel();
+
+  let upstream;
+  try {
+    upstream = await fetch(`${API_BASE}/chat/completions`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(SUMMARY_TIMEOUT_MS),
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${API_KEY}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: incoming.map((m) => ({ role: m.role, content: m.content })),
+        stream: false,
+        // 摘要上限 1200 字，中文大约 1 字 1.5 token，留足余量
+        max_tokens: 2000,
+        temperature: 0.2,
+      }),
+    });
+  } catch (err) {
+    writeJson(res, 200, { ok: false, reason: 'network', message: err.cause?.code || err.message, summary: '' });
+    return;
+  }
+
+  const text = await upstream.text().catch(() => '');
+  if (!upstream.ok) {
+    const classified = classifyUpstreamError({ status: upstream.status, body: text, model, baseUrl: API_BASE });
+    writeJson(res, 200, { ok: false, reason: classified.reason, message: classified.message, summary: '' });
+    return;
+  }
+
+  let content = '';
+  try {
+    content = JSON.parse(text)?.choices?.[0]?.message?.content ?? '';
+  } catch {
+    content = '';
+  }
+
+  const summary = typeof content === 'string' ? content.trim().slice(0, 4000) : '';
+  writeJson(res, 200, summary ? { ok: true, summary, model } : { ok: false, reason: 'empty', summary: '', model });
+}
+
 // ---------------------------------------------------------------- 用户反馈
 
 /**
@@ -724,7 +806,6 @@ async function handleChat(req, res, body) {
     writeJson(res, 400, { error: 'messages 必须以一条 user 消息结尾' });
     return;
   }
-
   // 客户端可以强制本次使用离线回答（用于「离线演示」开关，也用于自动化测试）
   const useMock = FORCE_MOCK || body.mode === 'mock' || !HAS_MODEL;
 
@@ -963,6 +1044,11 @@ const server = createServer(async (req, res) => {
 
     if (pathname === '/api/feedback' && req.method === 'POST') {
       await handleFeedback(req, res, await readJsonBody(req));
+      return;
+    }
+
+    if (pathname === '/api/summarize' && req.method === 'POST') {
+      await handleSummarize(req, res, await readJsonBody(req));
       return;
     }
 
