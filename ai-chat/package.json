@@ -13,6 +13,8 @@
     "test:store": "node test/store-tests.mjs",
     "test:ui": "node test/ui-tests.mjs",
     "test:mutations": "node test/ui-mutations.mjs",
+    "test:version-mutations": "node test/version-mutations.mjs",
+    "test:repro": "node test/repro-overwrite.mjs",
     "test:loud": "node test/verify-loud-failure.mjs",
     "test:payload": "node test/verify-upstream-payload.mjs",
     "verify:sse": "node test/verify-sse.mjs",

@@ -72,26 +72,119 @@ function normalizeAttachment(raw) {
   };
 }
 
-function normalizeMessage(raw) {
+/**
+ * 把消息内容规整成「版本」数组。
+ *
+ * 一条消息可以有多个版本，用于「编辑后重新回答」这个功能：
+ *   · 用户消息 A1 发出后得到回答 B1；用户把提问改成 A2 再发 → A2 是同一个
+ *     用户消息槽位的第 2 版，得到的 B2 是同一条助手回答的第 2 版。
+ *   · 于是这一轮对话就有了「第 1 页 / 第 2 页」，切换查看，互不覆盖。
+ *
+ * 旧数据没有 versions 字段：把 content 当成唯一的第 1 版，
+ * 这样历史数据不需要迁移就能直接工作。
+ */
+function normalizeVersion(raw, fallbackContent = '', fallbackAttachments = []) {
   if (!raw || typeof raw !== 'object') return null;
-  const role = raw.role === 'assistant' ? 'assistant' : raw.role === 'user' ? 'user' : null;
-  if (!role) return null;
-  return {
-    id: typeof raw.id === 'string' ? raw.id : uid(),
-    role,
+  const version = {
     content: typeof raw.content === 'string' ? raw.content : '',
     createdAt: Number(raw.createdAt) || Date.now(),
-    finishedAt: Number(raw.finishedAt) || null,
-    status: ['done', 'streaming', 'interrupted', 'error'].includes(raw.status) ? raw.status : 'done',
-    error: typeof raw.error === 'string' ? raw.error : null,
-    mode: typeof raw.mode === 'string' ? raw.mode : null,
-    model: typeof raw.model === 'string' ? raw.model : null,
-    personaId: typeof raw.personaId === 'string' ? raw.personaId : null,
     attachments: (Array.isArray(raw.attachments) ? raw.attachments : [])
       .map(normalizeAttachment)
       .filter(Boolean)
       .slice(0, MAX_IMAGES_PER_MESSAGE),
+    // 助手回答才有
+    finishedAt: Number(raw.finishedAt) || null,
+    status: ['done', 'streaming', 'interrupted', 'error'].includes(raw.status) ? raw.status : 'done',
+    error: typeof raw.error === 'string' ? raw.error : null,
+    model: typeof raw.model === 'string' ? raw.model : null,
+    mode: typeof raw.mode === 'string' ? raw.mode : null,
   };
+  if (!version.content && !version.attachments.length && raw.status === undefined) {
+    // 完全空的版本没有意义
+    if (!fallbackContent && !fallbackAttachments.length) return null;
+  }
+  return version;
+}
+
+function normalizeMessage(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const role = raw.role === 'assistant' ? 'assistant' : raw.role === 'user' ? 'user' : null;
+  if (!role) return null;
+
+  const attachments = (Array.isArray(raw.attachments) ? raw.attachments : [])
+    .map(normalizeAttachment)
+    .filter(Boolean)
+    .slice(0, MAX_IMAGES_PER_MESSAGE);
+
+  let versions = (Array.isArray(raw.versions) ? raw.versions : [])
+    .map((v) => normalizeVersion(v))
+    .filter(Boolean);
+
+  const versionCount = Math.max(
+    versions.length,
+    Number.isInteger(raw.versionCount) && raw.versionCount > 0 ? raw.versionCount : 0,
+    1,
+  );
+
+  if (!versions.length) {
+    // 旧数据 / 手工构造：把平铺字段当成第 1 版
+    versions = [
+      {
+        content: typeof raw.content === 'string' ? raw.content : '',
+        createdAt: Number(raw.createdAt) || Date.now(),
+        attachments,
+        finishedAt: Number(raw.finishedAt) || null,
+        status: ['done', 'streaming', 'interrupted', 'error'].includes(raw.status) ? raw.status : 'done',
+        error: typeof raw.error === 'string' ? raw.error : null,
+        model: typeof raw.model === 'string' ? raw.model : null,
+        mode: typeof raw.mode === 'string' ? raw.mode : null,
+      },
+    ];
+  }
+
+  const current = versions[versions.length - 1];
+
+  return {
+    id: typeof raw.id === 'string' ? raw.id : uid(),
+    role,
+    versions,
+    versionCount,
+    // 平铺字段始终镜像「最新一版」，旧代码（渲染、导出）不需要改动即可工作
+    content: current.content,
+    createdAt: current.createdAt,
+    finishedAt: current.finishedAt,
+    status: current.status,
+    error: current.error,
+    mode: current.mode,
+    model: current.model,
+    personaId: typeof raw.personaId === 'string' ? raw.personaId : null,
+    attachments: current.attachments,
+  };
+}
+
+/** 当前显示第几版（1 起） */
+function currentVersionNumber(message) {
+  return Math.max(1, Math.min(message.versionCount || 1, message.versions.length));
+}
+
+/** 取出某一版（1 起）；超出范围就回落到最新一版 */
+function versionAt(message, n) {
+  const index = Math.max(0, Math.min((Number(n) || 1) - 1, message.versions.length - 1));
+  return message.versions[index];
+}
+
+/** 让平铺字段与「最新一版」保持一致 */
+function syncFlatFields(message) {
+  const current = message.versions[message.versions.length - 1];
+  if (!current) return;
+  message.content = current.content;
+  message.createdAt = current.createdAt;
+  message.finishedAt = current.finishedAt;
+  message.status = current.status;
+  message.error = current.error;
+  message.mode = current.mode;
+  message.model = current.model;
+  message.attachments = current.attachments;
 }
 
 function normalizeSession(raw) {
@@ -417,76 +510,214 @@ export function createStore() {
 
     /**
      * 用户提问。text 可以为空（纯图片消息）。
+     *
      * @param {string} content
-     * @param {{attachments?: object[]}} options
+     * @param {{attachments?: object[], edit?: object, version?: number, reuse?: boolean}} options
+     *   `edit` + `version`：编辑后重新回答。**一律追加新版本，绝不覆盖旧版** ——
+     *   这是这个功能的全部意义：用户既要看到本次的内容，也要能看到上一次生成的内容。
+     *   早先按「改最新一版就原地覆盖」实现，结果旧内容直接丢了，是错的。
+     *
+     *   `reuse: true`：只把那一版的内容换掉，不新增页。给「重新生成」用 ——
+     *   它是「同样的问题再要一次答案」，不该凭空多出一页。
      */
-    pushUser(content, { attachments = [] } = {}) {
+    pushUser(content, { attachments = [], edit = null, version = null, reuse = false } = {}) {
       const session = active();
+      const cleanAttachments = (attachments ?? [])
+        .map(normalizeAttachment)
+        .filter(Boolean)
+        .slice(0, MAX_IMAGES_PER_MESSAGE);
+      const now = Date.now();
+
+      if (edit && Array.isArray(edit.versions) && edit.versions.length) {
+        const target = Math.max(1, Math.min(Number(version) || edit.versions.length, edit.versions.length));
+
+        if (reuse) {
+          const v = edit.versions[target - 1];
+          v.content = content ?? '';
+          v.attachments = cleanAttachments;
+          v.createdAt = now;
+          v.finishedAt = now;
+          v.status = 'done';
+          v.error = null;
+          syncFlatFields(edit);
+          touch(session);
+          commit();
+          return { message: edit, version: target, replaced: true };
+        }
+
+        // 追加新版本；被编辑的是哪一版只记录来源，不影响「旧页保留」这个约定
+        edit.versions.push({
+          content: content ?? '',
+          createdAt: now,
+          attachments: cleanAttachments,
+          finishedAt: now,
+          status: 'done',
+          error: null,
+          model: null,
+          mode: null,
+          editedFrom: target,
+        });
+        edit.versionCount = edit.versions.length;
+        edit.viewVersion = edit.versions.length;
+        syncFlatFields(edit);
+        touch(session);
+        commit();
+        return { message: edit, version: edit.versions.length, replaced: false };
+      }
+
       const msg = {
         id: uid('u'),
         role: 'user',
-        content: content ?? '',
-        createdAt: Date.now(),
-        finishedAt: Date.now(),
-        status: 'done',
-        error: null,
-        mode: null,
-        model: null,
+        versions: [
+          {
+            content: content ?? '',
+            createdAt: now,
+            attachments: cleanAttachments,
+            finishedAt: now,
+            status: 'done',
+            error: null,
+            model: null,
+            mode: null,
+          },
+        ],
+        versionCount: 1,
         personaId: session.personaId,
-        attachments: (attachments ?? []).map(normalizeAttachment).filter(Boolean).slice(0, MAX_IMAGES_PER_MESSAGE),
       };
+      syncFlatFields(msg);
       session.messages.push(msg);
       // 第一次说话就顺手把「新对话」换成真实标题，列表里才认得出这个会话
       if (session.title === '新对话') {
-        session.title = deriveTitle(content || msg.attachments?.[0]?.name || '');
+        session.title = deriveTitle(content || cleanAttachments[0]?.name || '');
       }
       touch(session);
       commit();
-      return msg;
+      return { message: msg, version: 1, replaced: false };
     },
 
-    /** 新建一条助手消息，进入 streaming 状态 */
-    pushAssistant({ mode = null, model = null } = {}) {
+    /**
+     * 为某个提问准备一条助手消息。
+     *
+     * @param {{mode?: string, model?: string, question?: object, version?: number}} options
+     *   question + version 指出「这一版回答属于提问的第几版」：
+     *   · 那一版还没有助手消息 → 新建一条
+     *   · 已有（中断 / 出错）→ 重置那一版重新写，不产生多余消息
+     */
+    pushAssistant({ mode = null, model = null, question = null, version = null } = {}) {
       const session = active();
-      const msg = {
-        id: uid('a'),
-        role: 'assistant',
-        content: '',
-        createdAt: Date.now(),
-        finishedAt: null,
-        status: 'streaming',
-        error: null,
-        mode,
-        model,
-        personaId: session.personaId,
-        attachments: [],
-      };
-      session.messages.push(msg);
+      const now = Date.now();
+
+      let answer = null;
+      if (question) {
+        const qIndex = session.messages.indexOf(question);
+        const candidate = qIndex >= 0 ? session.messages[qIndex + 1] : null;
+        if (candidate && candidate.role === 'assistant') answer = candidate;
+      }
+
+      if (!answer) {
+        const msg = {
+          id: uid('a'),
+          role: 'assistant',
+          versions: [
+            {
+              content: '',
+              createdAt: now,
+              attachments: [],
+              finishedAt: null,
+              status: 'streaming',
+              error: null,
+              model,
+              mode,
+            },
+          ],
+          versionCount: 1,
+          personaId: session.personaId,
+        };
+        syncFlatFields(msg);
+        session.messages.push(msg);
+        persist();
+        beginStreamingCycle();
+        return { message: msg, version: 1, reused: false };
+      }
+
+      // 助手消息的页数要和提问对齐：不够就补空页，然后重置目标页
+      const qCount = Math.max(1, question ? question.versions.length : 1);
+      while (answer.versions.length < qCount) {
+        answer.versions.push({
+          content: '',
+          createdAt: now,
+          attachments: [],
+          finishedAt: null,
+          status: 'streaming',
+          error: null,
+          model,
+          mode,
+        });
+      }
+      const n = Math.max(1, Math.min(Number(version) || qCount, answer.versions.length));
+      const target = answer.versions[n - 1];
+      target.content = '';
+      target.attachments = [];
+      target.createdAt = now;
+      target.finishedAt = null;
+      target.status = 'streaming';
+      target.error = null;
+      target.model = model;
+      target.mode = mode;
+      answer.versionCount = answer.versions.length;
+      delete answer.viewVersion;
+      syncFlatFields(answer);
       persist();
       beginStreamingCycle();
-      return msg;
+      return { message: answer, version: n, reused: true };
+    },
+
+    /** 这条消息当前应该渲染哪一版（默认最新一版） */
+    viewVersion(message) {
+      const total = message.versions?.length ?? 1;
+      const want = Number(message.viewVersion) || total;
+      return Math.max(1, Math.min(want, total));
+    },
+
+    /** 切换查看第几版。只影响渲染，不改数据 */
+    setMessageVersion(message, n) {
+      const total = message.versions?.length ?? 1;
+      const target = Math.max(1, Math.min(Number(n) || 1, total));
+      if (target === total) delete message.viewVersion;
+      else message.viewVersion = target;
+      commit();
+      return target;
     },
 
     /** 增量追加。用节流落盘：正文实时上屏，但不为每个 token 全量序列化一遍 */
     appendDelta(message, text) {
-      message.content += text;
+      const v = message.versions[message.versions.length - 1];
+      v.content += text;
+      message.content = v.content;
       schedulePersist();
     },
 
     setMode(message, mode) {
+      const v = message.versions[message.versions.length - 1];
+      v.mode = mode;
       message.mode = mode;
       persist();
     },
 
     setMessageModel(message, model) {
+      const v = message.versions[message.versions.length - 1];
+      v.model = model;
       message.model = model;
       persist();
     },
 
     finish(message, status = 'done', error = null) {
+      const v = message.versions[message.versions.length - 1];
+      v.status = status;
+      v.error = error;
+      v.finishedAt = Date.now();
       message.status = status;
       message.error = error;
-      message.finishedAt = Date.now();
+      message.finishedAt = v.finishedAt;
       const session = sessions.find((s) => s.messages.includes(message));
       if (session) touch(session);
       commit();
@@ -494,31 +725,12 @@ export function createStore() {
 
     /** 停止生成：把已写出的内容保留下来 */
     interrupt(message) {
+      const v = message.versions[message.versions.length - 1];
+      v.status = 'interrupted';
+      v.finishedAt = Date.now();
       message.status = 'interrupted';
-      message.finishedAt = Date.now();
+      message.finishedAt = v.finishedAt;
       commit();
-    },
-
-    /** 出错重试前，把失败的那条助手消息丢掉 */
-    dropMessage(message) {
-      const session = sessions.find((s) => s.messages.includes(message));
-      if (!session) return;
-      const index = session.messages.indexOf(message);
-      if (index >= 0) {
-        session.messages.splice(index, 1);
-        commit();
-      }
-    },
-
-    /**
-     * 取出最后一条消息（重新生成时用）。
-     *
-     * 重新生成必须复用原来那条提问，而不是再 push 一条 ——
-     * 否则列表里会留下两条一模一样的提问，「一问一答」的对谈结构就断了。
-     * 这里只改内存不落盘，调用方紧接着会把消息加回去。
-     */
-    popLast() {
-      return active().messages.pop() ?? null;
     },
 
     /**

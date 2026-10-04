@@ -810,6 +810,107 @@ body::before {
   border-left: 2px solid var(--accent);
 }
 
+/* 「编辑」入口：贴在时间后面，平时淡一点，鼠标过来才明显 */
+.turn-actions-inline {
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.turn-user:hover .turn-actions-inline,
+.turn-user:focus-within .turn-actions-inline {
+  opacity: 1;
+}
+@media (hover: none) {
+  .turn-actions-inline {
+    opacity: 1;
+  }
+}
+
+/* ------------------------------------------------------------ 编辑提问 */
+
+.edit-box {
+  margin-top: 10px;
+}
+
+.edit-box textarea {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 15.5px;
+  line-height: 1.65;
+  color: var(--ink);
+  background: var(--paper-lift);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  resize: vertical;
+}
+.edit-box textarea:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.edit-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.edit-note {
+  flex: 1 1 160px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--ink) 46%, transparent);
+}
+
+/* ------------------------------------------------------------ 版本分页 */
+
+/* 像书页角上的页码：小、等宽、当前页用红墨 */
+.turn-versions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 9px;
+  padding-top: 7px;
+  border-top: 1px dashed var(--rule-strong);
+}
+
+.version-dot {
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 5px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 2px;
+  background: var(--paper-lift);
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+}
+.version-dot:hover {
+  border-color: var(--ink);
+  color: var(--ink);
+}
+.version-dot[data-active="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.version-label {
+  margin-left: 6px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: color-mix(in srgb, var(--ink) 42%, transparent);
+}
+
 /* 答：正文，无框无底 */
 .turn-assistant {
   position: relative;

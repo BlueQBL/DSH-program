@@ -27,6 +27,15 @@ import { createSpeechInput, isSpeechSupported, unsupportedReason } from './lib/s
 import { toMarkdown, toPlainText, toJson, download, suggestedFilename } from './lib/exporters.js';
 import { supportsVision } from './lib/vision.js';
 import {
+  resolveShownPage,
+  totalPages,
+  versionBarItems,
+  versionLabel,
+  editOutcome,
+  editHint,
+  buildRequestHistory,
+} from './lib/versions.js';
+import {
   resolveStartingSession as resolveStartingSessionDecide,
   shouldCreateSession,
   startNotice,
@@ -505,6 +514,11 @@ els.modelSelect.addEventListener('change', () => {
 
 // ---------------------------------------------------------------- 渲染
 
+/**
+ * 一条「对谈」的 DOM 结构与缓存。
+ * 数字编号只在建节点时算一次；其余字段全部在 paintTurn 里按版本重画，
+ * 这样切换版本时两侧（问与答）能一起更新。
+ */
 function buildTurnNode(message, number) {
   const frag = els.exchangeTemplate.content.cloneNode(true);
   const node = frag.querySelector('.exchange');
@@ -512,60 +526,116 @@ function buildTurnNode(message, number) {
 
   frag.querySelector('[data-field="number"]').textContent = String(number).padStart(2, '0');
 
-  const index = store.messages.indexOf(message);
-  const question = store.messages[index - 1];
-  const questionBody = frag.querySelector('[data-field="question"]');
-  const questionImages = frag.querySelector('[data-field="question-images"]');
-
-  if (question) {
-    frag.querySelector('[data-field="asked-at"]').textContent = formatClock(question.createdAt);
-    questionBody.textContent = question.content;
-    // 纯图片消息没有文字，别留一块空白
-    questionBody.hidden = !question.content;
-
-    if (question.attachments?.length) {
-      questionImages.hidden = false;
-      questionImages.replaceChildren(
-        ...question.attachments.map((att) => {
-          const li = document.createElement('li');
-          const img = document.createElement('img');
-          img.src = att.dataUrl;
-          img.alt = att.name;
-          img.title = `${att.name}${att.width ? ` · ${att.width}×${att.height}` : ''}（点击看大图）`;
-          li.appendChild(img);
-          return li;
-        }),
-      );
-    }
-
-    const tag = frag.querySelector('[data-field="user-tag"]');
-    const label = personaLabel(question.personaId ?? store.session.personaId);
-    if (label && label !== '通用助手') {
-      tag.hidden = false;
-      tag.textContent = label;
-    }
-  }
-
-  const assistant = frag.querySelector('[data-field="answer-turn"]');
-  assistant.dataset.status = message.status;
-  node.__assistant = assistant;
+  node.__assistant = frag.querySelector('[data-field="answer-turn"]');
   node.__answerBody = frag.querySelector('[data-field="answer"]');
   node.__answerModel = frag.querySelector('[data-field="answer-model"]');
+  node.__answerVersion = frag.querySelector('[data-field="answer-version"]');
+  node.__questionBody = frag.querySelector('[data-field="question"]');
+  node.__questionImages = frag.querySelector('[data-field="question-images"]');
+  node.__askedAt = frag.querySelector('[data-field="asked-at"]');
+  node.__userTag = frag.querySelector('[data-field="user-tag"]');
+  node.__versionBar = frag.querySelector('[data-field="question-versions"]');
+  node.__editBox = frag.querySelector('[data-field="edit-box"]');
+  node.__editInput = frag.querySelector('[data-field="edit-input"]');
+  node.__editHint = frag.querySelector('[data-field="edit-hint"]');
 
-  return { node, assistant };
+  return { node, assistant: node.__assistant };
 }
 
+/** 画出「第 n 版 / 共 N 版」的切换条 */
+function paintVersionBar(node, question, shown) {
+  const bar = node.__versionBar;
+  const items = versionBarItems(question.versions.length, shown);
+
+  if (!items.length) {
+    bar.hidden = true;
+    bar.replaceChildren();
+    return;
+  }
+
+  const dots = items.map((item) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'version-dot';
+    button.textContent = item.label;
+    button.dataset.action = 'version';
+    button.dataset.version = String(item.page);
+    button.title = item.title;
+    if (item.active) {
+      button.dataset.active = 'true';
+      button.setAttribute('aria-current', 'true');
+    }
+    return button;
+  });
+
+  const label = document.createElement('span');
+  label.className = 'version-label';
+  label.textContent = versionLabel(shown, question.versions.length);
+
+  bar.hidden = false;
+  bar.replaceChildren(...dots, label);
+}
+
+/** 按当前选中的版本重画一条对谈 */
 function paintTurn(node) {
-  const assistant = node.__assistant;
-  const body = node.__answerBody;
   const message = store.messages.find((m) => m.id === node.dataset.id);
   if (!message) return;
 
-  const streaming = message.status === 'streaming';
-  assistant.dataset.status = message.status;
-  assistant.dataset.pending = streaming && !message.content ? 'true' : 'false';
+  const answer = node.__assistant;
+  const body = node.__answerBody;
 
-  const html = renderMarkdown(message.content, { streaming });
+  const index = store.messages.indexOf(message);
+  const question = store.messages[index - 1];
+
+  // 一条对谈的「页」由提问决定；回答跟着显示同一页
+  const shown = question ? resolveShownPage(question, store.viewVersion(question)) : 1;
+
+  // ---- 问的那一侧
+  if (question) {
+    const qv = question.versions[shown - 1] ?? question.versions[question.versions.length - 1];
+    node.__askedAt.textContent = formatClock(qv.createdAt);
+    node.__questionBody.textContent = qv.content ?? '';
+    node.__questionBody.hidden = !qv.content;
+
+    const images = qv.attachments ?? [];
+    node.__questionImages.hidden = images.length === 0;
+    node.__questionImages.replaceChildren(
+      ...images.map((att) => {
+        const li = document.createElement('li');
+        const img = document.createElement('img');
+        img.src = att.dataUrl;
+        img.alt = att.name;
+        img.title = `${att.name}${att.width ? ` · ${att.width}×${att.height}` : ''}（点击看大图）`;
+        li.appendChild(img);
+        return li;
+      }),
+    );
+
+    const label = personaLabel(question.personaId ?? store.session.personaId);
+    node.__userTag.hidden = !label || label === '通用助手';
+    if (!node.__userTag.hidden) node.__userTag.textContent = label;
+
+    paintVersionBar(node, question, shown);
+
+    // 编辑框：只有在编辑态里才显示，且内容回填当前版本
+    if (node.__editing) {
+      node.__editBox.hidden = false;
+      if (document.activeElement !== node.__editInput) node.__editInput.value = qv.content ?? '';
+      // 提前说清这一按会发生什么：覆盖当前页，还是新增一页
+      const outcome = editOutcome(shown, question.versions.length);
+      node.__editHint.textContent = editHint(outcome, shown, question.versions.length);
+    } else {
+      node.__editBox.hidden = true;
+    }
+  }
+
+  // ---- 答的那一侧
+  const av = message.versions[Math.min(shown, message.versions.length) - 1] ?? message.versions[message.versions.length - 1];
+  const streaming = av.status === 'streaming';
+  answer.dataset.status = av.status;
+  answer.dataset.pending = streaming && !av.content ? 'true' : 'false';
+
+  const html = renderMarkdown(av.content, { streaming });
   // 内容没变就不动 DOM，避免流式期间反复重排
   if (body.dataset.painted !== html) {
     body.innerHTML = html;
@@ -573,26 +643,28 @@ function paintTurn(node) {
   }
 
   const timing = node.querySelector('[data-field="answer-timing"]');
-  if (message.finishedAt) timing.textContent = formatDuration(message.finishedAt - message.createdAt);
+  if (av.finishedAt) timing.textContent = formatDuration(av.finishedAt - av.createdAt);
   else timing.textContent = streaming ? '正在写' : '';
 
   // 回答用了哪个模型 —— 换了模型时这行能解释「为什么风格变了」
-  if (message.model) {
-    node.__answerModel.hidden = false;
-    node.__answerModel.textContent = message.model;
-  } else {
-    node.__answerModel.hidden = true;
-  }
+  node.__answerModel.hidden = !av.model;
+  if (av.model) node.__answerModel.textContent = av.model;
+
+  // 第几页的回答（只有多页时才显示，免得噪音）
+  const pages = totalPages(question, message);
+  node.__answerVersion.hidden = pages <= 1;
+  if (!node.__answerVersion.hidden) node.__answerVersion.textContent = `第 ${shown} 页`;
 
   const status = node.querySelector('[data-field="answer-status"]');
-  status.dataset.tone = message.status === 'error' ? 'error' : 'info';
-  status.hidden = !message.error && message.status !== 'interrupted';
-  if (message.error) status.textContent = message.error;
-  else if (message.status === 'interrupted') status.textContent = '已停止，写出的部分留在这里。可以让它重新生成。';
+  status.dataset.tone = av.status === 'error' ? 'error' : 'info';
+  status.hidden = !av.error && av.status !== 'interrupted';
+  if (av.error) status.textContent = av.error;
+  else if (av.status === 'interrupted') status.textContent = '已停止，写出的部分留在这里。可以让它重新生成。';
 
   const actions = node.querySelector('[data-field="answer-actions"]');
   const isLast = store.messages.at(-1)?.id === message.id;
-  actions.dataset.visible = !streaming && isLast && message.content ? 'true' : 'false';
+  const isNewestPage = !question || shown === question.versions.length;
+  actions.dataset.visible = !streaming && isLast && isNewestPage && av.content ? 'true' : 'false';
 }
 
 function render({ keepLive = false } = {}) {
@@ -882,7 +954,15 @@ async function readEventStream(response, onEvent) {
   }
 }
 
-async function send(rawText) {
+/**
+ * 发送一轮对话。
+ *
+ * @param {string} rawText
+ * @param {{edit?: object, version?: number, reuse?: boolean}} options
+ *   edit + version：编辑后重新发送（**追加新页，旧页保留**）。
+ *   reuse: true：原地替换那一版，不新增页（给「重新生成」用）。
+ */
+async function send(rawText, { edit = null, version = null, reuse = false } = {}) {
   const text = (rawText ?? els.input.value).trim();
   const images = [...runtime.pendingImages];
   if ((!text && !images.length) || runtime.busy) return;
@@ -893,10 +973,20 @@ async function send(rawText) {
   autoGrow();
   updateSendState();
 
-  store.pushUser(text, { attachments: images });
+  // 编辑重发时，被编辑的位置之后的所有轮次在新一页里不再适用（那一页只到这次问答为止）。
+  // 但因为我们是「追加版本」而不是「替换」，旧页仍然完整保留，所以这里不需要删任何东西。
+
+  const asked = store.pushUser(text, { attachments: images, edit, version, reuse });
+  const question = asked.message;
+  const versionNumber = asked.version;
   store.renameFromFirstMessage();
 
-  const placeholder = store.pushAssistant({ model: currentModelForRequest() });
+  const answered = store.pushAssistant({
+    model: currentModelForRequest(),
+    question,
+    version: versionNumber,
+  });
+  const placeholder = answered.message;
   runtime.liveTurn = placeholder;
   runtime.renderNode = null;
   render();
@@ -904,15 +994,10 @@ async function send(rawText) {
   setBusy(true);
   if (runtime.pinned) scrollToBottom();
 
-  // 只把「已完成的轮次 + 本条提问」发给服务端，不含刚建的空占位
-  const history = store.messages
-    .filter((m) => m.id !== placeholder.id)
-    .map((m) => ({
-      role: m.role,
-      content: m.content,
-      // 图片只跟最后一条用户消息一起发；历史里的图片不用反复回传
-      images: m.role === 'user' ? (m.attachments ?? []).map((a) => a.dataUrl) : [],
-    }));
+  // 发给服务端的历史交给 lib/versions.js 里的纯函数构造（那边有完整测试）：
+  // 它负责「每条消息取最新一版」+「末尾提问额外补上历史版本及其旧回答」，
+  // 并保证图片只跟末条一起发。
+  const history = buildRequestHistory(store.messages, question, placeholder);
 
   const controller = new AbortController();
   runtime.controller = controller;
@@ -1026,10 +1111,10 @@ function stopGenerating() {
 }
 
 /**
- * 重新生成：用同一条提问（和它的图片）再问一次。
+ * 重新生成：用当前这一版的提问（和它的图片）再问一次，覆盖这一版的回答。
  *
- * 先把那条失败/中断的回答和它对应的提问一起摘掉，再把提问原样送回，
- * 这样列表里不会留下重复的提问 —— 一次提问永远对应一条回答。
+ * 不新增页 —— 「重新生成」是「同样的输入再要一次答案」，
+ * 而「编辑后重新回答」才是产生新页的动作。两者语义不同，别混。
  */
 async function retryLast(message) {
   if (runtime.busy) return;
@@ -1038,19 +1123,57 @@ async function retryLast(message) {
   const question = store.messages[index - 1];
   if (!question || question.role !== 'user') return;
 
-  const text = question.content;
-  const images = question.attachments ?? [];
+  const shown = store.viewVersion(question);
+  const qv = question.versions[shown - 1];
+  if (!qv) return;
 
-  store.dropMessage(message);
-  if (store.messages.at(-1)?.id === question.id) store.popLast();
-  render();
-  renderSessionList();
+  const text = qv.content ?? '';
+  const images = qv.attachments ?? [];
+  if (!text && !images.length) return;
 
-  // 复用 send 的完整流程：把提问重新放回待发状态再发
-  els.input.value = text;
+  // 用「同一版提问」重发：reuse 让它原地替换那一版，不新增页 ——
+  // 「重新生成」是「同样的问题再要一次答案」，不该凭空多出一页。
+  els.input.value = '';
   runtime.pendingImages = images;
-  renderAttachments();
-  await send();
+  await send(text, { edit: question, version: shown, reuse: true });
+}
+
+/**
+ * 编辑后重新回答。
+ *
+ * 关键行为（用户明确要求）：**绝不覆盖原来那一页**。
+ * 每次都追加新的一页，于是「本次的内容」和「上一次生成的内容」都能看到、可对比。
+ * 这里不要改成「覆盖最新一页」—— 那样旧内容直接丢了，功能就白做了。
+ */
+async function resendEdited(question, version, newText) {
+  if (runtime.busy) return;
+  const text = String(newText ?? '').trim();
+  const v = question.versions[version - 1];
+  const keepImages = v?.attachments ?? [];
+  if (!text && !keepImages.length) {
+    flashHint('内容不能为空', 2400);
+    return;
+  }
+
+  els.input.value = '';
+  runtime.pendingImages = keepImages;
+  await send(text, { edit: question, version });
+}
+
+/** 只改不发：把这一版的内容改掉，不触发回答 */
+function saveEditOnly(question, version, newText) {
+  const text = String(newText ?? '').trim();
+  const v = question.versions[version - 1];
+  if (!v) return;
+  if (!text && !(v.attachments ?? []).length) {
+    flashHint('内容不能为空', 2400);
+    return;
+  }
+  v.content = text;
+  v.createdAt = Date.now();
+  store.setMessageVersion(question, version);
+  render();
+  flashHint('已保存改动（没有重新回答）', 2400);
 }
 
 // ---------------------------------------------------------------- 模式提示
@@ -1313,12 +1436,73 @@ els.exchanges.addEventListener('click', (event) => {
   const message = store.messages.find((m) => m.id === node?.dataset.id);
   if (!message) return;
 
-  if (action.dataset.action === 'copy') {
-    copyText(markdownToPlain(message.content)).then((ok) =>
+  const kind = action.dataset.action;
+  const index = store.messages.indexOf(message);
+  const question = store.messages[index - 1];
+  // 默认作用于「当前显示的那一页」
+  const shown = question ? store.viewVersion(question) : 1;
+
+  if (kind === 'copy') {
+    const av = message.versions[Math.min(shown, message.versions.length) - 1];
+    copyText(markdownToPlain(av?.content ?? '')).then((ok) =>
       flashHint(ok ? '回答已复制' : '复制失败，请手动选择'),
     );
-  } else if (action.dataset.action === 'retry') {
+    return;
+  }
+
+  if (kind === 'retry') {
     retryLast(message);
+    return;
+  }
+
+  // ---- 版本切换
+  if (kind === 'version') {
+    const target = Number(action.dataset.version);
+    if (question && target) {
+      store.setMessageVersion(question, target);
+      node.__editing = false;
+      render();
+    }
+    return;
+  }
+
+  // ---- 编辑
+  if (kind === 'edit') {
+    if (!question) return;
+    // 正在生成时不让进编辑态：那一轮还没写完，改了版本号会乱
+    if (runtime.busy) {
+      flashHint('正在生成，等这一轮结束再编辑', 2400);
+      return;
+    }
+    // 只有一个编辑框处于打开状态，避免同时改好几处
+    for (const other of els.exchanges.querySelectorAll('.exchange')) {
+      if (other !== node) other.__editing = false;
+    }
+    node.__editing = true;
+    node.__editInput.value = question.versions[shown - 1]?.content ?? '';
+    paintTurn(node);
+    node.__editInput.focus();
+    return;
+  }
+
+  if (kind === 'edit-cancel') {
+    node.__editing = false;
+    paintTurn(node);
+    els.input.focus();
+    return;
+  }
+
+  if (kind === 'edit-resend') {
+    const text = node.__editInput.value;
+    node.__editing = false;
+    if (question) resendEdited(question, shown, text);
+    return;
+  }
+
+  if (kind === 'edit-save') {
+    const text = node.__editInput.value;
+    node.__editing = false;
+    if (question) saveEditOnly(question, shown, text);
   }
 });
 

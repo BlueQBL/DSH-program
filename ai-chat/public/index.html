@@ -190,9 +190,24 @@
               <span class="turn-role">问</span>
               <time data-field="asked-at"></time>
               <span class="turn-tag" data-field="user-tag" hidden></span>
+              <span class="turn-actions-inline">
+                <button type="button" class="link-button" data-action="edit">编辑</button>
+              </span>
             </p>
             <div class="turn-body" data-field="question"></div>
             <ul class="turn-images" data-field="question-images" hidden></ul>
+            <!-- 编辑态：改完可以选择「重新回答」（产生新的一页）或「只改不发」 -->
+            <div class="edit-box" data-field="edit-box" hidden>
+              <textarea data-field="edit-input" rows="3" aria-label="编辑这条提问"></textarea>
+              <div class="edit-actions">
+                <button type="button" class="solid-button" data-action="edit-resend">重新回答</button>
+                <button type="button" class="ghost-button" data-action="edit-save">只改不发</button>
+                <button type="button" class="ghost-button" data-action="edit-cancel">取消</button>
+                <span class="edit-note" data-field="edit-hint"></span>
+              </div>
+            </div>
+            <!-- 版本分页：只有编辑重发过才出现 -->
+            <div class="turn-versions" data-field="question-versions" hidden></div>
           </div>
 
           <div class="turn turn-assistant" data-field="answer-turn">
@@ -200,6 +215,7 @@
               <span class="turn-role">答</span>
               <span class="turn-timing" data-field="answer-timing"></span>
               <span class="turn-tag" data-field="answer-model" hidden></span>
+              <span class="turn-tag" data-field="answer-version" hidden></span>
             </p>
             <div class="turn-body markdown" data-field="answer"></div>
             <p class="turn-status" data-field="answer-status" hidden></p>

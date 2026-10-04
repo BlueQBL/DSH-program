@@ -6,7 +6,7 @@
 // 装上最小替身来验证真实行为：「刷新不丢、断流可恢复、多会话互不串台、旧数据能迁移」。
 // 这些是用户直接感知的能力，靠肉眼看界面验证太不可靠。
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -215,7 +215,8 @@ group('持久化 · 刷新与断流');
   const { createStore } = await loadStore();
   const storeA = createStore();
   storeA.pushUser('我叫小林');
-  const assistant = storeA.pushAssistant();
+  // pushAssistant 现在返回 { message, version, reused }：版本功能需要知道落在哪一版上
+  const { message: assistant } = storeA.pushAssistant();
   storeA.appendDelta(assistant, '记下了');
   storeA.finish(assistant, 'done');
 
@@ -234,7 +235,7 @@ group('持久化 · 刷新与断流');
   const { createStore } = await loadStore();
   const storeA = createStore();
   storeA.pushUser('请解释一下闭包');
-  const assistant = storeA.pushAssistant();
+  const { message: assistant } = storeA.pushAssistant();
   storeA.appendDelta(assistant, '闭包指的是函数');
   storeA.appendDelta(assistant, '记住了它定义时的作用域');
   simulatePageHide();
@@ -273,11 +274,16 @@ group('持久化 · 刷新与断流');
   const { createStore } = await loadStore();
   const store = createStore();
   store.pushUser('问');
-  const assistant = store.pushAssistant();
+  const { message: assistant } = store.pushAssistant();
   store.appendDelta(assistant, '第一段');
   const stored = JSON.parse(localStorage.getItem(SESSIONS_KEY));
-  check('第一个增量立即落盘', stored.sessions[0].messages[1].content === '第一段',
-    JSON.stringify(stored.sessions[0].messages[1].content));
+  // 落盘结构现在带 versions：平铺的 content 是「最新一版」的镜像，两者都该是最新内容
+  const savedAnswer = stored.sessions[0].messages[1];
+  check('第一个增量立即落盘', savedAnswer.content === '第一段',
+    JSON.stringify(savedAnswer.content));
+  check('落盘时版本结构里的内容也同步了',
+    savedAnswer.versions?.[savedAnswer.versions.length - 1]?.content === '第一段',
+    JSON.stringify(savedAnswer.versions?.at(-1)?.content));
 }
 
 group('迁移 · 旧版单会话数据');
@@ -642,6 +648,419 @@ group('新会话 · 角色与空会话清理');
   check('另一个空白会话被清掉了', !store.sessions.some((s) => s.id === blankA));
 }
 
+// ---------------------------------------------------------------- 编辑后重新回答
+
+/**
+ * 手工给一对问答各追加一版。
+ *
+ * 测试里需要「已经存在更早版本」的局面，但**没法用 pushUser 造出来**：
+ * 指向最新一版的编辑一律是原地替换，不产生新页。所以这里直接推版本数组。
+ */
+function appendVersion(question, answer, qText, aText) {
+  const stamp = () => ({
+    createdAt: Date.now(),
+    attachments: [],
+    finishedAt: Date.now(),
+    status: 'done',
+    error: null,
+    model: null,
+    mode: null,
+  });
+  question.versions.push({ content: qText, ...stamp() });
+  question.versionCount = question.versions.length;
+  if (answer) answer.versions.push({ content: aText, ...stamp() });
+}
+
+group('编辑后重新回答 · 旧页必须保留');
+
+{
+  /**
+   * 这是用户实测报上来的缺陷，值得原样钉住：
+   * 「我生成之后重新编辑了需求，然后生成的内容把上一次的内容给覆盖了。
+   *   我应该能看到本次的内容，更要看到上次的生成内容。」
+   *
+   * 根因是我当初按「改的是最新一页就原地覆盖」实现 —— 只有一页时，
+   * 「最新一页」就是唯一那一页，于是编辑重发改成了覆盖，旧内容直接丢了。
+   * 现在语义是：**编辑一律追加新页**。
+   */
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+
+  const q = store.pushUser('第一版问题').message;
+  const a = store.pushAssistant({ question: q, version: 1 }).message;
+  store.appendDelta(a, '第一版回答');
+  store.finish(a, 'done');
+
+  // 用户点编辑（此时只有一页），改完点「重新回答」
+  const shown = store.viewVersion(q);
+  check('只有一页时，编辑目标是第 1 页', shown === 1, String(shown));
+
+  const resent = store.pushUser('第二版问题', { edit: q, version: shown });
+  check('编辑重发**新增一页**，不是覆盖', resent.replaced === false, `replaced=${String(resent.replaced)}`);
+  check('提问变成 2 版', q.versions.length === 2, String(q.versions.length));
+  check('第 1 版（上一次的内容）还在',
+    q.versions[0].content === '第一版问题', JSON.stringify(q.versions.map((v) => v.content)));
+  check('第 2 版是本次的内容', q.versions[1].content === '第二版问题');
+
+  const a2 = store.pushAssistant({ question: q, version: resent.version }).message;
+  store.appendDelta(a2, '第二版回答');
+  store.finish(a2, 'done');
+
+  check('回答也变成 2 版', a2.versions.length === 2, String(a2.versions.length));
+  check('上一次的回答还在',
+    a2.versions[0].content === '第一版回答', JSON.stringify(a2.versions.map((v) => v.content)));
+  check('本次的回答在第 2 版', a2.versions[1].content === '第二版回答');
+  check('自动切到新生成的那一页', store.viewVersion(q) === 2, String(store.viewVersion(q)));
+
+  // 用户能来回看两页
+  store.setMessageVersion(q, 1);
+  check('能切回第 1 页看上一次的内容', q.versions[store.viewVersion(q) - 1].content === '第一版问题');
+  check('第 1 页对应的回答也是上一次的',
+    a2.versions[store.viewVersion(q) - 1].content === '第一版回答');
+  store.setMessageVersion(q, 2);
+  check('能切回第 2 页看本次的内容', q.versions[store.viewVersion(q) - 1].content === '第二版问题');
+}
+
+{
+  // 连续编辑多次：每一版都在，一个都不能丢
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+
+  const q = store.pushUser('第 1 次问答').message;
+  const a = store.pushAssistant({ question: q, version: 1 }).message;
+  store.appendDelta(a, '回答 1');
+  store.finish(a, 'done');
+
+  for (let i = 2; i <= 4; i += 1) {
+    const r = store.pushUser(`第 ${i} 次问答`, { edit: q, version: store.viewVersion(q) });
+    const ans = store.pushAssistant({ question: q, version: r.version }).message;
+    store.appendDelta(ans, `回答 ${i}`);
+    store.finish(ans, 'done');
+  }
+
+  check('连续编辑 3 次后有 4 页', q.versions.length === 4, String(q.versions.length));
+  check('四页的内容都按顺序保留',
+    JSON.stringify(q.versions.map((v) => v.content)) ===
+      JSON.stringify(['第 1 次问答', '第 2 次问答', '第 3 次问答', '第 4 次问答']),
+    JSON.stringify(q.versions.map((v) => v.content)));
+  check('四页的回答都按顺序保留',
+    JSON.stringify(a.versions.map((v) => v.content)) ===
+      JSON.stringify(['回答 1', '回答 2', '回答 3', '回答 4']),
+    JSON.stringify(a.versions.map((v) => v.content)));
+  check('会话里仍然只有一问一答', store.messages.length === 2, `${store.messages.length} 条`);
+}
+
+{
+  // 「重新生成」是另一个动作：原地替换那一版，不新增页
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+
+  const q = store.pushUser('问题').message;
+  const a = store.pushAssistant({ question: q, version: 1 }).message;
+  store.appendDelta(a, '第一次回答');
+  store.finish(a, 'done');
+
+  const retried = store.pushUser('问题', { edit: q, version: 1, reuse: true });
+  check('重新生成是原地替换', retried.replaced === true);
+  check('重新生成不新增页', q.versions.length === 1, String(q.versions.length));
+
+  const a2 = store.pushAssistant({ question: q, version: retried.version }).message;
+  store.appendDelta(a2, '第二次回答');
+  store.finish(a2, 'done');
+  check('重新生成后回答也只有 1 版', a2.versions.length === 1, String(a2.versions.length));
+  check('回答被换成了新的', a2.versions[0].content === '第二次回答');
+}
+
+{
+  // 关键场景：编辑**更早**的版本 → 必须追加新页，第 1 页原样保留
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+
+  const q = store.pushUser('第一版问题').message;
+  const ans = store.pushAssistant({ question: q, version: 1 }).message;
+  store.appendDelta(ans, '第一版回答');
+  store.finish(ans, 'done');
+
+  // 手工追加第 2 版，构造出「存在更早版本」的局面。
+  // 不能靠 pushUser 做这一步：改最新一版是原地替换，不会产生新页。
+  appendVersion(q, ans, '第二版问题', '第二版回答');
+
+  // 现在编辑第 1 版 → 应当追加为第 3 版，前两页都留着
+  const edited = store.pushUser('改自第 1 版的新问题', { edit: q, version: 1 });
+  check('编辑更早的版本会追加新页', edited.replaced === false);
+  check('追加后的版本数是 3', q.versions.length === 3, String(q.versions.length));
+  check('第 1 版内容没被覆盖', q.versions[0].content === '第一版问题', q.versions[0].content);
+  check('第 2 版内容没被覆盖', q.versions[1].content === '第二版问题', q.versions[1].content);
+  check('第 3 版是新内容', q.versions[2].content === '改自第 1 版的新问题');
+
+  // 为新版本准备回答：页数要对齐
+  const a3 = store.pushAssistant({ question: q, version: 3 });
+  check('助手消息补齐到与提问相同的页数', a3.message.versions.length === 3,
+    String(a3.message.versions.length));
+  check('旧页的回答没被动过', a3.message.versions[0].content === '第一版回答');
+  check('新页的回答是空的（等着写）', a3.message.versions[2].content === '');
+  store.appendDelta(a3.message, '第三版回答');
+  store.finish(a3.message, 'done');
+
+  // 切换查看：每一页看到的是它自己那一版
+  store.setMessageVersion(q, 1);
+  check('可以切回第 1 页', store.viewVersion(q) === 1);
+  check('第 1 页看到的是第 1 版内容', q.versions[store.viewVersion(q) - 1].content === '第一版问题',
+    q.versions[store.viewVersion(q) - 1].content);
+  check('第 1 页对应的回答也是第 1 版',
+    a3.message.versions[store.viewVersion(q) - 1].content === '第一版回答');
+  store.setMessageVersion(q, 3);
+  check('可以切到第 3 页', store.viewVersion(q) === 3);
+  check('第 3 页看到的是第 3 版内容',
+    q.versions[store.viewVersion(q) - 1].content === '改自第 1 版的新问题');
+}
+
+{
+  // 版本与平铺字段的镜像关系：平铺 content 永远是最新一版
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+  const q = store.pushUser('v1').message;
+  store.pushUser('v2', { edit: q, version: 1 });
+  check('平铺 content 镜像最新一版', q.content === 'v2', q.content);
+  check('versionCount 与实际一致', q.versionCount === q.versions.length);
+}
+
+{
+  // 刷新后版本不能丢
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const storeA = createStore();
+  const q = storeA.pushUser('第一版').message;
+  const a = storeA.pushAssistant({ question: q, version: 1 }).message;
+  storeA.appendDelta(a, '回答一');
+  storeA.finish(a, 'done');
+
+  // 编辑重发：每次都新增一页，旧页保留
+  storeA.pushUser('最终的第二版', { edit: q, version: 1 });
+  check('编辑重发后第 1 页没被覆盖，新内容成为第 2 页',
+    q.versions.length === 2 &&
+      q.versions[0].content === '第一版' &&
+      q.versions[1].content === '最终的第二版',
+    JSON.stringify(q.versions.map((v) => v.content)));
+
+  // 再编辑一次，看是否继续追加（而不是覆盖第 2 页）
+  const edited = storeA.pushUser('新增的第三版', { edit: q, version: 1 });
+  check('再次编辑继续追加为第 3 页', edited.replaced === false && q.versions.length === 3,
+    `replaced=${String(edited.replaced)} versions=${q.versions.length}`);
+
+  const { createStore: createStore2 } = await loadStore();
+  const storeB = createStore2();
+  const q2 = storeB.messages.find((m) => m.role === 'user');
+  check('刷新后提问的版本数还在', q2?.versions.length === 3, String(q2?.versions.length));
+  check('刷新后各版内容都在（顺序也保持）',
+    JSON.stringify(q2?.versions.map((v) => v.content)) ===
+      JSON.stringify(['第一版', '最终的第二版', '新增的第三版']),
+    JSON.stringify(q2?.versions.map((v) => v.content)));
+  check('刷新后第 1 页内容没被覆盖', q2?.versions[0].content === '第一版');
+  check('刷新后助手消息存在', Boolean(storeB.messages.find((m) => m.role === 'assistant')));
+}
+
+{
+  // 旧数据（没有 versions 字段）要被当成 1 版，不能崩
+  freshEnvironment({
+    seed: {
+      [SESSIONS_KEY]: JSON.stringify({
+        version: 2,
+        activeId: 's_old_1',
+        sessions: [
+          {
+            id: 's_old_1',
+            title: '旧数据',
+            messages: [
+              { id: 'u1', role: 'user', content: '老提问', createdAt: 1700000000000, status: 'done' },
+              { id: 'a1', role: 'assistant', content: '老回答', createdAt: 1700000001000, status: 'done' },
+            ],
+          },
+        ],
+      }),
+    },
+  });
+  const { createStore } = await loadStore();
+  const store = createStore();
+  check('旧消息被补成 1 版', store.messages[0].versions.length === 1);
+  check('旧消息内容没丢', store.messages[0].versions[0].content === '老提问');
+  check('旧消息能读版本号', store.viewVersion(store.messages[0]) === 1);
+  check('旧助手消息也被补成 1 版', store.messages[1].versions[0].content === '老回答');
+}
+
+{
+  // 边界：给不存在的版本号要安全回落，不能崩
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+  const q = store.pushUser('只有一版').message;
+  const a = store.pushAssistant({ question: q, version: 99 }).message;
+  check('指定不存在的版本号不会崩', a.versions.length >= 1, String(a.versions.length));
+  store.setMessageVersion(q, 99);
+  check('切到不存在的版本号会回落到最后一版', store.viewVersion(q) === q.versions.length);
+  store.setMessageVersion(q, -5);
+  check('切到负数版本号会回落到第 1 版', store.viewVersion(q) === 1);
+}
+
+group('版本决策 · 纯函数');
+
+{
+  const {
+    resolveShownPage,
+    totalPages,
+    versionBarItems,
+    versionLabel,
+    editOutcome,
+    editHint,
+  } = await loadModule('versions.js');
+
+  const versions = (n) =>
+    Array.from({ length: n }, (_, i) => ({ content: `v${i + 1}`, createdAt: 0, attachments: [] }));
+
+  // 显示哪一页
+  check('没指定页码时显示最后一页', resolveShownPage({ versions: versions(3) }, undefined) === 3);
+  check('指定页码在范围内时按指定的来', resolveShownPage({ versions: versions(3) }, 2) === 2);
+  check('页码超出范围回落到最后一页', resolveShownPage({ versions: versions(3) }, 99) === 3);
+  check('页码为负数回落到最后一页', resolveShownPage({ versions: versions(3) }, -1) === 3);
+  check('非数字页码回落到最后一页', resolveShownPage({ versions: versions(3) }, 'abc') === 3);
+  check('小数页码向下取整', resolveShownPage({ versions: versions(3) }, 2.7) === 2);
+  check('单页时恒为 1', resolveShownPage({ versions: versions(1) }, 5) === 1);
+  check('没有 versions 字段也不崩', resolveShownPage({}, 2) === 1);
+  check('question 为 null 也不崩', resolveShownPage(null, 2) === 1);
+
+  // 总页数
+  check('总页数取提问与回答的较大者', totalPages({ versions: versions(3) }, { versions: versions(2) }) === 3);
+  check('回答页数更多时也取得到', totalPages({ versions: versions(1) }, { versions: versions(4) }) === 4);
+  check('两边都没有版本时是 1', totalPages({}, {}) === 1);
+
+  // 页码按钮
+  check('只有一页时不给按钮（界面据此隐藏版本栏）', versionBarItems(1, 1).length === 0);
+  check('多页时按钮数量等于页数', versionBarItems(3, 2).length === 3);
+  check('当前页被标记为 active', versionBarItems(3, 2).filter((i) => i.active).length === 1);
+  check('active 落在正确的页上', versionBarItems(3, 2).find((i) => i.active).page === 2);
+  check('按钮带可点的页码', versionBarItems(3, 1).map((i) => i.page).join(',') === '1,2,3');
+  check('页码越界时 active 回落到最后一页',
+    versionBarItems(3, 99).find((i) => i.active).page === 3);
+
+  // 说明文字
+  check('单页不显示页码说明', versionLabel(1, 1) === '');
+  check('多页显示「第 n / N 页」', versionLabel(2, 3) === '第 2 / 3 页');
+
+  // 编辑的后果 —— 这是整个功能的核心判断
+  // 教训：最初这里断言的是「编辑最新一页 → 覆盖」，结果用户实测发现旧内容丢了。
+  // 「编辑后重新回答」的意义就是保留旧版，所以现在**恒为追加**。
+  check('只有一页时编辑 → 追加（绝不能覆盖唯一那一页）', editOutcome(1, 1) === 'append');
+  check('编辑最新一页 → 也是追加', editOutcome(3, 3) === 'append');
+  check('编辑更早的页 → 追加', editOutcome(1, 3) === 'append');
+  check('页码越界也 → 追加', editOutcome(99, 3) === 'append');
+  check('任何输入都返回 append', [editOutcome(), editOutcome(0, 0), editOutcome(-1, -1)].every((r) => r === 'append'));
+
+  check('追加时会提示页号并说明旧页保留',
+    editHint('append', 1, 3).includes('第 4 页') && editHint('append', 1, 3).includes('保留'));
+  check('覆盖时会提示会覆盖哪一页', editHint('replace', 2, 3).includes('第 2 页'));
+  check('未知结果不给提示', editHint('', 1, 1) === '');
+}
+
+group('历史构造 · 旧版本必须一起发出去');
+
+{
+  const { buildRequestHistory } = await loadModule('versions.js');
+
+  const v = (content, extra = {}) => ({ content, attachments: [], createdAt: 0, ...extra });
+  const img = (dataUrl) => ({ dataUrl, name: 'x.png', mime: 'image/png' });
+
+  // 单页：正常一问一答
+  {
+    const q = { role: 'user', versions: [v('问题')] };
+    const a = { role: 'assistant', versions: [v('回答')] };
+    const h = buildRequestHistory([q, a], q, a);
+    check('单页时历史是标准的 system 前的 一问一答', h.length === 2, JSON.stringify(h));
+    check('单页时顺序正确', h[0].role === 'user' && h[1].role === 'assistant');
+  }
+
+  // 中间还有别的轮次
+  {
+    const q1 = { role: 'user', versions: [v('第一轮问')] };
+    const a1 = { role: 'assistant', versions: [v('第一轮答')] };
+    const q2 = { role: 'user', versions: [v('第二轮问')] };
+    const a2 = { role: 'assistant', versions: [v('第二轮答')] };
+    const h = buildRequestHistory([q1, a1, q2, a2], q2, a2);
+    check('多轮历史全部带上', h.length === 4, String(h.length));
+    check('多轮顺序正确',
+      h.map((x) => x.content).join('|') === '第一轮问|第一轮答|第二轮问|第二轮答',
+      h.map((x) => x.content).join('|'));
+  }
+
+  // 关键：编辑更早的版本后，旧版本 + 旧回答都要在请求里
+  {
+    const q = { role: 'user', versions: [v('原问题'), v('旧问题二'), v('新问题')] };
+    const a = { role: 'assistant', versions: [v('原回答'), v('旧回答二'), v('')] };
+    const h = buildRequestHistory([q, a], q, a);
+
+    check('历史里带上了全部三个版本的提问', h.filter((x) => x.role === 'user').length === 3,
+      JSON.stringify(h.map((x) => `${x.role}:${x.content}`)));
+    check('旧版本与原版本都按顺序出现',
+      h.filter((x) => x.role === 'user').map((x) => x.content).join('|') === '原问题|旧问题二|新问题',
+      h.filter((x) => x.role === 'user').map((x) => x.content).join('|'));
+    check('每个旧版本后面跟上了它当时的回答',
+      h.map((x) => `${x.role}:${x.content}`).join(' | ') ===
+        'user:原问题 | assistant:原回答 | user:旧问题二 | assistant:旧回答二 | user:新问题',
+      h.map((x) => `${x.role}:${x.content}`).join(' | '));
+    check('不会把空的最新回答也塞进去', !h.some((x) => x.role === 'assistant' && x.content === ''));
+  }
+
+  // 图片：只跟最后一条提问一起发
+  {
+    const q = { role: 'user', versions: [v('看这张图', { attachments: [img('data:image/png;base64,AA==')] })] };
+    const a = { role: 'assistant', versions: [v('图里是……')] };
+    const h = buildRequestHistory([q, a], q, a);
+    // 注意：历史里最后一项是助手的回答，提问在它前面
+    const lastUser = [...h].reverse().find((x) => x.role === 'user');
+    check('末条提问带上了图片', lastUser?.images.length === 1, JSON.stringify(lastUser));
+    check('助手回答不带图片', h.find((x) => x.role === 'assistant').images.length === 0);
+  }
+
+  {
+    // 关键：**早前**带图的那条提问，它的图片不能再被回传 ——
+    // 只有末尾那条的图片才需要发（服务端也只取末条）。
+    // 少了这条断言，「历史也塞图片」这种回归就查不出来。
+    const q1 = { role: 'user', versions: [v('早前发的图', { attachments: [img('data:image/png;base64,OLD=')] })] };
+    const a1 = { role: 'assistant', versions: [v('早前看图后的回答')] };
+    const q2 = { role: 'user', versions: [v('现在这个问题')] };
+    const a2 = { role: 'assistant', versions: [v('现在的回答')] };
+    const h = buildRequestHistory([q1, a1, q2, a2], q2, a2);
+
+    check('早前那条带图提问的图片没有被回传',
+      h[0].images.length === 0, JSON.stringify(h[0]));
+    check('历史里的用户消息都不带图片',
+      h.filter((x) => x.role === 'user' && x.content !== '现在这个问题').every((x) => x.images.length === 0),
+      JSON.stringify(h.map((x) => ({ c: x.content, n: x.images.length }))));
+    check('只有末尾那条带上了它自己的图片',
+      h.filter((x) => x.images.length > 0).length === 0,
+      '末尾这条本来就没图，所以应该一张都不带');
+  }
+
+  // 边界
+  check('空消息列表返回空历史', buildRequestHistory([], null).length === 0);
+  check('null 消息列表不崩', buildRequestHistory(null, null).length === 0);
+  check('没有 versions 的消息被跳过', buildRequestHistory([{ role: 'user' }], null).length === 0);
+  check('内容全空的消息不进历史',
+    buildRequestHistory([{ role: 'user', versions: [v('')] }], null).length === 0);
+
+  {
+    // 旧版本没有回答时不该产生半截 assistant 条目
+    const q = { role: 'user', versions: [v('原问题'), v('新问题')] };
+    const h = buildRequestHistory([q], q, null);
+    check('旧版本没有回答时不插入空回答', h.length === 2, JSON.stringify(h));
+    check('顺序仍是 旧问题 → 新问题', h[0].content === '原问题' && h[1].content === '新问题');
+  }
+}
+
 // ---------------------------------------------------------------- 缺陷回归
 
 group('缺陷回归 · 代码高亮');
@@ -728,6 +1147,20 @@ group('缺陷回归 · 进入页面默认开新会话');
 }
 
 // ---------------------------------------------------------------- 汇总
+
+// 把失败项写进文件：变异测试要读它判断「这个缺陷有没有被测到」。
+// 不能用管道捕获 stdout —— 受限沙箱下带 stdio:'pipe' 的子进程会直接 EPERM。
+try {
+  const tempDir = path.resolve(HERE, '../.tmp-mutations');
+  mkdirSync(tempDir, { recursive: true });
+  writeFileSync(
+    path.join(tempDir, 'ui-result.json'),
+    JSON.stringify({ passed, failed: [...failures] }, null, 2),
+    'utf8',
+  );
+} catch {
+  /* 写不了不影响正常使用 */
+}
 
 console.log(`\n${'─'.repeat(52)}`);
 if (failures.length === 0) {
