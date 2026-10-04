@@ -11,6 +11,7 @@
 
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -271,6 +272,19 @@ try {
 } finally {
   server.kill();
   fake.close();
+}
+
+// 登记真实断言数，供 test/readme-tests.mjs 核对 README 里的数字。
+// 必须用「实际通过了多少」，不能去数字面 check( —— 有的在条件分支里、有的在循环里。
+try {
+  const dir = path.resolve(HERE, '../.tmp-mutations');
+  mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'counts.json');
+  const counts = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};
+  counts['verify-upstream-payload'] = { count: passed, failed: failures.length };
+  writeFileSync(file, JSON.stringify(counts, null, 2), 'utf8');
+} catch {
+  /* 写不了不影响测试本身 */
 }
 
 console.log(`\n${'─'.repeat(52)}`);

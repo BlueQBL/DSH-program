@@ -6,7 +6,7 @@
 // 装上最小替身来验证真实行为：「刷新不丢、断流可恢复、多会话互不串台、旧数据能迁移」。
 // 这些是用户直接感知的能力，靠肉眼看界面验证太不可靠。
 
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -1061,6 +1061,67 @@ group('历史构造 · 旧版本必须一起发出去');
   }
 }
 
+group('复制反馈 · 用户必须看得出复制成功');
+
+{
+  const { copyFeedbackState, copyHint, copyFeedbackDuration, defaultCopyLabel, COPY_LABELS } =
+    await loadModule('copy-feedback.js');
+
+  // 用户反馈：「复制按钮没有变化，看不出来是不是复制成功」
+  // 所以按钮必须变成明确的成功字样 + 成功状态类
+  const ok = copyFeedbackState(true);
+  check('复制成功后按钮文字变成「已复制」', ok.label === '已复制', ok.label);
+  check('复制成功后带上成功状态类（供样式换色）', ok.className === 'is-copied', ok.className);
+  check('成功状态色不是红墨（红墨在这里表示「问」和「正在写」）', ok.tone === 'success', ok.tone);
+
+  const fail = copyFeedbackState(false);
+  check('复制失败也有反馈，不能没反应', fail.label === '复制失败', fail.label);
+  check('失败带独立的状态类', fail.className === 'is-copy-failed', fail.className);
+  check('失败与成功的状态类不同', fail.className !== ok.className);
+
+  // 底部提示（就近看不到时的第二层反馈）
+  check('成功提示写明复制了什么', copyHint(true, '代码').includes('代码'));
+  check('失败提示给出补救办法', copyHint(false).includes('手动'));
+
+  // 失败要停留更久，让用户来得及看清并手动复制
+  check('失败反馈比成功停留更久', copyFeedbackDuration(false) > copyFeedbackDuration(true),
+    `${copyFeedbackDuration(false)} vs ${copyFeedbackDuration(true)}`);
+  check('成功反馈时长在合理区间（1–3 秒）',
+    copyFeedbackDuration(true) >= 1000 && copyFeedbackDuration(true) <= 3000,
+    String(copyFeedbackDuration(true)));
+
+  check('三种复制入口都有默认文案',
+    ['code', 'answer', 'full'].every((k) => typeof defaultCopyLabel(k) === 'string' && defaultCopyLabel(k)),
+    JSON.stringify(COPY_LABELS.idle));
+
+  // 纯函数：任何输入都不该抛
+  check('传入 undefined 不崩', copyFeedbackState(undefined).label === '复制失败');
+  check('copyHint 缺省参数不崩', typeof copyHint(true) === 'string');
+}
+
+{
+  // 样式必须真的存在 —— 光有状态类而 CSS 没写，界面上依然看不出变化，
+  // 而这正是用户报的那个问题
+  const css = readFileSync(path.resolve(PUBLIC_LIB, '../styles.css'), 'utf8');
+  check('定义了成功色变量', /--success:\s*#/.test(css), '缺少 --success 会让成功反馈没有颜色');
+  check('成功色与红墨 accent 不同',
+    !/--success:\s*#c2402a/i.test(css), '成功色不能等于红墨，否则语义混淆');
+  check('代码块复制按钮有成功样式', /\.code-copy\.is-copied\s*\{/.test(css));
+  check('代码块复制按钮有失败样式', /\.code-copy\.is-copy-failed\s*\{/.test(css));
+  check('链接式按钮有成功样式', /\.link-button\.is-copied\s*\{/.test(css));
+  check('导出菜单项有成功样式', /\.export-popup button\.is-copied\s*\{/.test(css));
+  // 反馈期间按钮会被禁用，不能因此变灰，否则看不出「成功」
+  check('反馈期间按钮不变灰', /\.code-copy:disabled\s*\{[^}]*opacity:\s*1/.test(css));
+}
+
+{
+  // 代码块模板里必须带 data-copy-code，否则点击处理找不到它
+  const { renderMarkdown } = await import('../public/lib/markdown.js');
+  const html = renderMarkdown('```js\nconst a = 1;\n```');
+  check('代码块复制按钮带 data-copy-code 标记', html.includes('data-copy-code'));
+  check('复制按钮的初始文案是「复制代码」', html.includes('>复制代码<'), html.match(/class="code-copy"[^>]*>([^<]*)</)?.[1]);
+}
+
 // ---------------------------------------------------------------- 缺陷回归
 
 group('缺陷回归 · 代码高亮');
@@ -1158,6 +1219,12 @@ try {
     JSON.stringify({ passed, failed: [...failures] }, null, 2),
     'utf8',
   );
+
+  // 同时登记真实断言数，供 test/readme-tests.mjs 核对 README 里的数字
+  const countsFile = path.join(tempDir, 'counts.json');
+  const counts = existsSync(countsFile) ? JSON.parse(readFileSync(countsFile, 'utf8')) : {};
+  counts['store-tests'] = { count: passed, failed: failures.length };
+  writeFileSync(countsFile, JSON.stringify(counts, null, 2), 'utf8');
 } catch {
   /* 写不了不影响正常使用 */
 }

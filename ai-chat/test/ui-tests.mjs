@@ -10,7 +10,7 @@
 // 做法：用极简 DOM 替身加载真实的 app.js，然后模拟真实点击。
 // 不是为了完整模拟浏览器，而是为了让「点了之后状态对不对」可断言。
 
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -136,11 +136,39 @@ function dispatch(el, type, event = {}) {
   return ran;
 }
 
+/** 收集 window 上的 scroll 监听，测试里主动触发。
+    必须在定义 window 之前声明 —— 否则 window 的 addEventListener 闭包会撞上 TDZ。 */
+const scrollHandlers = [];
+
 const registry = new Map();
 const getEl = (id) => {
   if (!registry.has(id)) registry.set(id, makeElement('div', { id }));
   return registry.get(id);
 };
+
+/** 报头元素（app.js 用 querySelector 取，所以要单独准备一个） */
+const mastheadEl = makeElement('header');
+mastheadEl.className = 'masthead';
+// 模拟真实高度：offsetHeight 在替身里默认是 undefined，会让 app.js 回落到 108
+mastheadEl.offsetHeight = 116;
+
+/* 抖动那条缺陷是「写得太频繁」引起的，所以要能数出到底写了几次。
+   dataset 换成带计数的访问器，顺便把每次写入时的 scrollY 记下来 ——
+   有了这条写入轨迹，就能断言状态没有来回翻。 */
+const compactWrites = [];
+let compactValue = undefined;
+Object.defineProperty(mastheadEl, 'dataset', {
+  configurable: true,
+  get: () => ({
+    get compact() {
+      return compactValue;
+    },
+    set compact(v) {
+      compactValue = String(v);
+      compactWrites.push({ value: compactValue, scrollY: globalThis.window.scrollY });
+    },
+  }),
+});
 
 const html = readFileSync(path.join(PUBLIC, 'index.html'), 'utf8');
 for (const m of html.matchAll(/id="([^"]+)"/g)) getEl(m[1]);
@@ -160,12 +188,27 @@ globalThis.document = {
   body: makeElement('body'),
   activeElement: null,
   visibilityState: 'visible',
-  querySelector: () => null,
+  // 报头是通过 querySelector('.masthead') 拿到的，所以替身要能返回它
+  querySelector: (sel) => (sel === '.masthead' ? mastheadEl : null),
   querySelectorAll: () => [],
-  documentElement: { scrollHeight: 1000 },
+  documentElement: {
+    scrollHeight: 1000,
+    // CSS 变量：记录下来供断言检查（报头高度会写进 --masthead-h）
+    _vars: {},
+    _varWrites: [],
+    style: {
+      setProperty(name, value) {
+        globalThis.document.documentElement._vars[name] = value;
+        globalThis.document.documentElement._varWrites.push({ name, value });
+      },
+    },
+  },
 };
 globalThis.window = {
-  addEventListener: () => {},
+  addEventListener: (type, fn) => {
+    // 只接住 scroll，供测试主动触发
+    if (type === 'scroll') scrollHandlers.push(fn);
+  },
   matchMedia: () => ({ matches: false, addEventListener() {} }),
   scrollTo() {},
   open() {},
@@ -586,6 +629,155 @@ console.log('\n⑦ 离线模式下标签显示正确');
     chip.textContent === '离线回答' || chip.textContent.length > 0, chip.textContent);
 }
 
+console.log('\n⑧ 报头固定：滚到任何位置都能开新会话 / 切会话');
+{
+  // 先去掉注释再断言：样式里的注释会解释「为什么故意不写 transition」，
+  // 留着它，检查 transition 的规则就会被自己的注释绊倒。
+  const css = readFileSync(path.resolve(PUBLIC, 'styles.css'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+
+  // 这条是用户要求的核心：报头不跟着正文滚走
+  const mastheadRule = css.match(/\.masthead\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+  check('报头是 sticky（固定在顶部）', /position:\s*sticky/.test(mastheadRule), mastheadRule.slice(0, 120));
+  check('报头贴在顶部（top: 0）', /top:\s*0/.test(mastheadRule));
+  check('报头有不透明背景（否则正文会从它下面透出来）',
+    /background:\s*color-mix|background:\s*var\(--paper\)|background:\s*#/.test(mastheadRule));
+
+  // 层级必须高于会话栏和输入区，否则滚动时会被它们压住
+  const zOf = (sel) => Number(css.match(new RegExp(`${sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{[\\s\\S]*?z-index:\\s*(\\d+)`))?.[1] ?? NaN);
+  const zMasthead = Number(mastheadRule.match(/z-index:\s*(\d+)/)?.[1] ?? NaN);
+  const zRail = zOf('.rail');
+  const zComposer = zOf('.composer');
+  const zPopup = zOf('.export-popup');
+  check('报头层级高于会话栏', zMasthead > zRail, `报头 ${zMasthead} vs 会话栏 ${zRail}`);
+  check('报头层级高于输入区', zMasthead > zComposer, `报头 ${zMasthead} vs 输入区 ${zComposer}`);
+  check('导出弹层高于报头（否则会被遮挡）', zPopup > zMasthead, `弹层 ${zPopup} vs 报头 ${zMasthead}`);
+
+  // 紧凑态：滚动后收窄，但按钮必须还在
+  check('定义了紧凑态样式', /\.masthead\[data-compact="true"\]/.test(css));
+  const compactRule = css.match(/\.masthead\[data-compact="true"\]\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+  check('紧凑态只缩小留白（不动按钮）', /padding/.test(compactRule), compactRule.slice(0, 100));
+  check('紧凑态不隐藏 masthead-tools', !/masthead-tools[^}]*display:\s*none/.test(css));
+
+  // 会话栏的 sticky 偏移跟着报头高度走，否则它的表头会被压在报头下面
+  const railRule = css.match(/\.rail\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+  check('会话栏让开了报头高度', /--masthead-h/.test(railRule), railRule.slice(0, 120));
+
+  // ---- 运行期行为
+  check('滚动监听已注册', scrollHandlers.length > 0, `${scrollHandlers.length} 个`);
+
+  // 首屏：不紧凑，并且把实测高度写给 CSS
+  window.scrollY = 0;
+  // 快照一份再遍历：处理器执行时若又注册了监听，直接遍历原数组会越跑越多
+  for (const fn of [...scrollHandlers]) fn();
+  check('首屏不是紧凑态', mastheadEl.dataset.compact === 'false', String(mastheadEl.dataset.compact));
+  check('报头高度写进了 CSS 变量（供会话栏用）',
+    document.documentElement._vars['--masthead-h'] === '116px',
+    String(document.documentElement._vars['--masthead-h']));
+
+  // 往下滚：切换成紧凑态
+  window.scrollY = 400;
+  for (const fn of [...scrollHandlers]) fn();
+  check('往下滚之后切换成紧凑态', mastheadEl.dataset.compact === 'true', String(mastheadEl.dataset.compact));
+
+  // 滚回顶部：恢复
+  window.scrollY = 0;
+  for (const fn of [...scrollHandlers]) fn();
+  check('滚回顶部后恢复非紧凑', mastheadEl.dataset.compact === 'false', String(mastheadEl.dataset.compact));
+
+  // ---- 抖动缺陷（用户报的「快到顶时整页一直抖」）
+  //
+  // 复现条件是个跨帧的反馈循环，不是同一帧里的重入：
+  //   滚动越过阈值 → 报头收窄 → 文档矮了 30 多像素 → 浏览器的滚动锚定把 scrollY 拉回来
+  //   → 又回到阈值另一侧 → 状态翻回去 → 文档又长回来 → …
+  // 阈值那一带就会一直上下跳。所以光靠「本帧重入守卫」是挡不住的，
+  // 必须让状态**只跟方向有关**：进入和退出用两个不同的阈值，中间留缓冲带。
+  //
+  // 断言不写死 48/8 这两个数字，而是从外部行为把两个阈值量出来 ——
+  // 这样调参数不会弄坏测试，但「两个阈值退化成同一个」一定会被抓住。
+
+  const callHandlers = () => {
+    for (const fn of [...scrollHandlers]) fn();
+  };
+  const goTo = (y) => {
+    window.scrollY = y;
+    callHandlers();
+    return mastheadEl.dataset.compact;
+  };
+
+  // 从完整态出发往下走，量出「进入紧凑」的位置
+  goTo(0);
+  let enterAt = -1;
+  for (let y = 1; y <= 200; y += 1) {
+    if (goTo(y) === 'true') {
+      enterAt = y;
+      break;
+    }
+  }
+
+  // 从紧凑态出发往上走，量出「退出紧凑」的位置
+  goTo(400);
+  let exitAt = -1;
+  for (let y = 199; y >= 0; y -= 1) {
+    if (goTo(y) === 'false') {
+      exitAt = y;
+      break;
+    }
+  }
+
+  check('能滚进紧凑态', enterAt > 0, `进入阈值 ≈ ${enterAt}`);
+  check('能滚回完整态', exitAt >= 0, `退出阈值 ≈ ${exitAt}`);
+  // 缓冲带要「足够宽」，不能只是比 0 大一点点：报头收窄一步会让文档高度少 60px 左右，
+  // 缓冲带比这个台阶还窄的话，一次扰动就能把 scrollY 推过对岸那条线，循环照样成立。
+  check('缓冲带比报头的高度台阶更宽（这是防抖的关键）',
+    enterAt - exitAt >= 40, `进入 ${enterAt} − 退出 ${exitAt} = ${enterAt - exitAt}，需 ≥ 40`);
+
+  // 缓冲带内必须「记住方向」：同一个 scrollY 得到的状态取决于从哪边来，
+  // 这正是滞回的定义。单阈值实现会在这里露馅 —— 它会两次都返回同一个值。
+  goTo(0);
+  goTo(300);
+  const fromBelowInBand = goTo(Math.round((enterAt + exitAt) / 2)); // 从紧凑态退回缓冲带
+  goTo(0);
+  const fromTopInBand = goTo(Math.round((enterAt + exitAt) / 2)); // 从顶部走进缓冲带
+  check('缓冲带内保持来向的状态（滞回生效）',
+    fromBelowInBand === 'true' && fromTopInBand === 'false',
+    `从下往上 ${fromBelowInBand} / 从上往下 ${fromTopInBand}`);
+
+  // 抖动之所以看得见，是因为写入次数跟着滚动次数跑：
+  // 位置没变也写一遍，样式就一帧帧重算。现在只有状态真的变了才写。
+  goTo(600); // 先滚到位，后面那三十次才真的算「位置没变」
+  const writesBefore = compactWrites.length;
+  for (let i = 0; i < 30; i += 1) goTo(600);
+  check('同一个位置反复滚动不再重复写 DOM',
+    compactWrites.length === writesBefore,
+    `30 次滚动写了 ${compactWrites.length - writesBefore} 次`);
+
+  // 并且写入的值必须是交替的，不能出现 true/true 或来回翻的轨迹
+  const sweep = [];
+  goTo(0);
+  for (let y = 0; y <= 120; y += 3) sweep.push(goTo(y));
+  for (let y = 120; y >= 0; y -= 3) sweep.push(goTo(y));
+  const flips = sweep.filter((v, i) => i > 0 && v !== sweep[i - 1]).length;
+  check('来回滚一遍只翻两次状态（下→上各一次，没有抖动）',
+    flips === 2, `翻了 ${flips} 次：${sweep.join('').slice(0, 60)}`);
+
+  // --masthead-h 同理：高度没变就不该重写，否则会话栏每帧都要重算 max-height
+  const varWritesBefore = document.documentElement._varWrites.length;
+  for (let i = 0; i < 20; i += 1) goTo(700 + i);
+  check('报头高度没变时不重写 CSS 变量',
+    document.documentElement._varWrites.length === varWritesBefore,
+    `20 次滚动写了 ${document.documentElement._varWrites.length - varWritesBefore} 次`);
+
+  // 布局过渡会让「文档高度」在 180ms 里一帧帧地变，等于把抖动的燃料留在页面里。
+  // 报头里任何影响盒子高度的属性都不该有 transition。
+  check('报头本身没有过渡（高度变化必须瞬时完成）',
+    !/transition:/.test(mastheadRule), mastheadRule.slice(-80));
+  check('标题字号没有过渡（字号会带动行高、行高会带动报头高度）',
+    !/transition:\s*font-size/.test(css));
+  check('报头不做滚动锚定候选（免得这个易出问题的角落再多一个变量）',
+    /overflow-anchor:\s*none/.test(mastheadRule));
+}
+
 console.log(`\n${'─'.repeat(52)}`);
 summaryPrinted = true;
 if (errors.length) {
@@ -603,6 +795,13 @@ try {
     JSON.stringify({ passed, failed: [...failures, ...errors] }, null, 2),
     'utf8',
   );
+
+  // 同时登记真实断言数，供 test/readme-tests.mjs 核对 README 里的数字。
+  // 必须用「实际执行了多少」，不能去数字面 check( —— 有的在条件分支里、有的在循环里。
+  const countsFile = path.join(tempDir, 'counts.json');
+  const counts = existsSync(countsFile) ? JSON.parse(readFileSync(countsFile, 'utf8')) : {};
+  counts['ui-tests'] = { count: passed, failed: failures.length + errors.length };
+  writeFileSync(countsFile, JSON.stringify(counts, null, 2), 'utf8');
 } catch {
   /* 写不了不影响正常使用 */
 }

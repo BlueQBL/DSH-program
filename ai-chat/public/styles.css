@@ -16,6 +16,13 @@
   --accent: #c2402a;
   --accent-ink: #fdfbf7;
 
+  /* 成功 / 提示色。
+     刻意不用红墨：这一页上红墨的语义是「问」和「正在写」，
+     拿它表示「复制成功」会让人以为出了什么事。 */
+  --success: #2f6b4f;
+  --success-ink: #fdfbf7;
+  --failure: #9b3116;
+
   --rule: color-mix(in srgb, var(--ink) 10%, transparent);
   --rule-strong: color-mix(in srgb, var(--ink) 20%, transparent);
   --wash: color-mix(in srgb, var(--ink) 4%, transparent);
@@ -145,10 +152,17 @@ body::before {
   align-items: start;
 }
 
+/*
+ * 会话列表。
+ * top 要把固定报头的高度让出来，否则它自己的表头会被压到报头下面看不见。
+ * 滚动到深处时用 .board[data-compact] 通知它报头变矮了（由 JS 同步）。
+ */
 .rail {
   position: sticky;
-  top: 20px;
-  max-height: calc(100dvh - 140px);
+  top: var(--masthead-h, 108px);
+  max-height: calc(100dvh - var(--masthead-h, 108px) - 32px);
+  /* 高于正文（1）、低于固定报头（4）：滚动时它自己的表头不会被正文压住 */
+  z-index: 3;
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--rule);
@@ -531,7 +545,8 @@ body::before {
   position: absolute;
   right: 0;
   bottom: calc(100% + 6px);
-  z-index: 3;
+  /* 高于固定报头（4）和输入区（2），否则会被它们压住 */
+  z-index: 6;
   display: flex;
   flex-direction: column;
   min-width: 168px;
@@ -565,7 +580,25 @@ body::before {
 
 /* ------------------------------------------------------------ 报头 */
 
+/*
+ * 报头固定在顶部。
+ *
+ * 理由：「新对话」和「对话列表」是全局操作，不该随正文滚走 ——
+ * 用户滚到对话深处想开个新话题，还得先滚回顶部，很难受。
+ *
+ * 代价是它要吃掉一段垂直空间，所以往下滚之后会切换成紧凑态（见下），
+ * 把高度压到大约一半。
+ *
+ * 背景用「半透明 + 模糊」而不是纯色：这一页的背景是稿纸横格，
+ * 用纯色会把横格切断得很生硬；模糊能让下面的字迹透出一层，又不影响读按钮。
+ */
 .masthead {
+  position: sticky;
+  top: 0;
+  /* 顶部对齐时不要留缝：page 的上内边距由这里补回来 */
+  margin-top: -40px;
+  padding-top: 40px;
+  z-index: 4; /* 要高于侧栏（3）和输入区（2），否则滚起来会被压住 */
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
@@ -573,6 +606,35 @@ body::before {
   flex-wrap: wrap;
   padding-bottom: 14px;
   border-bottom: 2px solid var(--ink);
+  background: color-mix(in srgb, var(--paper) 88%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  /*
+   * 这里**故意没有 transition**，虽然加一个过渡会更好看。
+   *
+   * 报头高度一变，下方正文的文档坐标就跟着变；而「往下滚 → 收窄」这件事本身是由
+   * 滚动位置触发的。两者叠在一起，动画期间每一帧文档都在长高/变矮，
+   * 浏览器的滚动锚定会跟着一帧帧修正滚动位置 —— 手指停在阈值附近时，
+   * 整页就会来回抖（详见 app.js 里 updateMastheadHeight 的注释）。
+   * 瞬时切换只有一个高度台阶，配合滞回只在离阈值很远处发生，不会抖。
+   *
+   * 顺带还修掉一个隐蔽的错：过渡期间量到的 offsetHeight 是动画中间值，
+   * 用户恰好在这 180ms 内停止滚动的话，写进 --masthead-h 的就是错的高度，
+   * 会话栏的吸顶偏移会一直偏着。
+   *
+   * overflow-anchor: none 是另一回事，别当成上面那条的修法 ——
+   * 它只是不让报头自己成为滚动锚定的候选锚点。报头是个会变高的 sticky 元素，
+   * 让它留在锚点候选里等于往这个容易出问题的角落再加一个变量，
+   * 而它对「正文不被抽动」没有任何贡献（锚点会退到下面的正文节点上去）。
+   */
+  overflow-anchor: none;
+}
+
+/* 往下滚之后收窄，别一直占着大块地方 */
+.masthead[data-compact="true"] {
+  padding-top: 24px;
+  padding-bottom: 8px;
+  align-items: center;
 }
 
 .masthead-title h1 {
@@ -582,6 +644,7 @@ body::before {
   font-weight: 700;
   letter-spacing: 0.22em;
   line-height: 1.15;
+  /* 同样不加 transition：字号过渡会带动行高，也就是带动报头高度（见 .masthead 的注释） */
 }
 
 .masthead-title p {
@@ -589,6 +652,16 @@ body::before {
   font-size: 12.5px;
   letter-spacing: 0.14em;
   color: var(--ink-soft);
+}
+
+/* 紧凑态：标题缩小、副标题收起 —— 按钮和「对话列表」必须留着，那是固定的意义所在 */
+.masthead[data-compact="true"] .masthead-title h1 {
+  font-size: 21px;
+  letter-spacing: 0.18em;
+}
+
+.masthead[data-compact="true"] .masthead-title p {
+  display: none;
 }
 
 .masthead-tools {
@@ -703,6 +776,43 @@ body::before {
 .link-button:hover {
   color: var(--accent);
   text-decoration-color: currentColor;
+}
+
+/* 链接式按钮（复制回答 / 重新生成）的复制反馈：
+   下划线类的东西不方便填色，所以用「文字变绿 + 打勾」来表态 */
+.link-button.is-copied {
+  color: var(--success);
+  font-weight: 600;
+  text-decoration-color: currentColor;
+  opacity: 1;
+}
+.link-button.is-copy-failed {
+  color: var(--failure);
+  font-weight: 600;
+  text-decoration-color: currentColor;
+}
+.link-button.is-copied::before {
+  content: "✓ ";
+}
+.link-button:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+/* 导出菜单项（复制全文）复用同一套反馈 */
+.export-popup button.is-copied {
+  background: var(--success);
+  color: var(--success-ink);
+  font-weight: 600;
+}
+.export-popup button.is-copy-failed {
+  background: var(--failure);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+.export-popup button:disabled {
+  cursor: default;
+  opacity: 1;
 }
 
 :focus-visible {
@@ -1084,10 +1194,31 @@ body::before {
   background: none;
   color: var(--ink-soft);
   cursor: pointer;
+  /* 换文字时宽度会变，固定一下最小宽度免得整个按钮跳一下 */
+  min-width: 62px;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 .code-copy:hover {
   border-color: var(--rule-strong);
   color: var(--ink);
+}
+
+/* 复制成功的就地反馈：按钮自己变色变字，不必去看页面底部的提示 */
+.code-copy.is-copied {
+  background: var(--success);
+  border-color: var(--success);
+  color: var(--success-ink);
+  font-weight: 600;
+}
+.code-copy.is-copy-failed {
+  background: var(--failure);
+  border-color: var(--failure);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+.code-copy:disabled {
+  cursor: default;
+  opacity: 1; /* 反馈期间不要变灰，否则看不出「成功」 */
 }
 
 .code-block pre {
@@ -1394,6 +1525,13 @@ body::before {
   }
   .masthead {
     align-items: flex-start;
+  }
+  /* 窄屏上副标题一直收起：固定报头在手机上占地太宝贵 */
+  .masthead-title p {
+    display: none;
+  }
+  .masthead[data-compact="true"] .masthead-title h1 {
+    font-size: 19px;
   }
   .masthead-tools {
     width: 100%;

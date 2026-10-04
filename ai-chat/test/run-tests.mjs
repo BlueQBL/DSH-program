@@ -12,6 +12,7 @@
 import { spawn } from 'node:child_process';
 import net from 'node:net';
 import path from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { renderMarkdown, parseBlocks, escapeHtml } from '../public/lib/markdown.js';
 import { composeReply, extractFacts, createMockReply } from '../lib/mock-responder.mjs';
@@ -27,6 +28,20 @@ import {
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
+
+/** 把真实断言数写进 .tmp-mutations/counts.json（供 test/readme-tests.mjs 核对文档数字） */
+function writeCounts(suite, count, failed) {
+  try {
+    const dir = path.join(ROOT, '.tmp-mutations');
+    mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'counts.json');
+    const all = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};
+    all[suite] = { count, failed: failed.length };
+    writeFileSync(file, JSON.stringify(all, null, 2), 'utf8');
+  } catch {
+    /* 写不了不影响测试本身 */
+  }
+}
 
 // 默认自己在随机端口起一个服务；也可以用 DSH_TEST_BASE 指向一个已经在跑的实例
 // （受限沙箱里子进程没法用管道，这时指向外部实例最省事）。
@@ -854,6 +869,11 @@ try {
 }
 
 // ---------------------------------------------------------------- 汇总
+
+// 把真实断言数写进文件：README 的数字该由「实际跑了多少断言」来核对，
+// 而不是去数源码里 check( 的调用数 —— 有的在条件分支里、有的在循环里，
+// 静态数出来的和实际跑的对不上（这是我自己踩过的坑）。
+writeCounts('run-tests', passed, failures);
 
 console.log(`\n${'─'.repeat(52)}`);
 if (failures.length === 0) {

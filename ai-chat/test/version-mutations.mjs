@@ -14,8 +14,10 @@ import path from 'node:path';
 
 const STORE = 'public/lib/store.js';
 const VERSIONS = 'public/lib/versions.js';
+const COPY_FEEDBACK = 'public/lib/copy-feedback.js';
+const CSS = 'public/styles.css';
 const TEMP = '.tmp-mutations';
-const FILES = [STORE, VERSIONS];
+const FILES = [STORE, VERSIONS, COPY_FEEDBACK, CSS];
 
 if (!existsSync(STORE)) {
   console.error('请在 ai-chat/ 目录下运行：node test/version-mutations.mjs');
@@ -171,6 +173,33 @@ run('buildRequestHistory 把图片也塞给历史消息', VERSIONS, (src) =>
     "    history.push({ role: m.role, content: versionText(current), images: [] });",
     "    history.push({ role: m.role, content: versionText(current), images: versionImages(current) });",
   ),
+);
+
+// ---- 复制反馈（用户反馈：点了复制看不出成功）
+// 这一块的核心是「按钮必须变」，所以变异都围绕「变不了」来设计。
+
+run('复制成功时按钮文字不变（用户看不出成功）', COPY_FEEDBACK, (src) =>
+  src.replace("  copied: '已复制',", '  copied: "",'),
+);
+
+run('复制成功时不加成功状态类（样式无从换色）', COPY_FEEDBACK, (src) =>
+  src.replace("className: 'is-copied'", 'className: ""'),
+);
+
+run('成功与失败用同一个状态类（分不清成败）', COPY_FEEDBACK, (src) =>
+  src.replace("className: 'is-copy-failed'", "className: 'is-copied'"),
+);
+
+run('把成功色改成红墨（与「问」标的语义混淆）', CSS, (src) =>
+  src.replace('--success: #2f6b4f;', '--success: #c2402a;'),
+);
+
+run('删掉代码块复制按钮的成功样式（状态类失效）', CSS, (src) =>
+  src.replace('.code-copy.is-copied {', '.code-copy-renamed.is-copied {'),
+);
+
+run('失败时不给补救提示（用户不知道怎么手动复制）', COPY_FEEDBACK, (src) =>
+  src.replace("return ok ? `${label}已复制` : '复制失败，请手动选择';", "return '';"),
 );
 
 // 最后再整体还原一次（每个变异之后已经还原过了，这里是双保险）

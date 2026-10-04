@@ -27,6 +27,11 @@ import { createSpeechInput, isSpeechSupported, unsupportedReason } from './lib/s
 import { toMarkdown, toPlainText, toJson, download, suggestedFilename } from './lib/exporters.js';
 import { supportsVision } from './lib/vision.js';
 import {
+  copyFeedbackState,
+  copyHint,
+  copyFeedbackDuration,
+} from './lib/copy-feedback.js';
+import {
   resolveShownPage,
   totalPages,
   versionBarItems,
@@ -42,6 +47,7 @@ import {
 } from './lib/startup.js';
 
 const els = {
+  masthead: document.querySelector('.masthead'),
   board: document.getElementById('board'),
   sidebarToggle: document.getElementById('sidebar-toggle'),
   sessionList: document.getElementById('session-list'),
@@ -183,6 +189,53 @@ async function copyText(text) {
   }
 }
 
+/**
+ * 复制按钮的「就地反馈」。
+ *
+ * 为什么必须就地变：提示文字出现在底部输入区，而代码块可能在页面上方好几屏之外 ——
+ * 用户点了「复制代码」，眼睛还在按钮上，根本看不到那句提示，只能猜有没有成功。
+ *
+ * 三件事一起做，保证在任何位置都看得出来：
+ *   1. 按钮文字变成「已复制」「复制失败」并换色
+ *   2. 加一个短暂的状态类，供样式做强调
+ *   3. 底部的提示文字也照旧更新（就近看不到时还有一层）
+ */
+function flashButtonCopied(button, ok = true) {
+  if (!button) return;
+
+  // 第一次触碰时把原标题记下来，供之后还原
+  if (button.dataset.originalLabel === undefined) {
+    button.dataset.originalLabel = button.textContent;
+  }
+  const original = button.dataset.originalLabel;
+  const state = copyFeedbackState(ok);
+
+  button.textContent = state.label;
+  button.classList.toggle('is-copied', ok);
+  button.classList.toggle('is-copy-failed', !ok);
+  button.disabled = true; // 短暂禁用，避免连点把状态刷乱
+
+  if (!flashButtonCopied.timers) flashButtonCopied.timers = new WeakMap();
+  clearTimeout(flashButtonCopied.timers.get(button));
+
+  const timer = setTimeout(() => {
+    button.textContent = original;
+    button.classList.remove('is-copied', 'is-copy-failed');
+    button.disabled = false;
+    flashButtonCopied.timers.delete(button);
+  }, copyFeedbackDuration(ok));
+
+  flashButtonCopied.timers.set(button, timer);
+}
+
+/** 复制 + 就地反馈 + 底部提示，三处一起 */
+async function copyWithFeedback(text, { button = null, label = '内容' } = {}) {
+  const ok = await copyText(text);
+  flashButtonCopied(button, ok);
+  flashHint(copyHint(ok, label), copyFeedbackDuration(ok));
+  return ok;
+}
+
 function flashHint(text, ms = 2200) {
   els.hint.textContent = text;
   clearTimeout(flashHint.timer);
@@ -213,8 +266,92 @@ function updatePinned() {
   els.reachBottom.hidden = !far;
 }
 
-window.addEventListener('scroll', updatePinned, { passive: true });
-window.addEventListener('resize', updatePinned);
+/**
+ * 固定报头的紧凑态。
+ *
+ * 报头固定在顶部之后会一直占着一段垂直空间，所以在往下滚之后把它收窄：
+ * 标题字号减半、副标题隐藏，但**三个按钮一个都不动** ——
+ * 那正是固定住它的意义（滚到任何位置都能开新会话、切会话）。
+ *
+ * ── 关于「滚到顶部附近整页抖动」这个缺陷 ──
+ *
+ * 原因是个反馈循环：报头从完整切到紧凑，高度少掉 60 像素左右，**整页内容高度也跟着少那么多**；
+ * 而报头固定在顶部时，它悬在 scrollY ≈ 40 的位置，于是：
+ *
+ *     scrollY 越过阈值 → 变紧凑 → 文档变矮 → 浏览器为了稳住画面把 scrollY 往下修正
+ *     → 落到阈值另一侧 → 变回完整 → 文档长回来 → scrollY 又被修回去 → …
+ *
+ * 在阈值那一带无限来回跳。只加「同一帧内的重入守卫」挡不住它 —— 那是跨帧的循环。
+ *
+ * 修法四条：
+ *   1. **滞回**：进入和退出用两个不同的阈值，中间留一段缓冲带，状态在缓冲带里保持不变。
+ *   2. **阈值方向不能反**：进入用的必须是**高**阈值、退出用的必须是**低**阈值。
+ *      「变紧凑」让文档变矮，浏览器把 scrollY 往**大**的方向修正 —— 此时状态已经是紧凑，
+ *      往大修正等于离退出线更远，安全；「变完整」让 scrollY 往**小**的方向修正，离进入线更远，
+ *      同样安全。两次扰动都朝着「刚进入的那个状态」的容忍方向推，循环才断得掉。
+ *      若把两条线对调（低阈值进入、高阈值退出），扰动恰好把 scrollY 推过另一条线，
+ *      那缓冲带留多宽都没用。
+ *   3. **只在状态真的变化时才写 DOM**：以前每次 scroll 都写数据属性 + CSS 变量，
+ *      即使值没变也会造成样式重算。现在变了才写。
+ *   4. **缓冲带要比高度台阶更宽**：报头收窄前是 40+71+14+2 ≈ 127px，收窄后 24+34+8+2 ≈ 68px，
+ *      一步差 60px 左右。缓冲带留到 72px，任何「一步之内」的扰动都跨不过对岸那条线。
+ */
+const COMPACT_ENTER_AT = 80; // 往下滚过这里 → 变紧凑（必须是两条线里高的那条）
+const COMPACT_EXIT_AT = 8; // 滚回这里以内 → 恢复完整（必须是低的那条）。两者之间就是缓冲带
+
+// null 表示「还没往 DOM 上写过」：第一次调用一定会写一次，
+// 这样页面上的状态始终是显式的（data-compact 缺席虽然也等于完整态，
+// 但在开发者工具里看不出「没写过」和「写过 false」的区别）。
+let mastheadCompact = null;
+let mastheadHeight = 0;
+
+function updateMastheadHeight() {
+  // 这里每次滚动都会跑：取不到元素就直接跳过，绝不能让它抛错 ——
+  // 那会让整个页面在滚动时不断报错，比样式不对严重得多。
+  if (!els.masthead) return;
+
+  // 已经是紧凑态时用低阈值判断「该不该退出」，否则用高阈值判断「该不该进入」。
+  // 两者不同，就是滞回；同一个 scrollY 只会得到同一个状态，不会来回翻。
+  const y = window.scrollY;
+  const next = mastheadCompact === true ? y > COMPACT_EXIT_AT : y > COMPACT_ENTER_AT;
+
+  if (next !== mastheadCompact) {
+    mastheadCompact = next;
+    els.masthead.dataset.compact = next ? 'true' : 'false';
+  }
+
+  // 实测高度（含补齐的上内边距），交给 CSS 变量给会话栏算 sticky 偏移：
+  // 写死数字会在字体、系统缩放、窄屏换行时失准，量一下最稳。
+  const height = Math.round(els.masthead.offsetHeight) || 108;
+  if (height !== mastheadHeight) {
+    mastheadHeight = height;
+    document.documentElement.style.setProperty('--masthead-h', `${height}px`);
+  }
+}
+
+/**
+ * 一次滚动回调里把两件事都做完，省一次布局抖动。
+ *
+ * **必须防重入**：updateMastheadHeight 会改 CSS 变量、可能引发新一轮布局，
+ * 而布局变化又能触发 scroll 事件 —— 于是 onViewportChange 再被调进来，
+ * 自己调自己直接爆栈。加一个「本次回调正在执行」的开关就够，
+ * 滚动状态本来也只需要最终一致。
+ */
+let handlingViewport = false;
+
+function onViewportChange() {
+  if (handlingViewport) return;
+  handlingViewport = true;
+  try {
+    updateMastheadHeight();
+    updatePinned();
+  } finally {
+    handlingViewport = false;
+  }
+}
+
+window.addEventListener('scroll', onViewportChange, { passive: true });
+window.addEventListener('resize', onViewportChange);
 
 els.jumpBottom.addEventListener('click', () => {
   scrollToBottom('smooth');
@@ -724,7 +861,7 @@ function setBusy(busy) {
   els.stop.hidden = !busy;
   els.hint.textContent = defaultHint();
   updatePickerDisabled();
-  updatePinned();
+  onViewportChange();
 }
 
 function updateSendState() {
@@ -1331,9 +1468,8 @@ function doExport(kind) {
   const title = all ? '对谈录-全部对话' : session.title;
 
   if (kind === 'copy') {
-    copyText(toPlainText(session)).then((ok) =>
-      flashHint(ok ? '已复制全文到剪贴板' : '复制失败，请手动选择'),
-    );
+    // 导出菜单里选「复制全文」：菜单项就在手边，让它自己变成「已复制」
+    copyWithFeedback(toPlainText(session), { button: els.exportPopup.querySelector('[data-export="copy"]'), label: '全文' });
     return;
   }
 
@@ -1420,7 +1556,8 @@ els.exchanges.addEventListener('click', (event) => {
   if (copyCode) {
     const block = copyCode.closest('.code-block');
     const code = block?.querySelector('code')?.textContent ?? '';
-    copyText(code).then((ok) => flashHint(ok ? '代码已复制' : '复制失败，请手动选择'));
+    // 按钮本身要变（「已复制」+ 成功色）：代码块常在页面上方，底部那句提示看不到
+    copyWithFeedback(code, { button: copyCode, label: '代码' });
     return;
   }
 
@@ -1444,9 +1581,7 @@ els.exchanges.addEventListener('click', (event) => {
 
   if (kind === 'copy') {
     const av = message.versions[Math.min(shown, message.versions.length) - 1];
-    copyText(markdownToPlain(av?.content ?? '')).then((ok) =>
-      flashHint(ok ? '回答已复制' : '复制失败，请手动选择'),
-    );
+    copyWithFeedback(markdownToPlain(av?.content ?? ''), { button: action, label: '回答' });
     return;
   }
 
@@ -1619,7 +1754,7 @@ async function boot() {
   }
 
   renderAll();
-  updatePinned();
+  onViewportChange();
   els.input.focus();
 }
 

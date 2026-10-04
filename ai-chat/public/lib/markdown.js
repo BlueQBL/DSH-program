@@ -192,7 +192,7 @@ export function renderMarkdown(markdown, { streaming = false } = {}) {
         html.push(
           `<div class="code-block" data-lang="${escapeHtml(block.lang)}">` +
             `<div class="code-head"><span class="code-lang">${label}</span>` +
-            `<button type="button" class="code-copy" data-copy-code>复制代码</button></div>` +
+            `<button type="button" class="code-copy" data-copy-code data-action="copy-code">复制代码</button></div>` +
             `<pre><code>${body}</code></pre>` +
           '</div>',
         );

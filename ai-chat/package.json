@@ -8,10 +8,11 @@
   "scripts": {
     "start": "node server.mjs",
     "dev": "node server.mjs",
-    "test": "node test/run-tests.mjs && node test/store-tests.mjs && node test/ui-tests.mjs && node test/verify-upstream-payload.mjs",
+    "test": "node test/run-tests.mjs && node test/store-tests.mjs && node test/ui-tests.mjs && node test/verify-upstream-payload.mjs && node test/readme-tests.mjs",
     "test:server": "node test/run-tests.mjs",
     "test:store": "node test/store-tests.mjs",
     "test:ui": "node test/ui-tests.mjs",
+    "test:docs": "node test/readme-tests.mjs",
     "test:mutations": "node test/ui-mutations.mjs",
     "test:version-mutations": "node test/version-mutations.mjs",
     "test:repro": "node test/repro-overwrite.mjs",
