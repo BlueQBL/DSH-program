@@ -217,4 +217,59 @@ runner.run('「新对话」改回黑底实心', CSS, (src) =>
   src.replace('.rail-new {\n  display: block;', '.rail-new {\n  background: var(--ink);\n  display: block;'),
 );
 
+// ---- 会话列表的置顶 / 最近（两组各自收放）
+
+runner.run('组标题跟着会话一起被收起来（「置顶」「最近」两个字没了）', APP, (src) =>
+  // 收的应该只是会话容器；改成收整组，标题就跟着消失了
+  src.replace('    group.list.hidden = collapsed;', '    group.section.hidden = collapsed;'),
+);
+
+runner.run('组的收起状态不记住（刷新一次又全弹开）', APP, (src) =>
+  src.replace(
+    '  groupCollapsed[name] = collapsed === true;\n  writeGroupPreference();',
+    '  groupCollapsed[name] = collapsed === true;',
+  ),
+);
+
+runner.run('收某一组的时候把整栏也收起来（两个开关搅在一起）', APP, (src) =>
+  src.replace(
+    '  groupCollapsed[name] = collapsed === true;',
+    '  setRailVisible(!collapsed);\n  groupCollapsed[name] = collapsed === true;',
+  ),
+);
+
+runner.run('组一收起来，「＋ 新对话」也跟着没了', APP, (src) =>
+  src.replace(
+    '    group.list.hidden = collapsed;',
+    '    group.list.hidden = collapsed;\n    els.newSession.hidden = collapsed;',
+  ),
+);
+
+runner.run('置顶之后不重画列表（点了像没反应）', APP, (src) =>
+  src.replace(
+    "    setGroupCollapsed(next ? 'pinned' : 'recent', false);\n    renderSessionList();",
+    "    setGroupCollapsed(next ? 'pinned' : 'recent', false);",
+  ),
+);
+
+runner.run('置顶时不展开那一组（会话挪进了看不见的地方）', APP, (src) =>
+  src.replace("    setGroupCollapsed(next ? 'pinned' : 'recent', false);\n", ''),
+);
+
+runner.run('把置顶写反（点一下变取消、再点才置顶）', APP, (src) =>
+  src.replace('    const next = session?.pinned !== true;', '    const next = session?.pinned === true;'),
+);
+
+runner.run('会话不再分组（全都塞进「最近」）', APP, (src) =>
+  src.replace('  const groups = groupSessions(sessions);', '  const groups = { pinned: [], recent: sessions };'),
+);
+
+runner.run('置顶之后按钮不改口（没法取消置顶）', APP, (src) =>
+  src.replace("  pin.textContent = pinned ? '取消置顶' : '置顶';", "  pin.textContent = '置顶';"),
+);
+
+runner.run('组标题上的条数不更新（收起来就不知道里面有几条）', APP, (src) =>
+  src.replace('    group.count.textContent = String(rows.length);', '    group.count.textContent = String(0);'),
+);
+
 runner.finish();

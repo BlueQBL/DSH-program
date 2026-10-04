@@ -14,7 +14,7 @@
 // public/lib/ 下独立成模块，便于单独测试。
 
 import { renderMarkdown, markdownToPlain } from './lib/markdown.js';
-import { createStore } from './lib/store.js';
+import { createStore, groupSessions } from './lib/store.js';
 import { PERSONAS, CUSTOM_PERSONA_ID, DEFAULT_PERSONA_ID, getPersona, personaLabel, resolveSystemPrompt } from './lib/personas.js';
 import {
   compressImage,
@@ -69,6 +69,20 @@ const els = {
   sessionList: document.getElementById('session-list'),
   sessionCount: document.getElementById('session-count'),
   sessionTemplate: document.getElementById('session-template'),
+  // 会话列表的两组（置顶 / 最近）。每组：section（整组，空组整块藏起来）、
+  // list（会话行容器，组内收起时藏的是它）、count、toggle（组标题右边的收起/展开）
+  groupPinned: {
+    section: document.getElementById('group-pinned'),
+    list: document.getElementById('pinned-list'),
+    count: document.getElementById('pinned-count'),
+    toggle: document.getElementById('pinned-toggle'),
+  },
+  groupRecent: {
+    section: document.getElementById('group-recent'),
+    list: document.getElementById('recent-list'),
+    count: document.getElementById('recent-count'),
+    toggle: document.getElementById('recent-toggle'),
+  },
   newSession: document.getElementById('new-session-button'),
   // 列表收起（或窄屏）时，报头上的备用入口
   newSessionCompact: document.getElementById('new-session-compact'),
@@ -438,26 +452,118 @@ els.jumpBottom.addEventListener('click', () => {
  */
 let railRevealPending = false;
 
+// ---------------------------------------------------------------- 列表的两组
+//
+// 列表分「置顶」和「最近」两组（布局参考 ChatGPT）：置顶的钉在最上面，
+// 其余的按最近使用排在「最近」里。每一组自己能收起/展开 ——
+// 收起来的是**这一组的会话行**，「置顶」「最近」这两个标题永远还在。
+//
+// 这和报头那个总开关是两件事：那个把整栏（连标题一起）收起来。
+// 两者互不影响，也都不影响「＋ 新对话」—— 它在两组之外，永远够得着。
+
+/** 组的名字，同时也是 localStorage 里的字段名（别改，用户的选择存在那儿） */
+const RAIL_GROUPS = ['pinned', 'recent'];
+const RAIL_GROUPS_KEY = 'duitanlu.railGroups.v1';
+
+const RAIL_GROUP_ELS = {
+  pinned: els.groupPinned,
+  recent: els.groupRecent,
+};
+
+/**
+ * 每一组是不是收着的。
+ *
+ * 只认显式的 true —— 手改过的 localStorage、别处导入的数据塞进来的东西一律当「展开」。
+ * 默认必须是展开：第一次打开就看到两组都空着，会以为会话丢了。
+ */
+function readGroupPreference() {
+  const state = { pinned: false, recent: false };
+  try {
+    const raw = JSON.parse(localStorage.getItem(RAIL_GROUPS_KEY) ?? '{}');
+    for (const name of RAIL_GROUPS) state[name] = raw?.[name] === true;
+  } catch {
+    /* 存坏了就当两组都展开 */
+  }
+  return state;
+}
+
+let groupCollapsed = readGroupPreference();
+
+function writeGroupPreference() {
+  try {
+    localStorage.setItem(RAIL_GROUPS_KEY, JSON.stringify(groupCollapsed));
+  } catch {
+    /* 存不下就只在这次会话里生效 */
+  }
+}
+
+/** 把每一组的收起状态画出来（藏的是会话行，标题那一行不动） */
+function paintRailGroups() {
+  for (const name of RAIL_GROUPS) {
+    const group = RAIL_GROUP_ELS[name];
+    if (!group?.section) continue;
+    const collapsed = groupCollapsed[name] === true;
+    group.list.hidden = collapsed;
+    group.toggle.setAttribute('aria-expanded', String(!collapsed));
+    // 样式靠它翻箭头（收起来时箭头指向右边）
+    group.section.dataset.collapsed = collapsed ? 'true' : 'false';
+  }
+}
+
+function setGroupCollapsed(name, collapsed) {
+  if (!RAIL_GROUPS.includes(name)) return;
+  groupCollapsed[name] = collapsed === true;
+  writeGroupPreference();
+  paintRailGroups();
+}
+
+function toggleRailGroup(name) {
+  setGroupCollapsed(name, groupCollapsed[name] !== true);
+}
+
+for (const name of RAIL_GROUPS) {
+  RAIL_GROUP_ELS[name]?.toggle?.addEventListener('click', () => toggleRailGroup(name));
+}
+
+/** 一条会话行（两组共用）。置顶的那条，按钮改成「取消置顶」。 */
+function sessionRow(session, activeId) {
+  const frag = els.sessionTemplate.content.cloneNode(true);
+  const item = frag.querySelector('.session-item');
+  item.dataset.id = session.id;
+  item.dataset.active = String(session.id === activeId);
+  item.dataset.pinned = String(session.pinned === true);
+
+  frag.querySelector('[data-field="name"]').textContent = session.title || '新对话';
+  const turns = session.messages.filter((m) => m.role === 'user').length;
+  item.dataset.turns = String(turns);
+  frag.querySelector('[data-field="meta"]').textContent =
+    `${formatClock(session.updatedAt)} · ${turns} 轮 · ${personaLabel(session.personaId)}`;
+
+  const pin = frag.querySelector('[data-action="pin"]');
+  const pinned = session.pinned === true;
+  pin.textContent = pinned ? '取消置顶' : '置顶';
+  pin.title = pinned ? '取消置顶，回到「最近」' : '置顶（钉在列表最上面）';
+  return frag;
+}
+
 function renderSessionList() {
   const sessions = store.sessions;
   const activeId = store.sessionId;
 
   els.sessionCount.textContent = String(sessions.length);
-  els.sessionList.replaceChildren(
-    ...sessions.map((session) => {
-      const frag = els.sessionTemplate.content.cloneNode(true);
-      const item = frag.querySelector('.session-item');
-      item.dataset.id = session.id;
-      item.dataset.active = String(session.id === activeId);
 
-      frag.querySelector('[data-field="name"]').textContent = session.title || '新对话';
-      const turns = session.messages.filter((m) => m.role === 'user').length;
-      item.dataset.turns = String(turns);
-      frag.querySelector('[data-field="meta"]').textContent =
-        `${formatClock(session.updatedAt)} · ${turns} 轮 · ${personaLabel(session.personaId)}`;
-      return frag;
-    }),
-  );
+  const groups = groupSessions(sessions);
+  for (const name of RAIL_GROUPS) {
+    const group = RAIL_GROUP_ELS[name];
+    if (!group?.list) continue;
+    const rows = groups[name];
+    // 空的那一组整块藏起来：没有置顶的会话时，不该摆一个空的「置顶」标题在那儿
+    group.section.hidden = rows.length === 0;
+    group.count.textContent = String(rows.length);
+    group.list.replaceChildren(...rows.map((session) => sessionRow(session, activeId)));
+  }
+
+  paintRailGroups();
 
   // 只有一个会话时不允许删，按钮就别装作能点
   const deletable = sessions.length > 1;
@@ -488,6 +594,18 @@ els.sessionList.addEventListener('click', (event) => {
   if (!item) return;
   const id = item.dataset.id;
   const action = event.target.closest('[data-action]')?.dataset.action;
+
+  if (action === 'pin') {
+    const session = store.sessions.find((s) => s.id === id);
+    const next = session?.pinned !== true;
+    if (!store.setPinned(id, next)) return;
+    // 它要挪到另一组去：那一组要是正收着，先展开 ——
+    // 否则点一下看起来像「这个会话不见了」（这一栏不许有看起来没反应的操作）。
+    setGroupCollapsed(next ? 'pinned' : 'recent', false);
+    renderSessionList();
+    flashHint(next ? '已置顶，钉在列表最上面' : '已取消置顶，回到「最近」', 2200);
+    return;
+  }
 
   if (action === 'delete') {
     // 删除不可逆：就地确认，而不是弹一层模态

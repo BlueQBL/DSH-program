@@ -72,13 +72,61 @@
         <!-- 会话列表 -->
         <aside class="rail" id="rail" aria-label="对话列表">
           <!-- 新建会话放在它自己的地盘上：新会话就是从这里生出来的，按钮在列表头上最顺手。
-               样式用描边的（不是黑底实心）—— 这一栏本来就安静，实心黑块太抢眼 -->
+               样式用描边的（不是黑底实心）—— 这一栏本来就安静，实心黑块太抢眼。
+               它不归任何一组管：置顶 / 最近各自收起来，它照样在（新会话永远开得了）。 -->
           <button type="button" class="ghost-button rail-new" id="new-session-button">＋ 新对话</button>
           <div class="rail-head">
             <span class="rail-title">会话</span>
             <span class="rail-count" id="session-count"></span>
           </div>
-          <ol class="session-list" id="session-list"></ol>
+          <!--
+            列表分两组：「置顶」和「最近」（布局参考 ChatGPT）。
+            每组自己有一个收起/展开按钮，收起来的是**这一组的会话行** ——
+            「置顶」「最近」这两个标题永远还在（见 .rail-group-head）。
+            把整栏连标题一起收起来的是报头那个总开关，两者互不影响。
+          -->
+          <div class="session-list" id="session-list">
+            <section class="rail-group" id="group-pinned" data-group="pinned" hidden>
+              <div class="rail-group-head">
+                <span class="rail-group-title">置顶</span>
+                <span class="rail-group-count" id="pinned-count"></span>
+                <button
+                  type="button"
+                  class="rail-group-toggle"
+                  id="pinned-toggle"
+                  aria-expanded="true"
+                  aria-controls="pinned-list"
+                  aria-label="收起或展开置顶的会话"
+                  title="收起 / 展开置顶的会话"
+                >
+                  <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" focusable="false">
+                    <path d="M2.5 4.5 L6 8 L9.5 4.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                </button>
+              </div>
+              <ol class="rail-group-list" id="pinned-list"></ol>
+            </section>
+            <section class="rail-group" id="group-recent" data-group="recent" hidden>
+              <div class="rail-group-head">
+                <span class="rail-group-title">最近</span>
+                <span class="rail-group-count" id="recent-count"></span>
+                <button
+                  type="button"
+                  class="rail-group-toggle"
+                  id="recent-toggle"
+                  aria-expanded="true"
+                  aria-controls="recent-list"
+                  aria-label="收起或展开最近的会话"
+                  title="收起 / 展开最近的会话"
+                >
+                  <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" focusable="false">
+                    <path d="M2.5 4.5 L6 8 L9.5 4.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                </button>
+              </div>
+              <ol class="rail-group-list" id="recent-list"></ol>
+            </section>
+          </div>
           <div class="rail-foot">
             <button type="button" class="link-button" id="export-all-button">导出全部</button>
           </div>
@@ -237,6 +285,7 @@
           <span class="session-meta" data-field="meta"></span>
         </button>
         <span class="session-tools">
+          <button type="button" class="icon-button" data-action="pin" title="置顶（钉在列表最上面）">置顶</button>
           <button type="button" class="icon-button" data-action="rename" title="重命名">改名</button>
           <button type="button" class="icon-button" data-action="retitle" title="让 AI 按现在的对话重新起个名">起名</button>
           <button type="button" class="icon-button danger" data-action="delete" title="删除这个会话">删除</button>

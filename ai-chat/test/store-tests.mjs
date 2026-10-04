@@ -1223,6 +1223,107 @@ group('会话列表的收放：用户选过就听用户的');
   check('参数缺省也不炸', resolveRailVisible() === true);
 }
 
+group('会话列表的置顶 / 最近：分组是界面的事，置顶本身是数据');
+
+{
+  const { groupSessions } = await loadStore();
+
+  const sample = [
+    { id: 'a', updatedAt: 5 },
+    { id: 'b', updatedAt: 4, pinned: true },
+    { id: 'c', updatedAt: 3 },
+    { id: 'd', updatedAt: 2, pinned: true },
+  ];
+  const split = groupSessions(sample);
+  check('置顶的进「置顶」组', split.pinned.map((s) => s.id).join(',') === 'b,d', split.pinned.map((s) => s.id).join(','));
+  check('其余的进「最近」组', split.recent.map((s) => s.id).join(',') === 'a,c', split.recent.map((s) => s.id).join(','));
+  check('只分组不重排：组里还是传进来的顺序',
+    groupSessions([{ id: 'x', updatedAt: 1 }, { id: 'y', updatedAt: 9, pinned: true }]).pinned[0].id === 'y');
+  check('只认显式的 true（"true" / 1 都不算置顶）',
+    groupSessions([{ id: 'z', pinned: 'true' }, { id: 'w', pinned: 1 }]).pinned.length === 0);
+  check('没有置顶的会话时，置顶组是空数组（界面据此整块不显示）',
+    groupSessions([{ id: 'z' }]).pinned.length === 0);
+  check('脏输入不炸', groupSessions(undefined).recent.length === 0 && groupSessions('x').pinned.length === 0);
+}
+
+{
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+
+  const keep = store.session.id;
+  store.pushUser('这条很重要');
+  const other = store.createSession().id;
+  store.pushUser('随便问问');
+  const before = store.sessions.find((s) => s.id === keep).updatedAt;
+  // 置顶前后列表本身的顺序必须一模一样：「谁在上面」由界面的分组决定，
+  // 不是由 store 偷偷重排（否则「最近」那一组里也会跟着乱）
+  const orderBefore = store.sessions.map((s) => s.id).join(',');
+
+  check('默认一条都没置顶', store.sessions.every((s) => s.pinned === false));
+  check('置顶成功', store.setPinned(keep, true) === true);
+  check('置顶状态记在会话上', store.sessions.find((s) => s.id === keep).pinned === true);
+  check('置顶**不改**最近使用时间（会话行上的时钟不该跳）',
+    store.sessions.find((s) => s.id === keep).updatedAt === before);
+  check('置顶不改列表本身的顺序（谁在上面由界面的分组决定）',
+    store.sessions.map((s) => s.id).join(',') === orderBefore,
+    store.sessions.map((s) => s.id).join(','));
+  check('取消置顶', store.setPinned(keep, false) === true && store.sessions.find((s) => s.id === keep).pinned === false);
+  check('脏值不会把会话标成置顶', (store.setPinned(keep, 'yes'), store.sessions.find((s) => s.id === keep).pinned === false));
+  check('没有这个会话时返回 false', store.setPinned('nope', true) === false);
+}
+
+{
+  // 刷新之后置顶还在
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+  const keep = store.session.id;
+  store.pushUser('要留着的一条');
+  store.setPinned(keep, true);
+  simulatePageHide();
+
+  const again = createStore();
+  check('刷新之后置顶还在', again.sessions.find((s) => s.id === keep)?.pinned === true);
+  check('刷新之后没置顶的仍然是没置顶', again.sessions.every((s) => s.pinned === (s.id === keep)));
+}
+
+{
+  // 手改过的 localStorage：字符串 "true" 不该被当成置顶
+  freshEnvironment({
+    seed: {
+      [SESSIONS_KEY]: JSON.stringify({
+        activeId: 'sess1',
+        sessions: [{ id: 'sess1', title: '手改过的', pinned: 'true', messages: [] }],
+      }),
+    },
+  });
+  const { createStore } = await loadStore();
+  const store = createStore();
+  check('手改出来的 "true" 不算置顶（只认布尔 true）', store.sessions[0].pinned === false,
+    String(store.sessions[0].pinned));
+}
+
+{
+  // 淘汰最旧的会话时，置顶的要往后排 —— 用户明确说过它重要
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+  const keep = store.session.id;
+  store.pushUser('这条很重要');
+  store.setPinned(keep, true);
+  for (let i = 0; i < 60; i += 1) store.createSession();
+
+  check('会话数封顶在 50 条', store.sessions.length === 50, String(store.sessions.length));
+  check('置顶的那条不会被淘汰（它是最旧的，但不是最先被淘汰的）',
+    store.sessions.some((s) => s.id === keep));
+
+  // 全都被置顶时也得能继续用：退回「淘汰最旧的」，不许卡住
+  for (const session of store.sessions) store.setPinned(session.id, true);
+  store.createSession();
+  check('全是置顶时也会腾出位置（不会卡在上限）', store.sessions.length === 50, String(store.sessions.length));
+}
+
 // ---------------------------------------------------------------- 汇总
 
 // 把失败项写进文件：变异测试要读它判断「这个缺陷有没有被测到」。

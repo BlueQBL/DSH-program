@@ -23,6 +23,7 @@
     "test:quote-mutations": "node test/quote-mutations.mjs",
     "test:feedback-mutations": "node test/feedback-mutations.mjs",
     "test:compress-mutations": "node test/compress-mutations.mjs",
+    "test:pin-mutations": "node test/pin-mutations.mjs",
     "test:repro": "node test/repro-overwrite.mjs",
     "test:loud": "node test/verify-loud-failure.mjs",
     "test:payload": "node test/verify-upstream-payload.mjs",

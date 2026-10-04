@@ -218,6 +218,9 @@ function normalizeSession(raw) {
     personaId: typeof raw.personaId === 'string' ? raw.personaId : DEFAULT_PERSONA_ID,
     systemPrompt: typeof raw.systemPrompt === 'string' ? raw.systemPrompt.slice(0, 4000) : '',
     model: typeof raw.model === 'string' ? raw.model : '',
+    // 置顶：只认显式的 true。别的地方（手改过的 localStorage、导入的数据）
+    // 塞进来的 "true" / 1 / {} 一律当成「没置顶」。
+    pinned: raw.pinned === true,
     messages: (Array.isArray(raw.messages) ? raw.messages : []).map(normalizeMessage).filter(Boolean),
   };
   // 这个名字是谁起的。老数据没有这个字段，靠标题内容反推（见 lib/title.js）——
@@ -276,8 +279,30 @@ function makeSession(overrides = {}) {
     personaId: DEFAULT_PERSONA_ID,
     systemPrompt: '',
     model: '',
+    /** 置顶：钉在会话列表最上面那一组（见 groupSessions） */
+    pinned: false,
     messages: [],
     ...overrides,
+  };
+}
+
+/**
+ * 把会话分成「置顶」和「最近」两组（会话列表就按这两组画，布局参考 ChatGPT）。
+ *
+ * 传进来的顺序就是组内顺序 —— `store.sessions` 已经按最近使用排好了，
+ * 这里只负责分组，**不重排**：置顶的会话落在置顶组的哪个位置，仍然由「最近用过」决定，
+ * 置顶这件事本身不会让它跳到组里的第一名。
+ *
+ * 没有置顶的会话时 pinned 是空数组，界面上那一组连标题都不显示。
+ *
+ * @param {Array<{pinned?: boolean}>} sessions
+ * @returns {{pinned: Array<object>, recent: Array<object>}}
+ */
+export function groupSessions(sessions) {
+  const list = Array.isArray(sessions) ? sessions : [];
+  return {
+    pinned: list.filter((session) => session?.pinned === true),
+    recent: list.filter((session) => session?.pinned !== true),
   };
 }
 
@@ -453,8 +478,11 @@ export function createStore() {
      */
     createSession() {
       if (sessions.length >= MAX_SESSIONS) {
-        // 不静默失败：按最久未使用淘汰一个
-        const oldest = [...sessions].sort((a, b) => a.updatedAt - b.updatedAt)[0];
+        // 不静默失败：按最久未使用淘汰一个。
+        // 置顶的会话排在淘汰队列的**最后** —— 用户明确说过它重要，
+        // 要淘汰就先淘汰没置顶的；实在全都是置顶的，才退回去淘汰最旧的。
+        const byOldest = [...sessions].sort((a, b) => a.updatedAt - b.updatedAt);
+        const oldest = byOldest.find((s) => s.pinned !== true) ?? byOldest[0];
         sessions = sessions.filter((s) => s.id !== oldest.id);
       }
       const session = makeSession({ model: lastUsedModel });
@@ -541,6 +569,21 @@ export function createStore() {
     needsAutoTitle(id) {
       const session = sessions.find((s) => s.id === id);
       return session ? needsAutoTitle(session) : false;
+    },
+
+    /**
+     * 置顶 / 取消置顶。
+     *
+     * 刻意不 touch()：置顶不是「用过这个会话」，只是把它钉到列表最上面去。
+     * 顺手把 updatedAt 推到此刻的话，会话行上那个时钟会莫名其妙跳一下，
+     * 而且它会在「最近」那一组里冒到头上 —— 那是两件不相干的事。
+     */
+    setPinned(id, pinned) {
+      const session = sessions.find((s) => s.id === id);
+      if (!session) return false;
+      session.pinned = pinned === true;
+      commit();
+      return true;
     },
 
     /**

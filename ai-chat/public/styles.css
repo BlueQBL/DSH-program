@@ -210,14 +210,83 @@ body::before {
   color: color-mix(in srgb, var(--ink) 38%, transparent);
 }
 
+/*
+ * 列表区：置顶组和最近组都在这格里。它自己滚，滚到头也不会把整页带着滚。
+ * （会话行本身按组分成两拨，但滚动的是这一整格 —— 分组不该把可滚区域切成两段。）
+ */
 .session-list {
-  list-style: none;
   margin: 0;
   padding: 6px 0;
   overflow-y: auto;
   /* 会话栏自己是一格：列表滚到头就别把整个页面带着滚了 */
   overscroll-behavior: contain;
   flex: 1;
+}
+
+/* 一组会话（置顶 / 最近）。分组的样子参考 ChatGPT：一行标题 + 下面一列会话。 */
+.rail-group + .rail-group {
+  margin-top: 6px;
+}
+
+/*
+ * 组标题行：左边是组名，右边是条数和收起/展开。
+ * 这一行**永远在** —— 收起来的只是这一组的会话行（见 .rail-group-list）。
+ * 这是它和报头那个总开关的分工：总开关把整栏连标题一起收走。
+ */
+.rail-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 0 2px;
+}
+
+.rail-group-title {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+  color: color-mix(in srgb, var(--ink) 40%, transparent);
+}
+
+.rail-group-count {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: color-mix(in srgb, var(--ink) 28%, transparent);
+}
+
+/* 组标题右边的那个按钮：只收这一组的会话行（收起来之后标题和条数还在）。 */
+.rail-group-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  background: none;
+  color: color-mix(in srgb, var(--ink) 42%, transparent);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.rail-group-toggle:hover {
+  color: var(--ink);
+  border-color: var(--rule-strong);
+}
+.rail-group-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* 收起来时箭头转成朝右（「点一下能展开」），展开时朝下 */
+.rail-group[data-collapsed="true"] .rail-group-toggle svg {
+  transform: rotate(-90deg);
+}
+
+.rail-group-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
 }
 
 .session-item {
@@ -306,6 +375,12 @@ body::before {
 .icon-button.danger:hover {
   color: var(--accent);
   border-color: var(--accent);
+}
+/* 已经置顶的那一条：按钮写成「取消置顶」，用正墨色表示它生效了。
+   刻意不用红墨 —— 这一页的红墨是「问」标和「正在写」的语义。 */
+.session-item[data-pinned="true"] .icon-button[data-action="pin"] {
+  color: var(--ink);
+  border-color: var(--rule-strong);
 }
 
 .rail-foot {

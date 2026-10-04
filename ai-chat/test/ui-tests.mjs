@@ -1605,6 +1605,139 @@ console.log('\n⑭ 布局：会话列表与聊天框各占各的列，互不干�
   check('展开也被记住了', storage.get('duitanlu.rail.v1') === 'shown', String(storage.get('duitanlu.rail.v1')));
 }
 
+console.log('\n⑮ 会话列表：置顶 / 最近 两组，各自收放');
+
+{
+  const railBlock = sliceBlock(html, '<aside class="rail" id="rail"', 'aside');
+  const pinnedBlock = sliceBlock(html, '<section class="rail-group" id="group-pinned"', 'section');
+  const recentBlock = sliceBlock(html, '<section class="rail-group" id="group-recent"', 'section');
+  const pinnedHead = sliceBlock(pinnedBlock, '<div class="rail-group-head">', 'div');
+
+  // ---- 结构
+  check('列表分成「置顶」和「最近」两组（布局参考 ChatGPT）',
+    pinnedBlock.includes('id="pinned-list"') && recentBlock.includes('id="recent-list"'));
+  check('置顶那一组的标题写着「置顶」', /class="rail-group-title">置顶</.test(pinnedBlock));
+  check('最近那一组的标题写着「最近」', /class="rail-group-title">最近</.test(recentBlock));
+  check('收起按钮在标题行里，**不在**会话容器里（所以收起时标题还在）',
+    pinnedHead.includes('id="pinned-toggle"') &&
+      !sliceBlock(pinnedBlock, '<ol class="rail-group-list"', 'ol').includes('pinned-toggle'),
+    pinnedHead.slice(0, 100));
+  check('收起按钮指向的是这一组的会话容器（aria-controls）',
+    /aria-controls="pinned-list"/.test(pinnedHead) && /aria-controls="recent-list"/.test(recentBlock));
+  check('「新对话」在两组之外（组收起来也不影响它）',
+    railBlock.indexOf('id="new-session-button"') < railBlock.indexOf('id="group-pinned"'));
+  check('会话行里有置顶按钮', /data-action="pin"/.test(sliceBlock(html, '<template id="session-template">', 'template')));
+  check('组标题上带条数（收起来也知道里面有几条）',
+    /id="pinned-count"/.test(pinnedHead) && /id="recent-count"/.test(recentBlock));
+
+  // ---- 行为
+  const pinnedSection = getEl('group-pinned');
+  const recentSection = getEl('group-recent');
+  const pinnedList = getEl('pinned-list');
+  const recentList = getEl('recent-list');
+  const pinnedToggle = getEl('pinned-toggle');
+  const recentToggle = getEl('recent-toggle');
+  const board = getEl('board');
+  const idsIn = (list) => list.children.map((frag) => frag.querySelector('.session-item')?.dataset.id);
+  /** 取某一行里的东西（会话行是模板克隆出来的，替身里按选择器缓存） */
+  const rowOf = (list, id) =>
+    list.children.find((frag) => frag.querySelector('.session-item')?.dataset.id === id) ?? null;
+  const pinLabelIn = (list, id) => rowOf(list, id)?.querySelector('[data-action="pin"]')?.textContent ?? '';
+  const rowsIn = () => JSON.parse(storage.get('duitanlu.sessions.v2')).sessions;
+  const groupState = () => JSON.parse(storage.get('duitanlu.railGroups.v1') ?? '{}');
+  /** 点某一条会话行里的按钮（会话行是模板克隆出来的，替身里只能自己接一条链） */
+  const clickOn = (id, action) => {
+    const button = makeElement('button');
+    button.dataset.action = action;
+    const row = makeElement('li');
+    row.className = 'session-item';
+    row.dataset.id = id;
+    button.parentElement = row;
+    dispatch(getEl('session-list'), 'click', { target: button });
+  };
+
+  check('一条都没置顶时，「置顶」那一组整块不显示（不摆个空标题在那儿）', pinnedSection.hidden === true);
+  check('这时会话都在「最近」组里', idsIn(recentList).length >= 1 && pinnedList.children.length === 0);
+  check('「最近」那一组是显示的', recentSection.hidden === false);
+
+  const targetId = idsIn(recentList)[0];
+  clickOn(targetId, 'pin');
+  check('点「置顶」之后它进了「置顶」组', idsIn(pinnedList).includes(targetId), idsIn(pinnedList).join(','));
+  check('它不再待在「最近」组里', !idsIn(recentList).includes(targetId));
+  check('「置顶」组这时才露出来', pinnedSection.hidden === false);
+  check('置顶状态存进了会话', rowsIn().find((s) => s.id === targetId)?.pinned === true);
+  check('组标题右边写着这一组有几条', getEl('pinned-count').textContent === '1', getEl('pinned-count').textContent);
+  check('置顶之后那条的按钮改口成「取消置顶」（否则就取消不掉了）',
+    pinLabelIn(pinnedList, targetId) === '取消置顶', pinLabelIn(pinnedList, targetId));
+  check('没置顶的那条写着「置顶」',
+    pinLabelIn(recentList, idsIn(recentList)[0]) === '置顶', pinLabelIn(recentList, idsIn(recentList)[0]));
+  check('行上打了置顶标记（样式靠它标出已经置顶）',
+    rowOf(pinnedList, targetId)?.querySelector('.session-item')?.dataset.pinned === 'true');
+  check('给了反馈：告诉用户它去哪儿了',
+    getEl('composer-hint').textContent.includes('置顶'), getEl('composer-hint').textContent);
+
+  // ---- 组内收放：收的只是会话行
+  dispatch(pinnedToggle, 'click');
+  check('点组标题右边的按钮，只把这一组的会话行收起来', pinnedList.hidden === true);
+  check('「置顶」这个标题还在（收的不是整组）', pinnedSection.hidden === false);
+  check('按钮的 aria-expanded 如实反映状态', pinnedToggle.getAttribute('aria-expanded') === 'false');
+  check('另一组完全不受影响', recentList.hidden === false);
+  check('「＋ 新对话」不受影响（它不归任何一组管）', getEl('new-session-button').hidden === false);
+  check('整栏的总开关也不受影响', board.dataset.rail === 'shown');
+  check('这个选择被记住了（刷新之后还是收着的）', groupState().pinned === true, storage.get('duitanlu.railGroups.v1'));
+
+  // ---- 总开关（整栏）和组开关互不影响
+  dispatch(getEl('sidebar-toggle'), 'click');
+  check('收起整栏之后，组自己的状态没被改掉', pinnedList.hidden === true);
+  check('整栏确实收起来了', board.dataset.rail === 'hidden');
+  dispatch(getEl('sidebar-toggle'), 'click');
+  check('展开整栏之后，组还是收着的（两件事互不干扰）', pinnedList.hidden === true);
+  check('整栏又展开了', board.dataset.rail === 'shown');
+
+  // ---- 置顶时那一组正收着 → 自动展开（否则点一下看着像会话不见了）
+  const secondId = idsIn(recentList)[0];
+  clickOn(secondId, 'pin');
+  check('置顶时「置顶」组正收着，会自动展开', pinnedList.hidden === false);
+
+  // ---- 取消置顶 → 回到「最近」
+  dispatch(recentToggle, 'click');
+  check('把「最近」收起来', recentList.hidden === true && recentToggle.getAttribute('aria-expanded') === 'false');
+  clickOn(secondId, 'pin');
+  check('再点一次就是取消置顶，它回到「最近」组',
+    idsIn(recentList).includes(secondId) && !idsIn(pinnedList).includes(secondId));
+  check('它回到的那一组正收着，也会自动展开', recentList.hidden === false);
+  check('取消置顶也有反馈', getEl('composer-hint').textContent.includes('取消置顶'), getEl('composer-hint').textContent);
+  check('会话上的置顶标记被清掉了', rowsIn().find((s) => s.id === secondId)?.pinned === false);
+
+  // ---- 两组都收起来，也不耽误开新会话
+  if (pinnedList.hidden !== true) dispatch(pinnedToggle, 'click');
+  if (recentList.hidden !== true) dispatch(recentToggle, 'click');
+  check('两组都收起来了', pinnedList.hidden === true && recentList.hidden === true);
+
+  const countBefore = rowsIn().length;
+  dispatch(getEl('new-session-button'), 'click');
+  await new Promise((r) => setTimeout(r, 60));
+  const afterNew = JSON.parse(storage.get('duitanlu.sessions.v2'));
+  check('两组都收着时照样能开新会话（这两个功能不影响它）',
+    afterNew.sessions.length >= countBefore, `${countBefore} → ${afterNew.sessions.length}`);
+  check('新会话按钮一直摆在那儿', getEl('new-session-button').hidden === false);
+  check('组收着只是不显示：会话一条没少',
+    recentList.hidden === true && idsIn(recentList).length >= 1);
+
+  // 两组加起来必须正好是全部会话，而且各自只装该装的
+  const renderedIds = [...idsIn(pinnedList), ...idsIn(recentList)];
+  const rowsById = new Map(afterNew.sessions.map((s) => [s.id, s]));
+  check('两组加起来正好是全部会话（一条不漏、一条不重）',
+    renderedIds.length === afterNew.sessions.length &&
+      afterNew.sessions.every((s) => renderedIds.includes(s.id)),
+    `${afterNew.sessions.length} 条会话 / 画了 ${renderedIds.length} 行`);
+  check('当前会话一定在列表里（不管它落在哪一组）', renderedIds.includes(afterNew.activeId));
+  check('「置顶」组里全是被置顶的',
+    idsIn(pinnedList).every((id) => rowsById.get(id)?.pinned === true), idsIn(pinnedList).join(','));
+  check('「最近」组里一条置顶的都没有',
+    idsIn(recentList).every((id) => rowsById.get(id)?.pinned !== true), idsIn(recentList).join(','));
+}
+
 console.log(`\n${'─'.repeat(52)}`);
 summaryPrinted = true;
 if (errors.length) {
