@@ -5,6 +5,8 @@
 //   · 未闭合的代码围栏 → 当成「正在书写中的代码块」照常渲染，语言标签先不显示
 // 全部输出都经过 escapeHtml，不做 innerHTML 直插，避免把模型输出当 HTML 执行。
 
+import { highlight, displayLang } from './highlight.js';
+
 const ESCAPE_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 
 export function escapeHtml(text) {
@@ -182,8 +184,11 @@ export function renderMarkdown(markdown, { streaming = false } = {}) {
         break;
       case 'code': {
         // 围栏还没闭合时，语言标签本身也还没写完，不能急着显示
-        const label = block.closed ? escapeHtml(block.lang || 'code') : '书写中…';
-        const body = escapeHtml(block.text) + (isLast ? CARET : '');
+        const label = block.closed ? escapeHtml(displayLang(block.lang) || 'code') : '书写中…';
+        // 高亮器自己负责转义。
+        // 未闭合的围栏照样高亮：语言标记在开围栏时就已知了，而流式输出期间
+        // 「未闭合」才是常态 —— 等闭合才上色的话，用户几乎看不到颜色。
+        const body = highlight(block.text, block.lang) + (isLast ? CARET : '');
         html.push(
           `<div class="code-block" data-lang="${escapeHtml(block.lang)}">` +
             `<div class="code-head"><span class="code-lang">${label}</span>` +

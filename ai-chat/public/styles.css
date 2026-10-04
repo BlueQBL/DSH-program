@@ -50,6 +50,18 @@
   box-sizing: border-box;
 }
 
+/*
+ * 让 hidden 属性始终优先。
+ *
+ * 浏览器默认的 [hidden] { display: none } 优先级极低，任何
+ * `.某类 { display: flex }` 都能盖掉它 —— 于是 el.hidden = true 完全失效，
+ * 弹层会一直悬浮着关不掉（导出菜单就踩过这个坑）。
+ * 统一在这里兜住，比在每个组件上补一句 .x[hidden] 更不容易漏。
+ */
+[hidden] {
+  display: none !important;
+}
+
 html {
   background: var(--paper);
 }
@@ -115,12 +127,434 @@ body::before {
 .page {
   position: relative;
   z-index: 1;
-  width: min(100%, calc(var(--margin-col) + var(--gap-col) + var(--text-col) + 48px));
+  /* 会话栏 + 正文栏：会话栏是固定宽度，正文仍然保持原来的阅读宽度 */
+  width: min(100%, calc(292px + var(--margin-col) + var(--gap-col) + var(--text-col) + 64px));
   margin: 0 auto;
   padding: 40px 24px 24px;
   display: flex;
   flex-direction: column;
   min-height: 100dvh;
+}
+
+/* ------------------------------------------------------------ 会话栏 + 正文栏 */
+
+.board {
+  display: grid;
+  grid-template-columns: 292px minmax(0, 1fr);
+  column-gap: 28px;
+  align-items: start;
+}
+
+.rail {
+  position: sticky;
+  top: 20px;
+  max-height: calc(100dvh - 140px);
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--rule);
+  padding-right: 16px;
+}
+
+.rail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 22px 0 8px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.rail-title {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--ink) 44%, transparent);
+}
+
+.rail-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: color-mix(in srgb, var(--ink) 38%, transparent);
+}
+
+.session-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px 0;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.session-item {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  border-radius: var(--radius);
+  margin-bottom: 2px;
+}
+
+/* 当前会话：左侧一道红墨，和正文里的「问」标是同一套语言 */
+.session-item[data-active="true"] {
+  background: var(--paper-lift);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.session-open {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  font: inherit;
+  padding: 8px 10px;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  border-radius: var(--radius);
+}
+.session-open:hover {
+  background: var(--wash);
+}
+
+.session-name {
+  display: block;
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-meta {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: color-mix(in srgb, var(--ink) 40%, transparent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: 6px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.session-item:hover .session-tools,
+.session-item:focus-within .session-tools {
+  opacity: 1;
+}
+@media (hover: none) {
+  .session-tools {
+    opacity: 1;
+  }
+}
+
+.icon-button {
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 5px;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  background: none;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.icon-button:hover {
+  border-color: var(--rule-strong);
+  color: var(--ink);
+}
+.icon-button.danger:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.rail-foot {
+  padding: 8px 0 4px;
+  border-top: 1px solid var(--rule);
+}
+
+/* 收起状态：窄屏默认收起，桌面端也允许手动收起 */
+.board[data-rail="hidden"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+.board[data-rail="hidden"] .rail {
+  display: none;
+}
+
+.stage {
+  min-width: 0;
+}
+
+/* ------------------------------------------------------------ 角色与模型 */
+
+.controls {
+  padding: 18px 0 0;
+}
+
+.control-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.control-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.control-label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--ink) 42%, transparent);
+}
+
+.control-field select {
+  appearance: none;
+  -webkit-appearance: none;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink);
+  background-color: var(--paper-lift);
+  background-image: linear-gradient(45deg, transparent 50%, var(--ink-soft) 50%),
+    linear-gradient(135deg, var(--ink-soft) 50%, transparent 50%);
+  background-position: right 11px center, right 7px center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  border: 1px solid var(--rule-strong);
+  border-radius: 999px;
+  padding: 4px 24px 4px 11px;
+  max-width: 240px;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+.control-field select:hover {
+  border-color: var(--ink);
+}
+.control-field select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.persona-hint {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  color: color-mix(in srgb, var(--ink) 52%, transparent);
+}
+.persona-hint:empty {
+  display: none;
+}
+
+.prompt-panel {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background: var(--paper-lift);
+  box-shadow: var(--shadow);
+}
+
+.prompt-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 7px;
+}
+
+.prompt-title {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--ink) 48%, transparent);
+}
+
+.prompt-meta {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: color-mix(in srgb, var(--ink) 40%, transparent);
+}
+
+/* 只想看看就收起来的出口：放在右上角，符合直觉 */
+.prompt-close {
+  font: inherit;
+  font-size: 17px;
+  line-height: 1;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: none;
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.prompt-close:hover {
+  background: var(--wash);
+  color: var(--ink);
+}
+
+.prompt-panel textarea {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  resize: vertical;
+}
+.prompt-panel textarea:focus {
+  outline: none;
+  border-color: var(--ink);
+}
+
+.prompt-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.prompt-note {
+  margin: 9px 0 0;
+  font-size: 11.5px;
+  color: color-mix(in srgb, var(--ink) 44%, transparent);
+}
+
+/* ------------------------------------------------------------ 图片附件 */
+
+.attachment-strip {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 9px;
+  padding: 0;
+}
+
+.attachment {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px 4px 4px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background: var(--paper-lift);
+  box-shadow: var(--shadow);
+}
+
+.attachment img {
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 2px;
+  display: block;
+}
+
+.attachment-info {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: color-mix(in srgb, var(--ink) 50%, transparent);
+  max-width: 150px;
+}
+
+.attachment-remove {
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--wash);
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.attachment-remove:hover {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* 已发送消息里的图片 */
+.turn-images {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+}
+.turn-images img {
+  max-width: 220px;
+  max-height: 160px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  display: block;
+  cursor: zoom-in;
+}
+
+/* 语音输入进行中 */
+#voice-button[data-listening="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+/* 拖入图片时整个输入区高亮 */
+.composer[data-dragover="true"] textarea {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 5%, var(--paper-lift));
+}
+
+/* ------------------------------------------------------------ 导出菜单 */
+
+.export-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.export-popup {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  min-width: 168px;
+  padding: 5px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background: var(--paper-lift);
+  box-shadow: var(--shadow);
+}
+
+.export-popup button {
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 2px;
+  background: none;
+  color: var(--ink);
+  cursor: pointer;
+}
+.export-popup button:hover {
+  background: var(--wash);
 }
 
 @media (max-width: 720px) {
@@ -195,54 +629,11 @@ body::before {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
-/* ------------------------------------------------------------ 模型选择 */
-
-/* 与模式 chip 同一行、同一高度；靠等宽字体和自绘箭头保持克制 */
-.model-picker {
-  display: inline-flex;
-  align-items: center;
-}
-
-.model-picker select {
-  appearance: none;
-  -webkit-appearance: none;
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  letter-spacing: 0.04em;
-  color: var(--ink);
-  background-color: var(--paper-lift);
-  /* 自绘小三角：各浏览器的原生箭头差别太大，会破坏整页的排版秩序 */
-  background-image: linear-gradient(45deg, transparent 50%, var(--ink-soft) 50%),
-    linear-gradient(135deg, var(--ink-soft) 50%, transparent 50%);
-  background-position: right 12px center, right 8px center;
-  background-size: 5px 5px, 5px 5px;
-  background-repeat: no-repeat;
-  border: 1px solid var(--rule-strong);
-  border-radius: 999px;
-  padding: 4px 26px 4px 12px;
-  max-width: 230px;
-  cursor: pointer;
-  transition: border-color 0.15s ease;
-}
-.model-picker select:hover {
-  border-color: var(--ink);
-}
-.model-picker select:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 .picker-loading {
   font-family: var(--font-mono);
   font-size: 11px;
   letter-spacing: 0.06em;
   color: color-mix(in srgb, var(--ink) 40%, transparent);
-}
-
-/* 选项列表用系统默认渲染，这里只保证长模型名不撑破 */
-.model-picker select option {
-  font-family: var(--font-mono);
-  font-size: 12px;
 }
 
 /* ------------------------------------------------------------ 按钮 */
@@ -612,6 +1003,43 @@ body::before {
   font-family: inherit;
 }
 
+/* ------------------------------------------------------------ 代码高亮
+   配色克制：整页只有一个强调色（红墨），所以高亮只用四种低饱和色阶，
+   靠明度差区分，而不是彩虹。注释最淡，关键字偏红，字符串偏绿，数字偏蓝。 */
+
+.tok-comment {
+  color: color-mix(in srgb, var(--ink) 42%, transparent);
+  font-style: italic;
+}
+
+.tok-string {
+  color: #2f6b4f;
+}
+
+.tok-number {
+  color: #2f5d8a;
+}
+
+.tok-keyword {
+  color: color-mix(in srgb, var(--accent) 88%, var(--ink));
+  font-weight: 600;
+}
+
+.tok-type {
+  color: #7a5a1e;
+}
+
+.tok-func {
+  color: #1f5f6b;
+}
+
+@media (prefers-color-scheme: dark) {
+  /* 页面本身是浅色纸，但用户在系统层偏好深色时也别让高亮刺眼 */
+  .tok-string {
+    color: #3d7a5c;
+  }
+}
+
 /* 书写光标：红墨，正在写的位置 */
 .caret {
   display: inline-block;
@@ -829,6 +1257,27 @@ body::before {
 
 /* ------------------------------------------------------------ 窄屏 */
 
+@media (max-width: 1000px) {
+  .board {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  /* 窄屏把会话栏改成正文上方的一段，不再占一整列 */
+  .rail {
+    position: static;
+    max-height: none;
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+    padding-right: 0;
+    margin-bottom: 10px;
+  }
+  .session-list {
+    max-height: 210px;
+  }
+  .board[data-rail="hidden"] .rail {
+    display: none;
+  }
+}
+
 @media (max-width: 720px) {
   .exchange {
     grid-template-columns: var(--margin-col) 1fr;
@@ -848,12 +1297,19 @@ body::before {
   .masthead-tools {
     width: 100%;
   }
-  .model-picker {
-    flex: 1 1 180px;
+  .control-field {
+    flex: 1 1 130px;
   }
-  .model-picker select {
+  .control-field select {
     width: 100%;
     max-width: none;
+  }
+  .composer-actions {
+    flex-wrap: wrap;
+  }
+  .composer-hint {
+    order: 9;
+    flex-basis: 100%;
   }
 }
 

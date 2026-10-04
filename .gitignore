@@ -90,3 +90,6 @@ maven-settings.xml
 
 # 服务端兜底保存的对话副本（运行时数据，不入库）
 data/
+
+# 变异测试的临时文件（会临时改写 app.js 再还原）
+.tmp-mutations/

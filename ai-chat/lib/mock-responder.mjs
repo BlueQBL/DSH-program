@@ -72,19 +72,46 @@ function isFactual(value) {
   return true;
 }
 
+/**
+ * 把消息内容统一成纯文本。
+ *
+ * 服务端在带图片时会把 content 转成多模态数组（[{type:'text'}, {type:'image_url'}]），
+ * 而离线回答器只认字符串。这里做一次归一 —— 否则带图消息会让后面所有抽取逻辑读到
+ * undefined，静默退化成空回答。
+ */
+function contentText(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((part) => part && part.type === 'text' && typeof part.text === 'string')
+      .map((part) => part.text)
+      .join('\n')
+      .trim();
+  }
+  return '';
+}
+
+/** 这条消息里带了几张图 */
+function contentImageCount(content) {
+  if (!Array.isArray(content)) return 0;
+  return content.filter((part) => part && part.type === 'image_url').length;
+}
+
 /** 从历史里抽出「用户告诉过我什么」，后面的覆盖前面的 */
 function extractFacts(history) {
   const facts = new Map();
   for (const msg of history) {
     if (msg.role !== 'user') continue;
+    const text = contentText(msg.content);
+    if (!text) continue;
     for (const { key, label, re } of FACT_PATTERNS) {
-      const hit = msg.content.match(re);
+      const hit = text.match(re);
       const value = hit?.[1]?.trim();
       if (isFactual(value)) facts.set(key, { label, value });
     }
     // 「正在学什么」走专用解析：直接字符串定位动词，不用交替正则
-    if (msg.content.includes('我')) {
-      const learned = extractLearningObject(msg.content);
+    if (text.includes('我')) {
+      const learned = extractLearningObject(text);
       if (isFactual(learned)) facts.set('learn', { label: '正在学', value: learned });
     }
   }
@@ -95,7 +122,7 @@ function extractFacts(history) {
 function priorUserLines(history, { excludeLast = true } = {}) {
   const lines = history
     .filter((m) => m.role === 'user')
-    .map((m) => m.content.trim())
+    .map((m) => contentText(m.content))
     .filter((t) => t.length >= 2);
   if (excludeLast) lines.pop();
   const seen = new Set();
@@ -307,11 +334,28 @@ function truncate(text, max) {
  */
 function composeReply(history) {
   const last = history.at(-1);
-  const question = last?.content?.trim() ?? '';
+  const rawQuestion = contentText(last?.content);
+  const imageCount = contentImageCount(last?.content);
+
+  // 带图时离线回答唯一的诚实做法：说清楚我看不了图，而不是假装看懂了
+  if (imageCount > 0 && !rawQuestion) {
+    return [
+      `你发了 ${imageCount} 张图，但**离线回答模式看不了图片** —— 我没有视觉能力。`,
+      '',
+      '要真正识别图片内容，需要在页面顶部把模型换成支持看图的（例如 `gpt-4o`、`gemini-3-flash`、`claude-sonnet-4-5`），并配置好 API Key。',
+      '',
+      '顺便说一句：**DeepSeek 全系都不支持图片**，选了它们发图会被上游直接拒绝。',
+      '',
+      '---',
+      offlineFooter(),
+    ].join('\n');
+  }
+
+  const question = imageCount > 0 ? `${rawQuestion}（另外还附了 ${imageCount} 张图）` : rawQuestion;
   const facts = extractFacts(history);
-  const intent = detectIntent(question);
+  const intent = imageCount > 0 ? 'general' : detectIntent(question);
   const name = facts.get('name')?.value;
-  const related = mostRelevantLine(question, history);
+  const related = mostRelevantLine(rawQuestion, history);
   const sheet = cheatsheetFor(question);
 
   switch (intent) {

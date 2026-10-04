@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>对谈录 · AI 聊天助手</title>
-    <meta name="description" content="一个支持多轮记忆、逐字流式输出、本地保存与一键清空的 AI 聊天助手。" />
+    <meta name="description" content="支持多会话、角色设定、语音输入与看图问答的 AI 聊天助手。" />
     <meta name="color-scheme" content="light" />
     <link rel="icon" href="favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="styles.css" />
@@ -16,80 +16,167 @@
       <header class="masthead">
         <div class="masthead-title">
           <h1>对谈录</h1>
-          <p>AI 聊天助手 · 多轮记忆 · 逐字输出</p>
+          <p>AI 聊天助手 · 多会话 · 角色设定 · 语音与看图</p>
         </div>
 
         <div class="masthead-tools">
+          <button type="button" class="ghost-button" id="sidebar-toggle" aria-expanded="true" aria-controls="rail">对话列表</button>
           <span class="mode-chip" id="mode-chip" title="当前回答由谁生成">
             <span class="mode-dot" aria-hidden="true"></span>
             <span id="mode-label">连接中…</span>
           </span>
-
-          <!-- 模型选择：可选列表由服务端问上游拿，已过滤掉绘图 / 语音 / 向量等非聊天模型 -->
-          <span class="model-picker" id="model-picker" hidden>
-            <label class="sr-only" for="model-select">选择模型</label>
-            <select id="model-select" title="换一个模型，下一轮对话生效"></select>
-          </span>
-          <span class="picker-loading" id="picker-loading" hidden>读取可用模型…</span>
-
-          <button type="button" class="ghost-button" id="export-button">导出</button>
-          <button type="button" class="ghost-button danger" id="clear-button">清空对话</button>
+          <button type="button" class="solid-button" id="new-session-button">新对话</button>
         </div>
       </header>
 
       <p class="notice" id="notice" hidden></p>
 
+      <div class="board" id="board">
+        <!-- 会话列表 -->
+        <aside class="rail" id="rail" aria-label="对话列表">
+          <div class="rail-head">
+            <span class="rail-title">会话</span>
+            <span class="rail-count" id="session-count"></span>
+          </div>
+          <ol class="session-list" id="session-list"></ol>
+          <div class="rail-foot">
+            <button type="button" class="link-button" id="export-all-button">导出全部</button>
+          </div>
+        </aside>
+
+        <div class="stage">
+          <!-- 角色 / 模型 / 提示词 -->
+          <section class="controls" aria-label="角色与模型设置">
+            <div class="control-row">
+              <label class="control-field">
+                <span class="control-label">角色</span>
+                <select id="persona-select"></select>
+              </label>
+              <label class="control-field">
+                <span class="control-label">模型</span>
+                <select id="model-select" title="换一个模型，下一轮对话生效"></select>
+              </label>
+              <span class="picker-loading" id="picker-loading" hidden>读取可用模型…</span>
+              <button type="button" class="link-button" id="prompt-toggle" aria-expanded="false" aria-controls="prompt-panel">系统提示词</button>
+            </div>
+
+            <p class="persona-hint" id="persona-hint"></p>
+
+            <div class="prompt-panel" id="prompt-panel" hidden>
+              <div class="prompt-head">
+                <span class="prompt-title">系统提示词</span>
+                <span class="prompt-meta"><span id="prompt-chars">0</span> / 4000</span>
+                <button type="button" class="prompt-close" id="prompt-close" title="收起（不改动任何内容）" aria-label="收起系统提示词">×</button>
+              </div>
+              <textarea
+                id="prompt-input"
+                rows="5"
+                maxlength="4000"
+                aria-label="系统提示词"
+                placeholder="在这里写这个对话的角色设定，例如：你是一位耐心的小学数学老师，用生活里的例子讲题。"
+              ></textarea>
+              <div class="prompt-actions">
+                <button type="button" class="ghost-button" id="prompt-reset">用角色预设</button>
+                <button type="button" class="ghost-button" id="prompt-save">保存到本对话</button>
+                <button type="button" class="ghost-button" id="prompt-close-2">收起</button>
+              </div>
+              <p class="prompt-note">提示词只对当前会话生效，改完从下一轮开始起作用。只想看看的话，点右上角 × 收起即可，不会改动任何内容。</p>
+            </div>
+          </section>
+
+          <main class="sheet" id="sheet">
+            <div class="blank-sheet" id="blank-sheet" hidden>
+              <p class="blank-eyebrow">空白页</p>
+              <h2>这一页还没有字。</h2>
+              <p class="blank-body">
+                在下面说话、贴张图、或者按住麦克风说一句。说的话会留在这个会话里——刷新、关掉再打开，都还在。
+              </p>
+              <ul class="blank-starters" id="starters">
+                <li><button type="button" class="starter" data-starter="帮我看看这段代码有什么问题">帮我看看这段代码有什么问题</button></li>
+                <li><button type="button" class="starter" data-starter="把这段话改得更简洁一些">把这段话改得更简洁一些</button></li>
+                <li><button type="button" class="starter" data-starter="我最近有点焦虑，想聊聊">我最近有点焦虑，想聊聊</button></li>
+              </ul>
+            </div>
+
+            <ol class="exchanges" id="exchanges"></ol>
+
+            <div class="reach-bottom" id="reach-bottom" hidden>
+              <button type="button" class="ghost-button" id="jump-bottom">回到最新 ↓</button>
+            </div>
+          </main>
+        </div>
+      </div>
+
       <!-- 清空确认：就地出现在被影响内容的旁边，而不是弹一层模态 -->
       <div class="confirm-strip" id="confirm-strip" hidden>
-        <span>清空后这轮对话无法找回，确定吗？</span>
-        <button type="button" class="solid-button danger" id="confirm-clear">确定清空</button>
+        <span id="confirm-text">清空后这个会话的消息无法找回，确定吗？</span>
+        <button type="button" class="solid-button danger" id="confirm-clear">确定</button>
         <button type="button" class="ghost-button" id="cancel-clear">返回</button>
       </div>
 
-      <main class="sheet" id="sheet">
-        <div class="blank-sheet" id="blank-sheet" hidden>
-          <p class="blank-eyebrow">空白页</p>
-          <h2>这一页还没有字。</h2>
-          <p class="blank-body">
-            在上面说话，我在下面写。说的话会留在这一页里——刷新、关掉再打开，都还在。
-          </p>
-          <ul class="blank-starters" id="starters">
-            <li><button type="button" class="starter" data-starter="我叫小林，正在做一个记账工具">我叫小林，正在做一个记账工具</button></li>
-            <li><button type="button" class="starter" data-starter="你说的多轮记忆是怎么实现的？">你说的多轮记忆是怎么实现的？</button></li>
-            <li><button type="button" class="starter" data-starter="帮我写一段项目介绍">帮我写一段项目介绍</button></li>
-          </ul>
-        </div>
-
-        <ol class="exchanges" id="exchanges"></ol>
-
-        <div class="reach-bottom" id="reach-bottom" hidden>
-          <button type="button" class="ghost-button" id="jump-bottom">回到最新 ↓</button>
-        </div>
-      </main>
-
       <form class="composer" id="composer" autocomplete="off">
+        <!-- 待发送的图片 -->
+        <ul class="attachment-strip" id="attachment-strip" hidden></ul>
+
         <label class="sr-only" for="composer-input">想问什么</label>
         <textarea
           id="composer-input"
           name="message"
           rows="1"
-          placeholder="在这里说话…（Enter 发送 / Shift + Enter 换行）"
+          placeholder="在这里说话…（Enter 发送 / Shift + Enter 换行 / 可直接粘贴或拖入图片）"
           maxlength="8000"
         ></textarea>
+
         <div class="composer-actions">
-          <span class="composer-hint" id="composer-hint">Enter 发送 · Shift + Enter 换行</span>
+          <input type="file" id="image-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
+          <button type="button" class="ghost-button" id="image-button" title="选图片（也可以直接粘贴或拖进来）">加图片</button>
+          <button type="button" class="ghost-button" id="voice-button" title="点击开始，再点结束">语音输入</button>
           <button type="button" class="ghost-button" id="stop-button" hidden>停止生成</button>
+          <span class="composer-hint" id="composer-hint">Enter 发送 · Shift + Enter 换行</span>
+          <button type="button" class="ghost-button" id="clear-button">清空</button>
+          <span class="export-menu">
+            <button type="button" class="ghost-button" id="export-button" aria-expanded="false">导出</button>
+            <span class="export-popup" id="export-popup" hidden>
+              <button type="button" data-export="md">Markdown（.md）</button>
+              <button type="button" data-export="txt">纯文本（.txt）</button>
+              <button type="button" data-export="json">JSON 数据（.json）</button>
+              <button type="button" data-export="copy">复制全文</button>
+            </span>
+          </span>
           <button type="submit" class="solid-button" id="send-button">发送</button>
         </div>
       </form>
 
       <footer class="colophon">
         <p>
-          对话保存在本机浏览器（localStorage）；服务端在
-          <code>data/conversations/</code> 留一份兜底副本。刷新不丢，清空即净。
+          对话保存在本机浏览器（localStorage）；服务端在 <code>data/conversations/</code> 留一份纯文字兜底副本。
+          图片只存在浏览器里，不会写入服务端。
         </p>
       </footer>
     </div>
+
+    <!-- 会话列表项 -->
+    <template id="session-template">
+      <li class="session-item">
+        <button type="button" class="session-open">
+          <span class="session-name" data-field="name"></span>
+          <span class="session-meta" data-field="meta"></span>
+        </button>
+        <span class="session-tools">
+          <button type="button" class="icon-button" data-action="rename" title="重命名">改名</button>
+          <button type="button" class="icon-button danger" data-action="delete" title="删除这个会话">删除</button>
+        </span>
+      </li>
+    </template>
+
+    <!-- 待发送图片的缩略图 -->
+    <template id="attachment-template">
+      <li class="attachment">
+        <img alt="" />
+        <span class="attachment-info" data-field="info"></span>
+        <button type="button" class="attachment-remove" data-action="remove" title="移除这张图">×</button>
+      </li>
+    </template>
 
     <!-- 一条「对谈」：页边序号 + 用户提问 + 助手回答 -->
     <template id="exchange-template">
@@ -102,14 +189,17 @@
             <p class="turn-meta">
               <span class="turn-role">问</span>
               <time data-field="asked-at"></time>
+              <span class="turn-tag" data-field="user-tag" hidden></span>
             </p>
             <div class="turn-body" data-field="question"></div>
+            <ul class="turn-images" data-field="question-images" hidden></ul>
           </div>
 
           <div class="turn turn-assistant" data-field="answer-turn">
             <p class="turn-meta">
               <span class="turn-role">答</span>
               <span class="turn-timing" data-field="answer-timing"></span>
+              <span class="turn-tag" data-field="answer-model" hidden></span>
             </p>
             <div class="turn-body markdown" data-field="answer"></div>
             <p class="turn-status" data-field="answer-status" hidden></p>

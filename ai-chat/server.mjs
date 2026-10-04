@@ -20,6 +20,8 @@ import {
   pickModelCandidates,
   shouldTryNextModel,
   filterChatModels,
+  supportsVision,
+  visionModels,
 } from './lib/error-mapping.mjs';
 import { writeJson, readJsonBody, openEventStream, sleep, isAbort } from './lib/http-utils.mjs';
 
@@ -40,24 +42,48 @@ const FORCE_MOCK = ['1', 'true', 'yes'].includes(String(process.env.AI_FORCE_MOC
 const HAS_MODEL = Boolean(API_KEY) && !FORCE_MOCK;
 const MODE = HAS_MODEL ? 'model' : 'mock';
 
-const SYSTEM_PROMPT = [
-  '你是「对谈录」里的一位中文技术助手。',
+/**
+ * 默认系统提示词。
+ *
+ * 页面上选了角色就把角色提示词拼在这段之前 —— 保留通用的回答要求（中文、Markdown、
+ * 不编造），又让角色设定决定「以什么身份说话」。
+ */
+const BASE_SYSTEM_PROMPT = [
   '回答要求：',
   '1. 默认用中文回答，语气平和、直接，不说客套话，不复述用户的问题。',
   '2. 充分利用多轮上下文：用户提到「刚才」「上面」「那个」时，要能接上之前的内容，必要时明确说明你记住的是哪一句。',
   '3. 用 Markdown 组织回答：短段落、必要的列表或代码块，避免堆砌标题。',
   '4. 不要编造事实、数据或链接；不确定就直说，并给出验证方式。',
+  '5. 用户发来图片时，先如实说出你在图里看到了什么，再回答他的问题；看不清的地方要说明，不要猜。',
 ].join('\n');
+
+const DEFAULT_SYSTEM_PROMPT = ['你是「对谈录」里的一位中文助手。', BASE_SYSTEM_PROMPT].join('\n');
 
 const LIMITS = {
   maxMessages: 40,        // 只带最近 40 条进上下文
   maxMessageChars: 32000, // 单条消息上限
   maxTotalChars: 200000,  // 整个上下文上限
+  maxPromptChars: 4000,   // 系统提示词上限
+  maxImages: 4,           // 单条消息的图片数上限
+  maxImageChars: 2 * 1024 * 1024, // 单张图片 dataURL 字符数上限（约 1.5MB 原图）
 };
 
-// ---------------------------------------------------------------- 基础工具
+/** 拼出本次请求要用的系统提示词：角色提示词在前，通用要求在后 */
+function buildSystemPrompt(custom) {
+  const own = typeof custom === 'string' ? custom.trim() : '';
+  if (!own) return DEFAULT_SYSTEM_PROMPT;
+  return `${own.slice(0, LIMITS.maxPromptChars)}\n\n${BASE_SYSTEM_PROMPT}`;
+}
 
-/** 校验并裁剪客户端发来的对话历史 */
+/** 只接受这几类内联图片，避免被塞进任意 dataURL */
+const IMAGE_DATA_URL = /^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/;
+
+/**
+ * 校验并裁剪客户端发来的对话历史。
+ *
+ * 有图片的消息会被转成多模态格式（content 数组）。图片只允许放在最后一条用户消息上：
+ * 历史里的图片没必要反复回传，既费 token 又容易被上游拒绝。
+ */
 function normalizeMessages(input) {
   if (!Array.isArray(input)) return [];
   const clean = [];
@@ -66,19 +92,37 @@ function normalizeMessages(input) {
     const role = item.role === 'assistant' ? 'assistant' : item.role === 'user' ? 'user' : null;
     if (!role) continue;
     const content = String(item.content ?? '').slice(0, LIMITS.maxMessageChars).trim();
-    if (!content) continue;
-    clean.push({ role, content });
+    const images = (Array.isArray(item.images) ? item.images : [])
+      .filter((src) => typeof src === 'string' && src.length <= LIMITS.maxImageChars && IMAGE_DATA_URL.test(src))
+      .slice(0, LIMITS.maxImages);
+    if (!content && !images.length) continue;
+    clean.push({ role, content, images });
   }
   // 只保留最近 N 条，并让第一条一定是 user（上游对首条角色更宽容）
   let sliced = clean.slice(-LIMITS.maxMessages);
   const firstUser = sliced.findIndex((m) => m.role === 'user');
   if (firstUser > 0) sliced = sliced.slice(firstUser);
   // 总量保护：从最早的一条开始丢
-  let total = sliced.reduce((sum, m) => sum + m.content.length, 0);
+  let total = sliced.reduce((sum, m) => sum + m.content.length + m.images.reduce((n, i) => n + i.length, 0), 0);
   while (total > LIMITS.maxTotalChars && sliced.length > 2) {
-    total -= sliced.shift().content.length;
+    const dropped = sliced.shift();
+    total -= dropped.content.length + dropped.images.reduce((n, i) => n + i.length, 0);
   }
-  return sliced;
+
+  // 只有最后一条用户消息保留图片，历史里的图片丢掉（省 token，也更不容易被上游拒）
+  const lastUserIndex = sliced.map((m) => m.role).lastIndexOf('user');
+  const usedImages = sliced[lastUserIndex]?.images ?? [];
+  return sliced.map((msg, index) => {
+    const keepImages = index === lastUserIndex ? msg.images : [];
+    if (keepImages.length) {
+      // 多模态格式：文字 + 若干 image_url
+      const parts = [];
+      if (msg.content) parts.push({ type: 'text', text: msg.content });
+      for (const url of keepImages) parts.push({ type: 'image_url', image_url: { url } });
+      return { role: msg.role, content: parts, hasImages: true };
+    }
+    return { role: msg.role, content: msg.content, hasImages: false };
+  });
 }
 
 // ---------------------------------------------------------------- 模型流式调用
@@ -95,7 +139,7 @@ function normalizeMessages(input) {
  */
 const STALL_TIMEOUT_MS = Number(process.env.AI_STALL_TIMEOUT_MS || 45000);
 
-async function* streamModel(messages, signal, model = API_MODEL, { userChosen = false } = {}) {
+async function* streamModel(messages, signal, model = API_MODEL, { userChosen = false, systemPrompt = '' } = {}) {
   const controller = new AbortController();
   const forwardAbort = () => controller.abort();
   signal?.addEventListener('abort', forwardAbort, { once: true });
@@ -125,7 +169,7 @@ async function* streamModel(messages, signal, model = API_MODEL, { userChosen = 
         model,
         stream: true,
         temperature: 0.7,
-        messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...messages],
+        messages: [{ role: 'system', content: buildSystemPrompt(systemPrompt) }, ...messages],
       }),
     });
   } catch (err) {
@@ -319,6 +363,7 @@ function preferredModel() {
 
 /** 模型列表缓存：上游这个接口不快，页面每次加载都去问一遍会很慢 */
 const MODEL_LIST_TTL = 5 * 60 * 1000;
+const MODEL_LIST_TIMEOUT_MS = Number(process.env.AI_MODELS_TIMEOUT_MS || 45000);
 let modelListCache = { at: 0, all: [], chat: [] };
 
 /**
@@ -335,7 +380,7 @@ async function fetchModelList({ force = false } = {}) {
   try {
     res = await fetch(`${API_BASE}/models`, {
       headers: { authorization: `Bearer ${API_KEY}` },
-      signal: AbortSignal.timeout(20000),
+      signal: AbortSignal.timeout(MODEL_LIST_TIMEOUT_MS),
     });
   } catch (err) {
     return {
@@ -365,6 +410,27 @@ async function fetchModelList({ force = false } = {}) {
   const chat = filterChatModels(all);
   modelListCache = { at: Date.now(), all, chat };
   return { ok: true, all, chat };
+}
+
+/**
+ * 拿「能看图的模型」列表，给「这个模型不支持图片」的提示用。
+ *
+ * 关键：**先看缓存**。上游常常抽风，而这条提示恰恰是在上游已经出问题的时候显示的 ——
+ * 如果此时再去问一次列表，就会变成「不支持图片。能看图的模型有：（暂时没查到）」，
+ * 这种提示等于没说。缓存里有就用缓存的。
+ */
+function knownVisionModels(limit = 6) {
+  if (modelListCache.chat.length) return visionModels(modelListCache.chat).slice(0, limit);
+  return [];
+}
+
+/** 上线时预热一次模型列表，让「可看图的模型」提示一开始就有内容 */
+async function warmModelList() {
+  if (!HAS_MODEL) return;
+  const list = await fetchModelList().catch(() => null);
+  if (list?.ok) {
+    console.log(`  可用聊天模型 ${list.chat.length} 个（其中 ${visionModels(list.chat).length} 个能看图）`);
+  }
 }
 
 /** 「当前模型」：优先上次成功用过的，否则启动探测结果，否则服务端默认 */
@@ -443,7 +509,7 @@ async function probeModel() {
  *
  * @param {string} requested 本次请求指定的模型（来自页面选择框），空则用服务端默认
  */
-async function* streamWithFallback(messages, signal, requested = '') {
+async function* streamWithFallback(messages, signal, requested = '', { systemPrompt = '' } = {}) {
   const candidates = modelCandidates(requested);
   // 用户明确指定时只有一项，所以「换模型」这件事根本不会发生
   const allowSwitch = candidates.length > 1;
@@ -458,7 +524,7 @@ async function* streamWithFallback(messages, signal, requested = '') {
     let produced = false;
     let failure = null;
 
-    for await (const piece of streamModel(messages, signal, model, { userChosen })) {
+    for await (const piece of streamModel(messages, signal, model, { userChosen, systemPrompt })) {
       if (piece.failure) {
         failure = piece.failure;
         break;
@@ -522,6 +588,13 @@ async function handleChat(req, res, body) {
       ? body.model.trim()
       : '';
 
+  // 角色设定：页面上选的角色 / 自定义提示词。超长会被截断，不会拒整轮请求。
+  const systemPrompt = typeof body.systemPrompt === 'string' ? body.systemPrompt.slice(0, LIMITS.maxPromptChars) : '';
+
+  // 这一轮是否带图（只看最后一条用户消息）
+  const lastUser = incoming.at(-1);
+  const hasImages = Boolean(lastUser?.hasImages);
+
   const stream = openEventStream(res);
   const controller = new AbortController();
   let aborted = false;
@@ -542,11 +615,34 @@ async function handleChat(req, res, body) {
   let activeModel = useMock
     ? '本地离线回答'
     : requestedModel || preferredModel();
+
+  // 带图片时先确认模型收不收图片。
+  // DeepSeek 全系都不支持图片，让请求发出去只会换回一个难懂的报错 ——
+  // 这里提前拦住，并直接把「哪个模型能看图」告诉用户。
+  if (!useMock && hasImages) {
+    if (!supportsVision(activeModel)) {
+      // 只读缓存，不再发网络请求：这条提示出现的时机正是上游已经不稳的时候
+      const usable = knownVisionModels();
+      stream.send('meta', { mode: 'model', model: activeModel, requestedModel: requestedModel || null, sessionId });
+      stream.send('error', {
+        message:
+          `「${activeModel}」不支持图片。` +
+          (usable.length
+            ? `当前账号可用、且能看图的模型有：${usable.join('、')}。在顶部的模型选择框里换一个再发。`
+            : '在顶部的模型选择框里换一个能看图的模型（名字里带 gpt-4o / gemini / claude 的通常可以）。'),
+      });
+      stream.send('done', { reason: 'error', model: activeModel });
+      stream.end();
+      return;
+    }
+  }
+
   stream.send('meta', {
     mode: useMock ? 'mock' : 'model',
     model: activeModel,
     requestedModel: requestedModel || null,
     sessionId,
+    images: hasImages ? incoming.at(-1)?.content?.filter?.((p) => p.type === 'image_url').length ?? 0 : 0,
   });
   const partial = [];
   let failure = null;
@@ -554,7 +650,7 @@ async function handleChat(req, res, body) {
   try {
     const source = useMock
       ? createMockReply(incoming, { signal: controller.signal })
-      : streamWithFallback(incoming, controller.signal, requestedModel);
+      : streamWithFallback(incoming, controller.signal, requestedModel, { systemPrompt });
 
     for await (const piece of source) {
       if (aborted) break;
@@ -609,14 +705,20 @@ function conversationFile(sessionId) {
   return path.join(DATA_DIR, 'conversations', `${sessionId}.json`);
 }
 
+/** 兜底副本里只留文字：图片是 base64，存进去会把 data/ 迅速撑爆，也没必要留 */
+function textOnly(msg) {
+  return { role: msg.role, content: typeof msg.content === 'string' ? msg.content : '' };
+}
+
 async function saveConversation(sessionId, incoming, replyText, failure) {
   if (!replyText && !failure) return;
   const previous = await loadConversation(sessionId);
   const turns = previous?.turns ?? [];
   const merged = [...turns];
-  for (const msg of incoming.slice(-2)) {
+  for (const msg of incoming.slice(-2).map(textOnly)) {
     const last = merged.at(-1);
     if (last && last.role === msg.role && last.content === msg.content) continue;
+    if (!msg.content) continue;
     merged.push(msg);
   }
   if (replyText) merged.push({ role: 'assistant', content: replyText });
@@ -797,4 +899,6 @@ server.listen(PORT, HOST, () => {
 
   // 异步探测可用模型，不阻塞启动：探测期间照常可以访问页面
   probeModel().catch((err) => console.log(`  探测模型时出错：${err.message}`));
+  // 预热模型列表：让「能看图的模型有…」这类提示一开始就有内容
+  warmModelList().catch(() => {});
 });

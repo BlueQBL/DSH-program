@@ -186,6 +186,26 @@ export function filterChatModels(ids) {
 }
 
 /**
+ * 哪些模型能「看图」。
+ *
+ * 名字里带这些的一般是多模态接口。反过来要特别注意：**DeepSeek 全系目前不收图片**，
+ * 用户在 DeepSeek 模型上贴图会被上游直接拒绝。所以界面必须提前说清楚并提示换模型，
+ * 而不是让他发出去才收到一个看不懂的报错。
+ */
+const VISION_MODEL =
+  /gpt-4o|gpt-4\.1|gpt-4-turbo|gpt-4-vision|gpt-5|gpt-6|claude-(3|opus|sonnet|haiku|fable)|gemini|grok-[2-9]|qwen-?vl|glm-4v|internvl|llava|pixtral|vision/i;
+
+export function supportsVision(model) {
+  if (!model || typeof model !== 'string') return false;
+  return VISION_MODEL.test(model);
+}
+
+/** 从一批模型里挑出支持看图的，供界面提示用 */
+export function visionModels(ids) {
+  return (ids ?? []).filter((id) => typeof id === 'string' && supportsVision(id));
+}
+
+/**
  * 本次请求要用哪些模型，按顺序尝试。
  *
  * - 显式设了 AI_MODEL：只认它，不擅自替换（用户的选择优先，替换了反而让人困惑）

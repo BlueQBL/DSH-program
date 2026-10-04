@@ -15,7 +15,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { renderMarkdown, parseBlocks, escapeHtml } from '../public/lib/markdown.js';
 import { composeReply, extractFacts, createMockReply } from '../lib/mock-responder.mjs';
-import { classifyUpstreamError, pickModelCandidates, shouldTryNextModel, filterChatModels, isChatModel } from '../lib/error-mapping.mjs';
+import {
+  classifyUpstreamError,
+  pickModelCandidates,
+  shouldTryNextModel,
+  filterChatModels,
+  isChatModel,
+  supportsVision,
+  visionModels,
+} from '../lib/error-mapping.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -72,9 +80,14 @@ group('Markdown 解析（含流式半截语法）');
 
 {
   const html = renderMarkdown('```js\nconst a = 1;\n');
-  check('未闭合代码围栏照常渲染', html.includes('const a = 1;'));
+  // 高亮会把 token 包进 span（`1` 变成 <span class="tok-number">1</span>），
+  // 所以不能直接比对原文 —— 去掉标签再比
+  const plain = html.replace(/<[^>]+>/g, '');
+  check('未闭合代码围栏照常渲染', plain.includes('const a = 1;'), plain.slice(0, 80));
   check('未闭合围栏标注书写中', html.includes('书写中'));
   check('未闭合围栏不给语言标签', !html.includes('>js<'));
+  // 未闭合时也要上色：流式输出期间「未闭合」才是常态，等闭合才上色等于没有颜色
+  check('未闭合围栏也做语法高亮', html.includes('tok-keyword'));
 }
 
 {
@@ -355,6 +368,46 @@ group('模型选择框：只列可聊天的模型');
   check('过滤后没有误伤 deepseek-chat', isChatModel('deepseek-chat') === true);
   check('空/非法输入不抛异常', filterChatModels(null).length === 0 && isChatModel('') === false);
   check('结果去重且保持原顺序', JSON.stringify(filterChatModels(['a', 'a', 'b'])) === JSON.stringify(['a', 'b']));
+}
+
+// ---------------------------------------------------------------- 多模态与图片支持
+
+group('离线回答 · 多模态消息');
+
+{
+  // 服务端带图片时会把 content 转成 [{type:'text'},{type:'image_url'}]，
+  // 离线回答器必须能读出来 —— 否则抽取逻辑读到 undefined，静默退化成空回答
+  const multimodal = [
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: '我叫小林' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } },
+      ],
+    },
+  ];
+  check('能从多模态数组里抽出文字事实', extractFacts(multimodal).get('name')?.value === '小林',
+    JSON.stringify([...extractFacts(multimodal).entries()]));
+
+  const reply = composeReply(multimodal);
+  check('带图的消息不会让离线回答空掉', reply.length > 20, `长度 ${reply.length}`);
+
+  const onlyImage = composeReply([
+    { role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } }] },
+  ]);
+  check('只发图时明确说明看不了图', onlyImage.includes('看不了图片'));
+  check('只发图时给出可看图的模型建议', onlyImage.includes('gpt-4o'));
+}
+
+group('图片支持判断');
+
+{
+  check('DeepSeek 全系不支持图片（真实限制）',
+    ['deepseek-v3.2', 'deepseek-v4.1-flash', 'deepseek-r1', 'deepseek-chat'].every((m) => supportsVision(m) === false));
+  check('gpt-4o / gemini / claude 支持图片',
+    ['gpt-4o', 'gpt-4o-mini', 'gemini-2.5-flash', 'claude-sonnet-4-5'].every((m) => supportsVision(m) === true));
+  check('从模型列表里挑出可看图的', visionModels(['deepseek-v3.2', 'gpt-4o', 'gemini-3-flash']).length === 2);
+  check('空输入不崩', supportsVision('') === false && visionModels(null).length === 0);
 }
 
 // ---------------------------------------------------------------- HTTP 与流式
@@ -688,6 +741,40 @@ try {
     const meta = weird.events.find((e) => e.type === 'meta');
     check('非法模型名被拒绝并回落默认', meta?.requestedModel === null, JSON.stringify(meta));
     await fetch(`${BASE}/api/history/${session}_weird`, { method: 'DELETE' }).catch(() => {});
+  }
+
+  {
+    // 图片：只接受 png/jpeg/webp/gif 的 dataURL，其他一律丢掉
+    const mixed = await collectStream({
+      sessionId: `${session}_img`,
+      messages: [
+        {
+          role: 'user',
+          content: '这是什么',
+          images: [
+            'data:image/png;base64,iVBORw0KGgo=',
+            'data:text/html;base64,PHNjcmlwdD4=',
+            'javascript:alert(1)',
+            'data:image/svg+xml;base64,PHN2Zz4=',
+          ],
+        },
+      ],
+    });
+    check('非法图片被过滤，只留合法的', mixed.events.find((e) => e.type === 'meta')?.images === 1,
+      JSON.stringify(mixed.events.find((e) => e.type === 'meta')));
+    check('过滤后仍能正常生成回答', mixed.text.length > 0);
+    await fetch(`${BASE}/api/history/${session}_img`, { method: 'DELETE' }).catch(() => {});
+  }
+
+  {
+    // 超长 systemPrompt 要被截断，而不是把整轮请求撑爆
+    const longPrompt = await collectStream({
+      sessionId: `${session}_prompt`,
+      messages: [{ role: 'user', content: '你好' }],
+      systemPrompt: 'x'.repeat(50000),
+    });
+    check('超长系统提示词不会让请求失败', longPrompt.events.at(-1)?.type === 'done' && longPrompt.text.length > 0);
+    await fetch(`${BASE}/api/history/${session}_prompt`, { method: 'DELETE' }).catch(() => {});
   }
 
   {
