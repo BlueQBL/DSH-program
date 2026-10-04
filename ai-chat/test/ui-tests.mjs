@@ -103,21 +103,32 @@ function makeElement(tag = 'div', attrs = {}) {
       return this.attributes[k];
     },
     closest(selector) {
-      // 只支持单类选择器（`.turn-body`）和单属性选择器（`[data-action]`）：
-      // app.js 里用到的就是这两种。要判断祖先链，测试会自己把 parentElement 接起来。
+      // 支持三种写法：单类（`.turn-body`）、单属性（`[data-action]`）、
+      // 带值的属性（`[data-field="feedback-note"]`）—— app.js 里用到的就这几种。
+      // 要判断祖先链，测试会自己把 parentElement 接起来。
       const want = String(selector ?? '').trim();
-      const attr = /^\[([\w-]+)\]$/.exec(want);
+      const attrEq = /^\[([\w-]+)="([^"]*)"\]$/.exec(want);
+      const attr = attrEq ?? /^\[([\w-]+)\]$/.exec(want);
       const cls = want.startsWith('.') ? want.slice(1) : null;
       if (!cls && !attr) return null;
-      const key = attr && attr[1].startsWith('data-')
-        ? attr[1].slice(5).replace(/-([a-z])/g, (_m, c) => c.toUpperCase())
-        : null;
+
+      const dataKey = (name) =>
+        name.startsWith('data-') ? name.slice(5).replace(/-([a-z])/g, (_m, c) => c.toUpperCase()) : null;
+      const key = attr ? dataKey(attr[1]) : null;
+
+      const matches = (node) => {
+        if (cls) return String(node.className ?? '').split(/\s+/).includes(cls);
+        if (key) {
+          if (!node.dataset || node.dataset[key] === undefined) return false;
+          return attrEq ? String(node.dataset[key]) === attrEq[2] : true;
+        }
+        if (!node.attributes || node.attributes[attr[1]] === undefined) return false;
+        return attrEq ? String(node.attributes[attr[1]]) === attrEq[2] : true;
+      };
 
       let node = this;
       while (node) {
-        if (cls && String(node.className ?? '').split(/\s+/).includes(cls)) return node;
-        if (key && node.dataset && node.dataset[key] !== undefined) return node;
-        if (attr && !key && node.attributes && node.attributes[attr[1]] !== undefined) return node;
+        if (matches(node)) return node;
         node = node.parentElement ?? null;
       }
       return null;
@@ -272,7 +283,14 @@ for (const id of ['session-template', 'attachment-template', 'exchange-template'
   el.content = {
     cloneNode: () => {
       const frag = makeElement('div');
-      frag.querySelector = () => makeElement('span');
+      // 同一个选择器要拿到**同一个**元素：真实 DOM 里 querySelector('.x') 每次返回的都是
+      // 那个元素本身，而 app.js 把节点缓存成 node.__rateDown 之类，靠它反复重绘。
+      // 替身如果每次都给新元素，「缓存了但没画到界面上」这种错就永远测不出来。
+      const cache = new Map();
+      frag.querySelector = (selector) => {
+        if (!cache.has(selector)) cache.set(selector, makeElement('span'));
+        return cache.get(selector);
+      };
       frag.querySelectorAll = () => [];
       return frag;
     },
@@ -301,6 +319,8 @@ let lastChatBody = null;
 /** 最近一次 /api/title 的请求体，以及要回给客户端的标题 */
 let lastTitleBody = null;
 let titleReply = { ok: true, title: '变量未声明的报错' };
+/** 每次 /api/feedback 的请求体（按顺序） */
+let feedbackPosts = [];
 /** 聊天是否走「正常流式回答」这条路（默认关，老用例依赖失败分支） */
 let chatStreams = false;
 /** 流式回答里 meta 帧报告的运行模式（离线用例会把它设成 mock） */
@@ -340,6 +360,10 @@ globalThis.fetch = async (url, init) => {
   if (target.includes('/api/title')) {
     lastTitleBody = JSON.parse(init?.body ?? '{}');
     return { ok: true, json: async () => titleReply };
+  }
+  if (target.includes('/api/feedback')) {
+    feedbackPosts.push(JSON.parse(init?.body ?? '{}'));
+    return { ok: true, json: async () => ({ ok: true, at: new Date().toISOString() }) };
   }
   if (target.includes('/api/chat')) {
     lastChatBody = JSON.parse(init?.body ?? '{}');
@@ -1097,6 +1121,137 @@ console.log('\n⑩ 会话标题：先本地兜底，再让模型换一个');
   check('离线模式的来源是兜底', sessionsIn().active.titleSource === 'fallback', sessionsIn().active.titleSource);
   configMode = 'model';
   chatMode = 'model';
+  chatStreams = false;
+}
+
+console.log('\n⑪ 评价回答：赞 / 踩 + 意见反馈');
+{
+  const input = getEl('composer-input');
+  const sessionsIn = () => {
+    const raw = JSON.parse(storage.get('duitanlu.sessions.v2'));
+    return { raw, active: raw.sessions.find((s) => s.id === raw.activeId) };
+  };
+  const answerOf = (session) => session.messages.find((m) => m.role === 'assistant');
+  const exchangeNodeFor = (id) => getEl('exchanges').children.find((n) => n.dataset?.id === id);
+  // 对谈里的点击/输入都挂在列表上（事件委托），所以要把事件派发到列表、target 指向按钮
+  const clickIn = (target) => dispatch(getEl('exchanges'), 'click', { target });
+  const typeIn = (target) => dispatch(getEl('exchanges'), 'input', { target });
+
+  chatStreams = true;
+  chatMode = 'model';
+
+  // 先问一轮，拿到一条回答
+  input.value = '闭包是什么';
+  dispatch(getEl('composer'), 'submit');
+  await new Promise((r) => setTimeout(r, 120));
+
+  const session = sessionsIn().active;
+  const answer = answerOf(session);
+  const exchange = exchangeNodeFor(answer.id);
+  check('评价按钮画在那条回答上', Boolean(exchange?.__rateDown));
+
+  // 替身不解析 HTML，所以 <template> 里写着的 class 与 data-* 都要手动补：
+  // 真实 DOM 里交换节点本来就是 <li class="exchange">、按钮本来就有 data-action。
+  // 少了这两样，事件处理函数会在第一、二步就找不到目标（看起来像「点了没反应」）。
+  exchange.className = 'exchange';
+  exchange.__rateDown.parentElement = exchange;
+  exchange.__rateUp.parentElement = exchange;
+  exchange.__rateDown.dataset.action = 'rate-down';
+  exchange.__rateUp.dataset.action = 'rate-up';
+  exchange.__feedbackNote.dataset.field = 'feedback-note';
+  exchange.__feedbackNote.parentElement = exchange.__feedbackBox;
+  exchange.__feedbackBox.parentElement = exchange;
+  // 原因小标签是 app.js 用 createElement 现造的，但它们的祖先链也要接上 ——
+  // 事件处理函数要靠 closest('.exchange') 反查是哪一条回答
+  exchange.__feedbackReasons.parentElement = exchange;
+
+  feedbackPosts = [];
+  clickIn(exchange.__rateDown);
+  await new Promise((r) => setTimeout(r, 60));
+
+  check('点「没用」立刻记下了评价', answerOf(sessionsIn().active).feedback?.rating === 'down');
+  check('评价写进了那一版（跟着页走）',
+    answerOf(sessionsIn().active).versions[0].feedback?.rating === 'down');
+  check('按钮变成选中态', exchange.__rateDown.dataset.active === 'true', String(exchange.__rateDown.dataset.active));
+  check('「有用」没有被带上', exchange.__rateUp.dataset.active === 'false');
+  check('拉踩时展开了补充框', exchange.__feedbackBox.hidden === false);
+  check('补充框里给出一排原因', exchange.__feedbackReasons.children.length >= 4,
+    String(exchange.__feedbackReasons.children.length));
+  check('点了就发到服务端（这一下本身就是信号）', feedbackPosts.length === 1, JSON.stringify(feedbackPosts));
+  check('发出去的是拉踩', feedbackPosts[0]?.rating === 'down');
+  check('带上答案开头（不然这条日志没有意义）',
+    String(feedbackPosts[0]?.answerExcerpt ?? '').includes('变量没声明'), String(feedbackPosts[0]?.answerExcerpt));
+
+  // 勾两个原因 → 填一句说明 → 提交
+  const chips = exchange.__feedbackReasons.children;
+  chips[0].dataset.action = 'feedback-reason';
+  chips[1].dataset.action = 'feedback-reason';
+  chips[0].parentElement = exchange.__feedbackReasons;
+  chips[1].parentElement = exchange.__feedbackReasons;
+  clickIn(chips[0]);
+  clickIn(chips[1]);
+  // 每次点完都会重画这排标签（replaceChildren 换成了新元素），所以要重新取一遍
+  const chipsNow = exchange.__feedbackReasons.children;
+  check('原因可以多选并标成选中态',
+    chipsNow[0].dataset.active === 'true' && chipsNow[1].dataset.active === 'true',
+    `${chipsNow[0]?.dataset.active} / ${chipsNow[1]?.dataset.active}`);
+
+  exchange.__feedbackNote.value = '第三条不对';
+  typeIn(exchange.__feedbackNote);
+  const saveButton = makeElement('button');
+  saveButton.dataset.action = 'feedback-save';
+  saveButton.parentElement = exchange;
+  clickIn(saveButton);
+  await new Promise((r) => setTimeout(r, 60));
+
+  const saved = answerOf(sessionsIn().active).feedback;
+  check('提交后原因存下来了', saved?.reasons.length === 2, JSON.stringify(saved?.reasons));
+  check('提交后补充说明也存下来了', saved?.note === '第三条不对', String(saved?.note));
+  check('提交后又发了一条到服务端', feedbackPosts.length === 2, String(feedbackPosts.length));
+  check('这条带上了原因与说明',
+    feedbackPosts[1]?.reasons.length === 2 && feedbackPosts[1]?.note === '第三条不对',
+    JSON.stringify(feedbackPosts[1]));
+  check('提交后补充框收起', exchange.__feedbackBox.hidden === true);
+  check('界面上留下「附了说明」的痕迹',
+    exchange.__feedbackSaved.hidden === false && exchange.__feedbackSaved.textContent === '已附说明',
+    String(exchange.__feedbackSaved.textContent));
+
+  // 点另一边 = 改判
+  clickIn(exchange.__rateUp);
+  await new Promise((r) => setTimeout(r, 60));
+  const changed = answerOf(sessionsIn().active).feedback;
+  check('点另一边就是改判', changed?.rating === 'up');
+  check('改判会把上一次的原因清掉（它不再适用了）', changed?.reasons.length === 0, JSON.stringify(changed?.reasons));
+  check('改判后「有用」是选中态',
+    exchange.__rateUp.dataset.active === 'true' && exchange.__rateDown.dataset.active === 'false');
+
+  // 再点一次同一个 = 取消
+  const before = feedbackPosts.length;
+  clickIn(exchange.__rateUp);
+  await new Promise((r) => setTimeout(r, 60));
+  check('再点一次取消评价（ChatGPT 点下去就改不了，这里能）',
+    answerOf(sessionsIn().active).feedback === null);
+  check('取消也会告诉服务端一声（日志要说实话）',
+    feedbackPosts.length === before + 1 && feedbackPosts.at(-1)?.action === 'clear',
+    JSON.stringify(feedbackPosts.at(-1)));
+
+  // 服务端没写成功时要说出来，而不是让用户以为交上去了
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('/api/feedback')) {
+      return { ok: false, json: async () => ({ error: '磁盘满了' }) };
+    }
+    return realFetch(url, init);
+  };
+  clickIn(exchange.__rateDown);
+  await new Promise((r) => setTimeout(r, 60));
+  check('服务端失败时本地仍然记下了', answerOf(sessionsIn().active).feedback?.rating === 'down');
+  check('并且明确告诉用户没提交上去',
+    getEl('composer-hint').textContent.includes('没能交给服务端'), getEl('composer-hint').textContent);
+  globalThis.fetch = realFetch;
+  clickIn(exchange.__rateDown); // 收尾：把评价取消掉
+  await new Promise((r) => setTimeout(r, 60));
+
   chatStreams = false;
 }
 

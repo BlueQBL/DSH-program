@@ -975,6 +975,114 @@ body::before {
   color: color-mix(in srgb, var(--ink) 46%, transparent);
 }
 
+/* ------------------------------------------------------------ 评价回答
+ *
+ * 赞 / 踩是**两个链接式按钮**，和「复制回答 / 重新生成」排在同一行：
+ * 这一页所有针对回答的动作都在那条线上，再单开一块反而找不着。
+ * 选中的那一档用墨色加粗 + 打勾（和复制成功同一套语言），不用红墨 ——
+ * 红墨在这一页只表示「问」标和正在写的光标。
+ */
+
+.feedback-buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.feedback-button[data-active="true"] {
+  color: var(--ink);
+  font-weight: 600;
+  text-decoration-color: currentColor;
+}
+.feedback-button[data-active="true"]::before {
+  content: "✓ ";
+  color: var(--success);
+}
+
+/* 「还写了字」的留痕：只靠按钮只知道赞/踩，不知道当初附了说明 */
+.feedback-saved {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  color: color-mix(in srgb, var(--ink) 42%, transparent);
+}
+
+.feedback-box {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--paper-lift) 70%, transparent);
+}
+
+.feedback-title {
+  margin: 0 0 9px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--ink) 76%, transparent);
+}
+
+.feedback-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 9px;
+}
+
+.feedback-chip {
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 999px;
+  background: none;
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.feedback-chip:hover {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+.feedback-chip[data-active="true"] {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper);
+}
+
+.feedback-note {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--ink);
+  background: var(--paper-lift);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  resize: vertical;
+}
+.feedback-note:focus {
+  outline: none;
+  border-color: var(--ink);
+}
+
+.feedback-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 9px;
+}
+
+.feedback-hint {
+  flex: 1 1 140px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--ink) 46%, transparent);
+}
+
 /* ------------------------------------------------------------ 版本分页 */
 
 /* 像书页角上的页码：小、等宽、当前页用红墨 */

@@ -8,8 +8,10 @@
 // 图片只导出文件名与尺寸：base64 写进导出文件会让它大到没法用。
 // 引用（用户划中回答里的一段接着问）在三种格式里都保留 ——
 // 少了它，「这句话在问什么」就读不出来了。
+// 评价（赞/踩 + 补充说明）同理：它是对这一轮回答的判断，也是这份记录的一部分。
 
 import { hasQuote, quoteLabel } from './quote.js';
+import { feedbackSummary } from './feedback.js';
 
 const pad = (n) => String(n).padStart(2, '0');
 
@@ -79,6 +81,9 @@ export function toMarkdown(session, { exportAll = false, sessions = [] } = {}) {
         if (msg.content) lines.push(msg.content, '');
         if (msg.status === 'interrupted') lines.push('> （这条回答被中断了，以上是已写出的部分）', '');
         if (msg.error) lines.push(`> 出错：${msg.error}`, '');
+        // 用户的评价：导出的记录里也该看得出「这一条我当时满不满意」
+        const verdict = feedbackSummary(msg.feedback);
+        if (verdict) lines.push(`> 评价：${verdict}`, '');
         lines.push('');
       }
     }
@@ -103,6 +108,8 @@ export function toPlainText(session) {
     } else {
       lines.push(`【答】${msg.content || ''}`);
       if (msg.error) lines.push(`（出错：${msg.error}）`);
+      const verdict = feedbackSummary(msg.feedback);
+      if (verdict) lines.push(`（评价：${verdict}）`);
     }
     lines.push('');
   }
@@ -140,6 +147,15 @@ export function toJson(session, { exportAll = false, sessions = [] } = {}) {
           // 拼进 content 就再也分不开了
           quote: hasQuote(m.quote)
             ? { text: m.quote.text, page: m.quote.page ?? 1, truncated: Boolean(m.quote.truncated) }
+            : null,
+          // 评价也一样单独一个字段：导入方要能把「回答」和「对回答的判断」分开
+          feedback: m.feedback
+            ? {
+                rating: m.feedback.rating,
+                reasons: [...(m.feedback.reasons ?? [])],
+                note: m.feedback.note ?? '',
+                at: new Date(m.feedback.at ?? Date.now()).toISOString(),
+              }
             : null,
           createdAt: new Date(m.createdAt).toISOString(),
           status: m.status,

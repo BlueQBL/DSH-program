@@ -242,6 +242,29 @@
             <div class="turn-actions" data-field="answer-actions">
               <button type="button" class="link-button" data-action="copy">复制回答</button>
               <button type="button" class="link-button" data-action="retry">重新生成</button>
+              <span class="feedback-buttons">
+                <button type="button" class="link-button feedback-button" data-action="rate-up" aria-pressed="false" title="这条回答有用">👍 有用</button>
+                <button type="button" class="link-button feedback-button" data-action="rate-down" aria-pressed="false" title="这条回答没帮上忙">👎 没用</button>
+              </span>
+              <span class="feedback-saved" data-field="feedback-saved" hidden></span>
+            </div>
+            <!-- 评价的补充信息：点完赞/踩才展开，也可以随时收起 -->
+            <div class="feedback-box" data-field="feedback-box" hidden>
+              <p class="feedback-title" data-field="feedback-title"></p>
+              <div class="feedback-reasons" data-field="feedback-reasons" hidden></div>
+              <textarea
+                class="feedback-note"
+                data-field="feedback-note"
+                rows="2"
+                maxlength="500"
+                placeholder="补充说明（可选）：哪里不对、你期望的是什么"
+                aria-label="补充说明"
+              ></textarea>
+              <div class="feedback-actions">
+                <button type="button" class="solid-button" data-action="feedback-save">提交</button>
+                <button type="button" class="ghost-button" data-action="feedback-close">收起</button>
+                <span class="feedback-hint" data-field="feedback-hint"></span>
+              </div>
             </div>
           </div>
         </div>

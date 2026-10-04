@@ -10,7 +10,7 @@
 // 这样多标签页、刷新、断流恢复都只需要一个真相来源。
 
 import { createServer } from 'node:http';
-import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, appendFile, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,6 +31,8 @@ import { buildTitleMessages, titleFromModel } from './public/lib/title.js';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(HERE, 'public');
 const DATA_DIR = path.join(HERE, 'data');
+/** 用户评价的追加日志（一行一条 JSON），和兜底副本一样属于运行时数据 */
+const FEEDBACK_FILE = path.join(DATA_DIR, 'feedback.jsonl');
 
 const PORT = Number(process.env.PORT || 5250);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -70,6 +72,10 @@ const LIMITS = {
   maxImages: 4,           // 单条消息的图片数上限
   maxImageChars: 2 * 1024 * 1024, // 单张图片 dataURL 字符数上限（约 1.5MB 原图）
 };
+
+/** 评价的原因最多几条、补充说明最长多少字（与前端 lib/feedback.js 的规则一致） */
+const MAX_FEEDBACK_REASONS = 3;
+const MAX_FEEDBACK_NOTE = 500;
 
 /** 拼出本次请求要用的系统提示词：角色提示词在前，通用要求在后 */
 function buildSystemPrompt(custom) {
@@ -653,6 +659,61 @@ async function handleTitle(req, res, body) {
   writeJson(res, 200, title ? { ok: true, title, model } : { ok: false, reason: 'empty', title: '', model });
 }
 
+// ---------------------------------------------------------------- 用户反馈
+
+/**
+ * 把一条评价追加进 data/feedback.jsonl。
+ *
+ * 为什么是 append-only 的 JSONL，而不是「一条反馈一个字段」：
+ * 用户点错了要能改（点另一边 = 改判，再点一次 = 取消），所以同一个回答会有多条事件。
+ * 追加写让日志始终说实话 —— 谁在什么时候把评价从踩改成了赞，全都留着。
+ * 汇总成「最终状态」是读日志的人的事（一行一条 jq 就能算）。
+ */
+async function handleFeedback(req, res, body) {
+  const rating = body?.rating === 'up' ? 'up' : body?.rating === 'down' ? 'down' : null;
+  const action = body?.action === 'clear' ? 'clear' : 'set';
+
+  // 取消评价时 rating 允许为空（那一条事件的意义就是「撤回了」）
+  if (action === 'set' && !rating) {
+    writeJson(res, 400, { error: 'rating 必须是 up 或 down' });
+    return;
+  }
+
+  const sessionId = typeof body?.sessionId === 'string' && /^[A-Za-z0-9_-]{4,64}$/.test(body.sessionId)
+    ? body.sessionId
+    : null;
+  const cut = (value, max) => (typeof value === 'string' ? value.slice(0, max) : '');
+  const reasons = (Array.isArray(body?.reasons) ? body.reasons : [])
+    .filter((r) => typeof r === 'string' && r.length <= 32)
+    .slice(0, MAX_FEEDBACK_REASONS);
+
+  const entry = {
+    at: new Date().toISOString(),
+    action,
+    rating,
+    reasons,
+    note: cut(body?.note, MAX_FEEDBACK_NOTE),
+    sessionId,
+    messageId: cut(body?.messageId, 64) || null,
+    version: Number(body?.version) || 1,
+    model: cut(body?.model, 80) || null,
+    mode: cut(body?.mode, 20) || null,
+    // 存一小段上下文：只记「用户点了踩」而不知道踩的是什么，这条日志没有用
+    questionExcerpt: cut(body?.questionExcerpt, 200),
+    answerExcerpt: cut(body?.answerExcerpt, 300),
+  };
+
+  try {
+    await mkdir(DATA_DIR, { recursive: true });
+    await appendFile(FEEDBACK_FILE, `${JSON.stringify(entry)}\n`, 'utf8');
+  } catch (err) {
+    writeJson(res, 500, { error: `反馈没能写进磁盘：${err.message}` });
+    return;
+  }
+
+  writeJson(res, 200, { ok: true, at: entry.at });
+}
+
 async function handleChat(req, res, body) {
   const incoming = normalizeMessages(body.messages);
   const sessionId = typeof body.sessionId === 'string' && /^[A-Za-z0-9_-]{4,64}$/.test(body.sessionId)
@@ -897,6 +958,11 @@ const server = createServer(async (req, res) => {
 
     if (pathname === '/api/title' && req.method === 'POST') {
       await handleTitle(req, res, await readJsonBody(req));
+      return;
+    }
+
+    if (pathname === '/api/feedback' && req.method === 'POST') {
+      await handleFeedback(req, res, await readJsonBody(req));
       return;
     }
 

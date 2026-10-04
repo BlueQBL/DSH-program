@@ -45,6 +45,16 @@ import { hasQuote, quoteFromSelection, quoteLabel, quotePreview } from './lib/qu
 // 这里只用得到「该不该起」和「洗一遍」两个
 import { needsAutoTitle, titleFromModel } from './lib/title.js';
 import {
+  RATINGS,
+  feedbackLabel,
+  feedbackPayload,
+  normalizeFeedback,
+  ratingInfo,
+  reasonsFor,
+  toggleRating,
+  toggleReason,
+} from './lib/feedback.js';
+import {
   resolveStartingSession as resolveStartingSessionDecide,
   shouldCreateSession,
   startNotice,
@@ -150,6 +160,9 @@ const runtime = {
   pendingQuote: null,
   /** 正在等模型起标题的会话 id，避免同一会话重复请求 */
   titlingSessions: new Set(),
+  /** 打开着的评价框（同时只开一个）与其草稿 */
+  feedbackOpen: null,
+  feedbackDraft: null,
   exportAll: false,
   pendingDelete: null,
   speech: null,
@@ -789,6 +802,16 @@ function buildTurnNode(message, number) {
   node.__editInput = frag.querySelector('[data-field="edit-input"]');
   node.__editHint = frag.querySelector('[data-field="edit-hint"]');
 
+  // 评价（点赞 / 拉踩 + 补充说明）
+  node.__rateUp = frag.querySelector('[data-action="rate-up"]');
+  node.__rateDown = frag.querySelector('[data-action="rate-down"]');
+  node.__feedbackSaved = frag.querySelector('[data-field="feedback-saved"]');
+  node.__feedbackBox = frag.querySelector('[data-field="feedback-box"]');
+  node.__feedbackTitle = frag.querySelector('[data-field="feedback-title"]');
+  node.__feedbackReasons = frag.querySelector('[data-field="feedback-reasons"]');
+  node.__feedbackNote = frag.querySelector('[data-field="feedback-note"]');
+  node.__feedbackHint = frag.querySelector('[data-field="feedback-hint"]');
+
   return { node, assistant: node.__assistant };
 }
 
@@ -927,6 +950,120 @@ function paintTurn(node) {
   const isLast = store.messages.at(-1)?.id === message.id;
   const isNewestPage = !question || shown === question.versions.length;
   actions.dataset.visible = !streaming && isLast && isNewestPage && av.content ? 'true' : 'false';
+
+  paintFeedback(node, message, shown, av);
+}
+
+// ---------------------------------------------------------------- 评价（赞 / 踩 + 补充）
+//
+// 参考 ChatGPT：每条回答下面有赞和踩。三个地方刻意做得比它好：
+//  · **点错了能改**：再点一次取消，点另一边就是改判（ChatGPT 点下去就改不了了）；
+//  · **点了赞就是一次完整反馈**，下面那个框是可选的补充，不填也算数；
+//  · **服务端写不进去要说出来**：评价先存在本机，提交失败时会明确提示，
+//    而不是让用户以为交上去了（「看不清结果」是这个项目反复踩过的坑）。
+
+/** 这一页的评价现在长什么样 */
+function paintFeedback(node, message, shown, av) {
+  const saved = av.feedback ?? null;
+
+  for (const [button, info] of [
+    [node.__rateUp, RATINGS[0]],
+    [node.__rateDown, RATINGS[1]],
+  ]) {
+    const active = saved?.rating === info.id;
+    button.dataset.active = active ? 'true' : 'false';
+    button.setAttribute('aria-pressed', String(active));
+    button.setAttribute('title', active ? `${info.title}（再点一次取消）` : info.title);
+  }
+
+  // 「附了说明」这件事要留痕：光看按钮只知道赞/踩，不知道当初还写了字
+  const hasDetail = Boolean(saved && (saved.reasons.length || saved.note));
+  node.__feedbackSaved.hidden = !hasDetail;
+  if (hasDetail) node.__feedbackSaved.textContent = '已附说明';
+
+  const open =
+    runtime.feedbackOpen &&
+    runtime.feedbackOpen.messageId === message.id &&
+    runtime.feedbackOpen.version === shown &&
+    runtime.feedbackDraft;
+  node.__feedbackBox.hidden = !open;
+  if (!open) return;
+
+  const draft = runtime.feedbackDraft;
+  const info = ratingInfo(draft.rating);
+  node.__feedbackTitle.textContent =
+    draft.rating === 'down'
+      ? `${info.icon} 哪里不对？点几个原因，或者补一句`
+      : `${info.icon} 哪里帮到你了？补一句更好`;
+
+  const options = reasonsFor(draft.rating);
+  node.__feedbackReasons.hidden = options.length === 0;
+  node.__feedbackReasons.replaceChildren(
+    ...options.map((option) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'feedback-chip';
+      chip.dataset.action = 'feedback-reason';
+      chip.dataset.reason = option.id;
+      chip.dataset.active = draft.reasons.includes(option.id) ? 'true' : 'false';
+      chip.setAttribute('aria-pressed', String(draft.reasons.includes(option.id)));
+      chip.textContent = option.label;
+      return chip;
+    }),
+  );
+
+  // 正在这个框里打字时不要把内容覆盖掉
+  if (document.activeElement !== node.__feedbackNote) node.__feedbackNote.value = draft.note;
+  node.__feedbackHint.hidden = true;
+}
+
+/** 打开某一页的评价框（先把已存的内容填进去） */
+function openFeedbackBox(message, shown, rating, saved) {
+  runtime.feedbackOpen = { messageId: message.id, version: shown };
+  runtime.feedbackDraft = {
+    messageId: message.id,
+    version: shown,
+    rating,
+    reasons: [...(saved?.reasons ?? [])],
+    note: saved?.rating === rating ? (saved?.note ?? '') : '',
+  };
+}
+
+function closeFeedbackBox() {
+  runtime.feedbackOpen = null;
+  runtime.feedbackDraft = null;
+}
+
+/** 把评价发到服务端（失败不静默：本地存住了，但要说清服务端没收到） */
+async function postFeedback({ message, version, feedback, action = 'set' }) {
+  const index = store.messages.indexOf(message);
+  const question = store.messages[index - 1];
+  const payload = feedbackPayload({
+    feedback,
+    action,
+    sessionId: store.sessionId,
+    messageId: message.id,
+    version,
+    model: message.versions[version - 1]?.model ?? '',
+    mode: runtime.config.mode ?? '',
+    question: question?.versions?.[0]?.content ?? '',
+    answer: message.versions[version - 1]?.content ?? '',
+  });
+  if (!payload) return false;
+
+  try {
+    const response = await fetch('/api/feedback', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    return true;
+  } catch (err) {
+    flashHint(`评价已留在本机，但没能交给服务端：${err.message}`, 4200);
+    return false;
+  }
 }
 
 function render({ keepLive = false } = {}) {
@@ -967,6 +1104,8 @@ function renderAfterSessionSwitch() {
   forcePromptText = true;
   // 挂着的引用属于上一个会话里的一段回答，换会话后它已经没有出处了
   setPendingQuote(null);
+  // 打开着的评价框同理：它指的是上一个会话里的某条回答
+  closeFeedbackBox();
   renderAll();
 }
 
@@ -1738,6 +1877,7 @@ els.confirmClear.addEventListener('click', () => {
   runtime.renderNode = null;
   // 清空之后，挂着的引用已经没有出处了
   setPendingQuote(null);
+  closeFeedbackBox();
   renderAll();
   setBusy(false);
   els.input.focus();
@@ -1951,7 +2091,77 @@ els.exchanges.addEventListener('click', (event) => {
     const text = node.__editInput.value;
     node.__editing = false;
     if (question) saveEditOnly(question, shown, text);
+    return;
   }
+
+  // ---- 评价：赞 / 踩
+  //
+  // 点下去就**立刻算数**（和 ChatGPT 一样，这一下本身就是信号），
+  // 随后展开一个可选补充框。再点一次同一个按钮 = 取消，点另一边 = 改判。
+  if (kind === 'rate-up' || kind === 'rate-down') {
+    const clicked = kind === 'rate-up' ? 'up' : 'down';
+    const av = message.versions[Math.min(shown, message.versions.length) - 1];
+    const saved = av?.feedback ?? null;
+    const next = toggleRating(saved?.rating ?? null, clicked);
+
+    if (!next) {
+      // 取消评价：连已经填过的原因和说明一起撤掉（留着会让人以为还生效着）
+      closeFeedbackBox();
+      store.setFeedback(message, shown, null);
+      paintTurn(node);
+      void postFeedback({ message, version: shown, feedback: null, action: 'clear' });
+      flashHint('已取消评价', 1800);
+      return;
+    }
+
+    const feedback = normalizeFeedback({ rating: next, reasons: [], note: '', at: Date.now() });
+    store.setFeedback(message, shown, feedback);
+    openFeedbackBox(message, shown, next, saved);
+    paintTurn(node);
+    void postFeedback({ message, version: shown, feedback });
+    node.__feedbackNote?.focus?.();
+    flashHint(next === 'down' ? '记下了。哪里不对？可选补充' : '记下了。谢了', 2200);
+    return;
+  }
+
+  if (kind === 'feedback-reason') {
+    if (!runtime.feedbackDraft) return;
+    const id = action.dataset.reason;
+    runtime.feedbackDraft.reasons = toggleReason(runtime.feedbackDraft.reasons, id);
+    paintTurn(node);
+    return;
+  }
+
+  if (kind === 'feedback-save') {
+    const draft = runtime.feedbackDraft;
+    if (!draft) return;
+    const feedback = normalizeFeedback({
+      rating: draft.rating,
+      reasons: draft.reasons,
+      note: node.__feedbackNote?.value ?? draft.note,
+      at: Date.now(),
+    });
+    closeFeedbackBox();
+    store.setFeedback(message, shown, feedback);
+    paintTurn(node);
+    void postFeedback({ message, version: shown, feedback });
+    flashHint('评价已记下', 2000);
+    return;
+  }
+
+  if (kind === 'feedback-close') {
+    // 收起只是不看了：已经点过的赞/踩照旧生效，填到一半的原因和说明不保存
+    closeFeedbackBox();
+    paintTurn(node);
+    els.input.focus();
+  }
+});
+
+// 补充说明：边打边存进草稿，这样别处的重绘（换会话、模型回话等）不会把草稿冲掉
+els.exchanges.addEventListener('input', (event) => {
+  const note = event.target.closest('[data-field="feedback-note"]');
+  if (!note || !runtime.feedbackDraft) return;
+  runtime.feedbackDraft.note = note.value;
 });
 
 // ---------------------------------------------------------------- 跨标签页同步

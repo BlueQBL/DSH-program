@@ -82,6 +82,7 @@ const docLines = {
   'store-tests': 'node test/store-tests.mjs',
   'title-tests': 'node test/title-tests.mjs',
   'quote-tests': 'node test/quote-tests.mjs',
+  'feedback-tests': 'node test/feedback-tests.mjs',
   'ui-tests': 'node test/ui-tests.mjs',
   'verify-upstream-payload': 'node test/verify-upstream-payload.mjs',
 };
@@ -156,6 +157,8 @@ const CONTRACTS = [
   ['引用不混进用户原话', /库里存的仍然只是你打的那句话|引用是单独一个字段/],
   ['会话标题由 AI 起', /\/api\/title|让模型给会话起/],
   ['用户改过的标题不会被 AI 覆盖', /不会覆盖你改过的名字|AI 起的标题永远不会覆盖/],
+  ['可以给回答点赞 / 拉踩并补充意见', /👍 有用|点赞（👍）/],
+  ['评价点错了能改', /再点一次.{0,6}取消|能改判/],
 ];
 for (const [name, pattern] of CONTRACTS) {
   check(`文档写明了「${name}」`, pattern.test(readme));

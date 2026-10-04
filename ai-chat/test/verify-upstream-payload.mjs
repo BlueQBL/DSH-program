@@ -350,6 +350,79 @@ try {
     check('缺 question 直接拒绝', bad.status === 400, String(bad.status));
     check('拒绝时没有发上游请求', captured.length === 0, String(captured.length));
   }
+
+  console.log('\n用户评价：真的写进了服务端的追加日志');
+  {
+    const readEntries = () => {
+      const file = path.join(ROOT, 'data', 'feedback.jsonl');
+      if (!existsSync(file)) return [];
+      return readFileSync(file, 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => {
+          try {
+            return JSON.parse(line);
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
+    };
+
+    const post = (body) =>
+      fetch(`${BASE}/api/feedback`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+    // 用一个唯一标记找自己那条：这个文件是追加写的，历次测试的记录都留在里面
+    const marker = `payload-test-${Date.now()}`;
+    const res = await post({
+      action: 'set',
+      sessionId: 'payload_feedback',
+      messageId: 'a_1',
+      version: 2,
+      rating: 'down',
+      reasons: ['wrong', 'verbose'],
+      note: marker,
+      model: 'deepseek-v3.2',
+      mode: 'model',
+      questionExcerpt: '闭包是什么',
+      answerExcerpt: '闭包是函数记住它出生时的环境。',
+    });
+    const data = await res.json();
+    check('反馈接口可用', res.status === 200 && data.ok === true, JSON.stringify(data));
+
+    const entry = readEntries().reverse().find((e) => e.note === marker);
+    check('反馈落到了 data/feedback.jsonl', Boolean(entry), '没找到带标记的那一行');
+    check('记下了档位与原因', entry?.rating === 'down' && entry?.reasons?.join() === 'wrong,verbose',
+      JSON.stringify(entry));
+    check('记下了是哪条回答的哪一页', entry?.messageId === 'a_1' && entry?.version === 2);
+    check('带上答案开头（否则这条日志没法归因）',
+      String(entry?.answerExcerpt ?? '').includes('闭包是函数记住'), String(entry?.answerExcerpt));
+    check('带上时间戳', typeof entry?.at === 'string' && entry.at.includes('T'), String(entry?.at));
+
+    // 撤回也要留痕：日志是追加写的，不记这一笔就推不出「最后到底是赞还是踩」
+    const clearMarker = `${marker}-clear`;
+    const cleared = await post({
+      action: 'clear',
+      sessionId: 'payload_feedback',
+      messageId: 'a_1',
+      version: 2,
+      reasons: [clearMarker], // 借用原因字段当标记，只为在文件里认出这一条
+    });
+    check('撤回评价接口可用', cleared.status === 200, String(cleared.status));
+    const clearEntry = readEntries().reverse().find((e) => e.reasons?.includes(clearMarker));
+    check('撤回也追加了一条事件', clearEntry?.action === 'clear', JSON.stringify(clearEntry));
+    check('撤回那条没有档位', clearEntry?.rating === null);
+
+    // 脏数据不该进日志
+    const before = readEntries().length;
+    const bad = await post({ action: 'set', note: '没有档位' });
+    check('没有档位的「记下」被拒绝', bad.status === 400, String(bad.status));
+    check('被拒绝的请求没有写进日志', readEntries().length === before, String(readEntries().length - before));
+  }
 } catch (err) {
   failures.push(`测试中断：${err.message}`);
   console.log(`\n测试中断：${err.stack}`);

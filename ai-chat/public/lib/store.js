@@ -20,6 +20,7 @@
 import { DEFAULT_PERSONA_ID, resolveSystemPrompt } from './personas.js';
 import { normalizeQuote } from './quote.js';
 import { fallbackTitle, inferTitleSource, needsAutoTitle, titleFromModel } from './title.js';
+import { normalizeFeedback } from './feedback.js';
 
 const STORAGE_KEY = 'duitanlu.sessions.v2';
 const LEGACY_KEY = 'duitanlu.conversation.v1';
@@ -97,6 +98,8 @@ function normalizeVersion(raw, fallbackContent = '', fallbackAttachments = []) {
     // 引用只在用户消息上：它属于「这一次提问」，所以跟着版本走 ——
     // 编辑重发时旧版本连它当时引用的那段一起留档，翻回第 1 页看到的还是原样
     quote: normalizeQuote(raw.quote),
+    // 评价只在助手回答上，也**跟着版本走**：第 1 页的赞不该跟到第 2 页去
+    feedback: normalizeFeedback(raw.feedback),
     // 助手回答才有
     finishedAt: Number(raw.finishedAt) || null,
     status: ['done', 'streaming', 'interrupted', 'error'].includes(raw.status) ? raw.status : 'done',
@@ -139,6 +142,7 @@ function normalizeMessage(raw) {
         createdAt: Number(raw.createdAt) || Date.now(),
         attachments,
         quote: normalizeQuote(raw.quote),
+        feedback: normalizeFeedback(raw.feedback),
         finishedAt: Number(raw.finishedAt) || null,
         status: ['done', 'streaming', 'interrupted', 'error'].includes(raw.status) ? raw.status : 'done',
         error: typeof raw.error === 'string' ? raw.error : null,
@@ -166,6 +170,7 @@ function normalizeMessage(raw) {
     personaId: typeof raw.personaId === 'string' ? raw.personaId : null,
     attachments: current.attachments,
     quote: current.quote,
+    feedback: current.feedback,
   };
 }
 
@@ -193,6 +198,7 @@ function syncFlatFields(message) {
   message.model = current.model;
   message.attachments = current.attachments;
   message.quote = current.quote;
+  message.feedback = current.feedback;
 }
 
 function normalizeSession(raw) {
@@ -692,6 +698,7 @@ export function createStore() {
               content: '',
               createdAt: now,
               attachments: [],
+              feedback: null,
               finishedAt: null,
               status: 'streaming',
               error: null,
@@ -716,6 +723,7 @@ export function createStore() {
           content: '',
           createdAt: now,
           attachments: [],
+          feedback: null,
           finishedAt: null,
           status: 'streaming',
           error: null,
@@ -733,6 +741,9 @@ export function createStore() {
       target.error = null;
       target.model = model;
       target.mode = mode;
+      // 重新生成等于把这一页的回答换掉：旧回答的评价不该留在新回答上
+      //（它评的是刚才那一段文字，而那段文字已经不存在了）
+      target.feedback = null;
       answer.versionCount = answer.versions.length;
       delete answer.viewVersion;
       syncFlatFields(answer);
@@ -778,6 +789,30 @@ export function createStore() {
       v.model = model;
       message.model = model;
       persist();
+    },
+
+    /**
+     * 记录用户对某一条回答的评价。
+     *
+     * 写在**那一版**上（不是整条消息上）：一条回答可以有多页，
+     * 第 1 页点赞不该让第 2 页也显示成点过赞。
+     *
+     * @param {object} message 助手消息
+     * @param {number|null} version 第几页（1 起）；不传就是当前显示的那一页
+     * @param {object|null} feedback 传 null 表示取消评价
+     * @returns {{rating: string, reasons: string[], note: string, at: number}|null}
+     */
+    setFeedback(message, version, feedback) {
+      if (!message || message.role !== 'assistant') return null;
+      const index = Math.max(0, Math.min((Number(version) || message.versions.length) - 1, message.versions.length - 1));
+      const v = message.versions[index];
+      if (!v) return null;
+
+      const clean = normalizeFeedback(feedback);
+      v.feedback = clean;
+      if (index === message.versions.length - 1) message.feedback = clean;
+      commit();
+      return clean;
     },
 
     finish(message, status = 'done', error = null) {
