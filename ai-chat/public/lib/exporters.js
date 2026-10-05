@@ -15,6 +15,7 @@
 import { hasQuote, quoteLabel } from './quote.js';
 import { feedbackSummary } from './feedback.js';
 import { summaryLabel } from './compress.js';
+import { referenceLabel } from './reference.js';
 
 const pad = (n) => String(n).padStart(2, '0');
 
@@ -75,6 +76,13 @@ export function toMarkdown(session, { exportAll = false, sessions = [] } = {}) {
       lines.push(...item.summary.text.split('\n').map((line) => `> ${line}`), '');
     }
 
+    // 挂着的背景材料（会话引用）：它不是这个会话的消息，但模型确实看过它 ——
+    // 记录里必须交代，否则以后没法解释模型的回答是打哪儿来的。
+    if (item.reference?.text) {
+      lines.push(`> 【背景材料】${referenceLabel(item.reference)}`, '');
+      lines.push(...item.reference.text.split('\n').map((line) => `> ${line}`), '');
+    }
+
     let turn = 0;
     for (const msg of item.messages ?? []) {
       const note = attachmentNote(msg.attachments);
@@ -107,6 +115,10 @@ export function toPlainText(session) {
   const lines = [`${session.title || '对谈录'}`, `导出时间：${formatStamp(Date.now())}`, ''];
   if (session.summary?.text) {
     lines.push(`【上下文压缩】${summaryLabel(session.summary)}`, session.summary.text, '');
+  }
+  // 背景材料（会话引用）：模型看过它，记录里就得有它 —— 但它属于「附注」，不属于对话正文
+  if (session.reference?.text) {
+    lines.push(`【背景材料】${referenceLabel(session.reference)}`, session.reference.text, '');
   }
   let turn = 0;
   for (const msg of session.messages ?? []) {
@@ -159,6 +171,18 @@ export function toJson(session, { exportAll = false, sessions = [] } = {}) {
               covers: s.summary.covers,
               at: new Date(s.summary.at ?? Date.now()).toISOString(),
               model: s.summary.model ?? null,
+            }
+          : null,
+        // 背景材料（会话引用）：也单独一个字段 + 不动 messages。
+        // 它不是这个会话的消息，但模型看过它 —— 导入方要能分清「哪些是聊出来的、哪些是带进来的」。
+        reference: s.reference?.text
+          ? {
+              kind: s.reference.kind === 'turns' ? 'turns' : 'summary',
+              title: s.reference.title ?? '',
+              sessionId: s.reference.sessionId ?? null,
+              turns: Array.isArray(s.reference.turns) ? s.reference.turns : [],
+              at: new Date(s.reference.at ?? Date.now()).toISOString(),
+              text: s.reference.text,
             }
           : null,
         messages: (s.messages ?? []).map((m) => ({

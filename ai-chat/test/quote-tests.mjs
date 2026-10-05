@@ -250,7 +250,17 @@ group('请求历史里的引用');
     check('发出去的提问里带了引用块', h[0].content.includes('> 第三，注意边界。'), h[0].content);
     check('引用块里标了出处', h[0].content.includes('引用回答'));
     check('用户自己的问题在引用之后', h[0].content.trimEnd().endsWith('那第三点呢？'));
-    check('助手回答不会被塞进引用', h[1].content === '第三点是这样的…');
+    check('历史以正在回答的那一问结尾（服务端要求末条是 user）', h.at(-1)?.role === 'user',
+      h.map((x) => x.role).join(','));
+    // 助手那条永远不带引用（引用只属于提出它的那一次提问）。
+    // 拿「前面还有一轮」的形状来验 —— 末尾那一问的回答此刻还没生成，本来就不该在历史里。
+    const priorQuestion = { role: 'user', versions: [v('上一条提问')] };
+    const priorAnswer = { role: 'assistant', versions: [v('上一条回答')] };
+    const answerEntry = buildRequestHistory([priorQuestion, priorAnswer, q, a], q, a)
+      .find((x) => x.role === 'assistant');
+    check('助手回答不会被塞进引用',
+      answerEntry?.content === '上一条回答' && !answerEntry.content.includes('第三，注意边界。'),
+      JSON.stringify(answerEntry));
   }
 
   {

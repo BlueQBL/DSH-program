@@ -85,7 +85,9 @@ runner.run('发给模型的摘要块不标明「这是压缩过的上文」', CO
 // ---- 压进请求历史
 
 runner.run('摘要不放进请求（界面上说压了，实际还是发全文）', VERSIONS, (src) =>
-  src.replace('  if (covered > 0 && block) {', '  if (false) {'),
+  // 摘要现在和「背景材料」合成同一条 system（见 versions.js 里的 prefix），
+  // 所以这里改的是「摘要那一份要不要拼进前缀」。
+  src.replace("  const summaryPart = covered > 0 ? block : '';", "  const summaryPart = '';"),
 );
 
 runner.run('被覆盖的消息照样逐条发（等于没压）', VERSIONS, (src) =>

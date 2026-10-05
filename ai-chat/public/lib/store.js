@@ -22,6 +22,8 @@ import { normalizeQuote } from './quote.js';
 import { fallbackTitle, inferTitleSource, needsAutoTitle, titleFromModel } from './title.js';
 import { normalizeFeedback } from './feedback.js';
 import { normalizeSummary } from './compress.js';
+import { branchPlan } from './branch.js';
+import { MAX_REFERENCE_CHARS, MAX_REFERENCE_TURNS, MAX_RECORDED_TURNS } from './reference.js';
 
 const STORAGE_KEY = 'duitanlu.sessions.v2';
 const LEGACY_KEY = 'duitanlu.conversation.v1';
@@ -202,6 +204,51 @@ function syncFlatFields(message) {
   message.feedback = current.feedback;
 }
 
+function normalizeBranchOf(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  // 出处必须像一个会话 id。认不出来就当「这条会话不是分支」——
+  // 宁可不显示来源，也不要指着一个不存在的东西。
+  if (!isSessionId(raw.id)) return null;
+  return {
+    id: raw.id,
+    /** 当时的标题快照：源会话被删掉之后，界面上还能说清它是从哪儿来的 */
+    title: typeof raw.title === 'string' ? raw.title.slice(0, 60) : '',
+    /** 从哪一条回答分的叉 */
+    messageId: typeof raw.messageId === 'string' ? raw.messageId : '',
+    at: Number(raw.at) || 0,
+    /** 原会话里有多少张图**没有**带过来（如实告诉用户，界面要显示） */
+    images: Math.max(0, Math.trunc(Number(raw.images)) || 0),
+  };
+}
+
+/**
+ * 「背景材料」（会话引用，见 lib/reference.js）。
+ *
+ * 只认有正文的材料 —— 空正文的材料等于没挂，留着只会让界面显示一条点不开的标注。
+ * 正文里存的是**快照**，所以这里不需要（也不应该）去校验来源会话还在不在。
+ */
+function normalizeReference(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const text = typeof raw.text === 'string' ? raw.text.trim() : '';
+  if (!text) return null;
+  const kind = raw.kind === 'turns' ? 'turns' : 'summary';
+  return {
+    kind,
+    sessionId: isSessionId(raw.sessionId) ? raw.sessionId : '',
+    title: typeof raw.title === 'string' ? raw.title.slice(0, 60) : '',
+    at: Number(raw.at) || 0,
+    text: text.slice(0, MAX_REFERENCE_CHARS),
+    // 轮次号的上限分两种：原文档档这里是**材料的轮数**，硬上限 3
+    //（超了「引用」就悄悄变成隐形的分支）；摘要档那只是「压的是哪几轮」的记录，
+    // 摘要本身不限轮数 —— 拿 3 去夹它会把用户勾的范围改小，界面就还原不回去了。
+    turns: (Array.isArray(raw.turns) ? raw.turns : [])
+      .map((n) => Math.trunc(Number(n)))
+      .filter((n) => Number.isFinite(n) && n > 0)
+      .slice(0, kind === 'turns' ? MAX_REFERENCE_TURNS : MAX_RECORDED_TURNS),
+    covers: Math.max(0, Math.trunc(Number(raw.covers)) || 0),
+  };
+}
+
 function normalizeSession(raw) {
   if (!raw || typeof raw !== 'object') return null;
   // id 缺失或非法一律丢弃，而不是自动补一个新 id。
@@ -227,6 +274,10 @@ function normalizeSession(raw) {
   // 反推错了会把用户自己起的名字当成机器起的，所以那一步是保守的：认不出来就当用户起的。
   session.titleSource = inferTitleSource({ ...session, titleSource: raw.titleSource });
   session.summary = normalizeSessionSummary(raw.summary, session.messages);
+  // 从哪个会话分出来的（不是分支就是 null）。见 lib/branch.js
+  session.branchOf = normalizeBranchOf(raw.branchOf);
+  // 挂着的背景材料（会话引用）。见 lib/reference.js
+  session.reference = normalizeReference(raw.reference);
   return session;
 }
 
@@ -274,6 +325,17 @@ function makeSession(overrides = {}) {
     titleSource: 'none',
     /** 上下文摘要：会话太长时把前面部分压成它（见 lib/compress.js） */
     summary: null,
+    /**
+     * 这条会话是从哪个会话分出来的：`{ id, title, messageId, at, images }`。
+     * 不是分支就是 null。注意它只是**出处**（给界面看 + 能跳回去），
+     * 不是引用 —— 内容早就复制成本会话自己的消息了，源会话删掉也不影响这里。
+     */
+    branchOf: null,
+    /**
+     * 挂着的「背景材料」（会话引用，见 lib/reference.js）：
+     * 另一个会话的摘要或某几轮的原文，**快照**存进来，只在构造请求时拼到最前面。
+     */
+    reference: null,
     createdAt: now,
     updatedAt: now,
     personaId: DEFAULT_PERSONA_ID,
@@ -437,6 +499,20 @@ export function createStore() {
     session.updatedAt = Date.now();
   }
 
+  /**
+   * 会话数到上限时腾一个位置。
+   * 新建会话和分出新会话都要用，所以只留一份 —— 规则改一处就够。
+   */
+  function makeRoom() {
+    if (sessions.length < MAX_SESSIONS) return;
+    // 不静默失败：按最久未使用淘汰一个。
+    // 置顶的会话排在淘汰队列的**最后** —— 用户明确说过它重要，
+    // 要淘汰就先淘汰没置顶的；实在全都是置顶的，才退回去淘汰最旧的。
+    const byOldest = [...sessions].sort((a, b) => a.updatedAt - b.updatedAt);
+    const oldest = byOldest.find((s) => s.pinned !== true) ?? byOldest[0];
+    sessions = sessions.filter((s) => s.id !== oldest.id);
+  }
+
   if (recoveredInterrupted || migrated) commit();
   else persist();
 
@@ -477,15 +553,59 @@ export function createStore() {
      * 模型则相反：那是「用哪个引擎」，沿用上次选过的更省事。
      */
     createSession() {
-      if (sessions.length >= MAX_SESSIONS) {
-        // 不静默失败：按最久未使用淘汰一个。
-        // 置顶的会话排在淘汰队列的**最后** —— 用户明确说过它重要，
-        // 要淘汰就先淘汰没置顶的；实在全都是置顶的，才退回去淘汰最旧的。
-        const byOldest = [...sessions].sort((a, b) => a.updatedAt - b.updatedAt);
-        const oldest = byOldest.find((s) => s.pinned !== true) ?? byOldest[0];
-        sessions = sessions.filter((s) => s.id !== oldest.id);
-      }
+      makeRoom();
       const session = makeSession({ model: lastUsedModel });
+      sessions.push(session);
+      activeId = session.id;
+      commit();
+      return session;
+    },
+
+    /**
+     * 从某一轮分出一个新会话（见 lib/branch.js）。
+     *
+     * 复制的是「到 messageId 那一条回答为止（含）」的全部内容，
+     * **原会话一个字节都不动**：它的版本页、引用、标题、摘要全都留在原地，
+     * 新会话拿到的是自己的副本，从此两边各聊各的。
+     *
+     * 带过去：角色、系统提示词、模型、压缩摘要（覆盖范围越界就丢掉，见 branchPlan）。
+     * 不带：图片（一律不带）、👍/👎 评价（那是对原会话那几页的评价）。
+     * 标题 `原标题-分支N`，并标成 `manual` —— 用户明确要的分支名，
+     * 不许被「AI 起名」自动覆盖（那是另一条规则，别串）。
+     *
+     * @param {string} id 源会话 id
+     * @param {string} messageId 分叉点（那一条回答的 id）
+     * @returns {object|null} 新会话；源会话或分叉点找不到就返回 null（什么都不做）
+     */
+    branchFrom(id, messageId) {
+      const source = sessions.find((s) => s.id === id);
+      if (!source) return null;
+
+      const plan = branchPlan({
+        source,
+        messageId,
+        // 同一个源会话下已有的分支 —— 新分支的编号要避开它们（删掉中间那条也不重名）
+        siblingTitles: sessions.filter((s) => s.branchOf?.id === id).map((s) => s.title),
+      });
+      if (!plan) return null;
+
+      makeRoom();
+      const session = makeSession({
+        title: plan.title,
+        titleSource: 'manual',
+        summary: plan.summary,
+        personaId: source.personaId,
+        systemPrompt: source.systemPrompt,
+        model: source.model,
+        messages: plan.messages,
+        branchOf: {
+          id: source.id,
+          title: source.title,
+          messageId,
+          at: Date.now(),
+          images: plan.images,
+        },
+      });
       sessions.push(session);
       activeId = session.id;
       commit();
@@ -611,6 +731,28 @@ export function createStore() {
     summaryOf(id) {
       const session = sessions.find((s) => s.id === id) ?? active();
       return session?.summary ?? null;
+    },
+
+    /**
+     * 挂上一份「背景材料」（见 lib/reference.js）。
+     *
+     * 材料是**快照**：正文存在这个会话自己身上，所以源会话之后怎么变都不影响它。
+     * 它也**不进 messages** —— 只在构造请求时拼在最前面一条 system 里，
+     * 所以导出、压缩下标、消息数都不受影响。
+     */
+    setReference(reference) {
+      const session = active();
+      const clean = normalizeReference(reference);
+      session.reference = clean;
+      commit();
+      return clean;
+    },
+
+    /** 移除材料（之后不再带上；已经答过的轮次一个字不变） */
+    clearReference() {
+      const session = active();
+      session.reference = null;
+      commit();
     },
 
     /** 删除会话；最后一个不允许删（否则界面没有可显示的东西） */

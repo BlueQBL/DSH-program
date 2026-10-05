@@ -12,8 +12,8 @@
 import { spawn } from 'node:child_process';
 import net from 'node:net';
 import path from 'node:path';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { renderMarkdown, parseBlocks, escapeHtml } from '../public/lib/markdown.js';
 import { composeReply, extractFacts, createMockReply } from '../lib/mock-responder.mjs';
 import {
@@ -866,6 +866,163 @@ try {
   console.log(`\n测试中断：${err.stack}`);
 } finally {
   server?.child.kill();
+}
+
+// ---------------------------------------------------------------- 服务端日志
+
+/**
+ * 本机跑的 `node server.mjs` 是一次性进程：出事时的线索只有那个终端窗口。
+ * 这一组守的就是「出事要留痕」——启动 / 崩溃 / 结束都写进 `data/server.log`（可用 AI_SERVER_LOG 换路径）。
+ *
+ * 读日志的方法也写在这儿，因为它决定「没有记录」时该怎么判断：
+ * 既没有崩溃行、也没有结束行 → 进程是被外部直接干掉的（Windows 关掉控制台窗口收不到任何信号）。
+ */
+group('服务端日志 · 出事要留痕');
+
+{
+  const { logLine, startEntry, crashEntry, exitEntry, crashLoop, shouldRotate, CRASH_LOOP_LIMIT } =
+    await import('../lib/crash-log.mjs');
+
+  check('每行都带本地时间前缀（和终端里的时间对得上，不是 UTC）',
+    /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] /.test(logLine('内容', Date.UTC(2026, 0, 2, 3, 4, 5))),
+    logLine('内容', Date.UTC(2026, 0, 2, 3, 4, 5)));
+
+  const started = startEntry({ port: 5250, model: 'deepseek-v3.2', mode: 'model', baseUrl: 'https://x/v1' });
+  check('启动那行写清端口与模型',
+    started.includes('端口 5250') && started.includes('deepseek-v3.2'), started);
+  check('启动那行带上上游地址（排查时能看出连的是哪家）', started.includes('https://x/v1'));
+  check('离线模式明确写「离线回答」',
+    startEntry({ port: 1, mode: 'mock' }).includes('离线回答'), startEntry({ port: 1, mode: 'mock' }));
+
+  const crash = crashEntry('uncaughtException', Object.assign(new Error('炸了'), { code: 'EPIPE' }));
+  check('崩溃那行带堆栈', crash.includes('未捕获异常') && crash.includes('炸了'));
+  check('崩溃那行带上错误码（EPIPE 这类一眼能看出是断线）', crash.includes('EPIPE'));
+  check('Promise 拒绝单独一类，措辞和崩溃不同',
+    crashEntry('unhandledRejection', '理由').includes('未处理的 Promise 拒绝') && crash.includes('未捕获异常'));
+  check('非 Error 的拒绝理由也落得下来（字符串、对象都行）',
+    crashEntry('unhandledRejection', '字符串理由').includes('字符串理由'));
+  check('结束那行带退出码', exitEntry(1).includes('退出码 1'), exitEntry(1));
+  check('三类记录的措辞互不相同（一眼分得清发生了什么）',
+    new Set([started, crash, exitEntry(0)].map((line) => line.replace(/^\[[^\]]+\] /, '').slice(0, 4))).size === 3);
+
+  const now = Date.now();
+  check(`窗口内崩 ${CRASH_LOOP_LIMIT} 次还能撑住`, crashLoop(Array(CRASH_LOOP_LIMIT).fill(now), { now }).exceeded === false);
+  check(`超过 ${CRASH_LOOP_LIMIT} 次就退出（状态已经不可信，硬撑着会给出错回答）`,
+    crashLoop(Array(CRASH_LOOP_LIMIT + 1).fill(now), { now }).exceeded === true);
+  check('很久以前的崩溃不算这一窗口的',
+    crashLoop(Array(99).fill(now - 10 * 60_000), { now }).exceeded === false);
+  check('窗口内的次数算得对', crashLoop([now, now, now - 10 * 60_000], { now }).count === 2,
+    String(crashLoop([now, now, now - 10 * 60_000], { now }).count));
+  // 日志文件超过上限就轮转（不会无限长）
+  check('日志文件超过上限就轮转（不会无限长）',
+    shouldRotate(2 * 1024 * 1024) === true && shouldRotate(1000) === false);
+
+  // 日志是附件，不是功能：写不进去（路径被一个同名文件占住）也必须一声不响
+  {
+    const { installCrashLog } = await import('../lib/crash-log.mjs');
+    const blocker = path.join(ROOT, '.tmp-mutations', `not-a-dir-${Date.now()}`);
+    writeFileSync(blocker, '我是个文件，不是目录', 'utf8');
+    const quiet = installCrashLog({
+      logFile: path.join(blocker, 'server.log'),
+      watchProcess: false, // 别把测试进程也装上崩溃兜底，那会吞掉真异常
+    });
+    let threw = null;
+    try {
+      quiet.start({ port: 1, mode: 'mock' });
+      quiet.crash('uncaughtException', new Error('写不进去也不能炸'));
+    } catch (err) {
+      threw = err;
+    }
+    check('日志写不进去时一声不响（附件不能把功能拖垮）', threw === null, String(threw?.message ?? ''));
+    try {
+      rmSync(blocker, { force: true });
+    } catch {
+      /* 清理失败不影响结论 */
+    }
+  }
+}
+
+{
+  // 真起一个服务，确认它把启动那行写进了日志文件
+  const logPath = path.join(ROOT, '.tmp-mutations', `server-log-${Date.now()}.log`);
+  const readLog = () => (existsSync(logPath) ? readFileSync(logPath, 'utf8') : '');
+  const started = await startServerWithRetry({ AI_SERVER_LOG: logPath });
+  check('带上自定义日志路径也能起得来', Boolean(started));
+  if (started) {
+    const dump = readLog();
+    check('启动那一行真的写进了日志文件', dump.includes('启动：端口'), dump.slice(0, 120));
+    check('日志里写的是它真正监听的端口',
+      dump.includes(`端口 ${Number(started.base.split(':').pop())}`), dump.slice(0, 120));
+
+    started.stop();
+    await new Promise((r) => setTimeout(r, 400));
+    const after = readLog();
+    // Windows 上 child.kill() 是硬终止：子进程收不到信号、也没有退出回调 ——
+    // 所以这里**不该**出现「收到 SIG…」或「进程结束」。这条断言守的正是那个读法：
+    // 日志里干干净净（只有启动行）＝ 进程是被外部直接干掉的。
+    check('硬终止不会在日志里留下结束记录（这正是「日志干净＝被外部结束」的判断依据）',
+      !after.includes('收到 SIG') && !after.includes('进程结束'), after.slice(-160));
+  }
+}
+
+{
+  // 信号 / 崩溃那两条路径：Windows 上没法给子进程发信号，所以用子脚本**合成**信号与异常
+  const script = path.join(ROOT, '.tmp-mutations', `crash-log-probe-${Date.now()}.mjs`);
+  const logPath = `${script}.log`;
+  // 注意：ESM 里的绝对路径必须是 file:// URL —— Windows 上直接写 D:\... 会被当成协议 'd:' 拒掉
+  const moduleUrl = pathToFileURL(path.join(ROOT, 'lib', 'crash-log.mjs')).href;
+  writeFileSync(
+    script,
+    [
+      `import { installCrashLog } from ${JSON.stringify(moduleUrl)};`,
+      `const log = installCrashLog({ logFile: ${JSON.stringify(logPath)} });`,
+      `log.start({ port: 1234, mode: 'model', model: 'probe-model' });`,
+      `if (process.argv[2] === 'crash') { throw new Error('探针故意抛的异常'); }`,
+      `if (process.argv[2] === 'reject') { void Promise.reject(new Error('探针故意拒绝')); }`,
+      `if (process.argv[2] === 'signal') { process.emit('SIGINT'); }`,
+      `if (process.argv[2] === 'storm') { for (let i = 0; i < 20; i += 1) log.crash('uncaughtException', new Error('第 ' + i + ' 次')); }`,
+    ].join('\n'),
+    'utf8',
+  );
+
+  const probe = (mode) =>
+    new Promise((resolve) => {
+      const child = spawn(process.execPath, [script, mode], { cwd: ROOT, stdio: 'ignore' });
+      child.on('exit', (code) => resolve(code));
+    });
+
+  await probe('crash');
+  const crashed = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
+  check('未捕获异常会连堆栈一起写进日志', crashed.includes('未捕获异常') && crashed.includes('探针故意抛的异常'),
+    crashed.slice(0, 200));
+  check('崩溃之后日志里也留了退出记录', crashed.includes('进程结束'), crashed.slice(-120));
+
+  writeFileSync(logPath, '', 'utf8');
+  await probe('reject');
+  const rejected = readFileSync(logPath, 'utf8');
+  check('未处理的 Promise 拒绝也会留痕（不然它是最难查的那种）',
+    rejected.includes('未处理的 Promise 拒绝') && rejected.includes('探针故意拒绝'), rejected.slice(0, 200));
+
+  writeFileSync(logPath, '', 'utf8');
+  await probe('signal');
+  const signalled = readFileSync(logPath, 'utf8');
+  check('收到信号时写明是「被外部结束」', signalled.includes('收到 SIGINT'), signalled.slice(0, 200));
+  check('信号之后也留了退出记录', signalled.includes('进程结束'), signalled.slice(-120));
+
+  // 崩溃风暴：一直崩就别硬撑了 —— 状态已经不可信，记完最后一条退出
+  writeFileSync(logPath, '', 'utf8');
+  const stormCode = await probe('storm');
+  const stormed = readFileSync(logPath, 'utf8');
+  check('崩到一定次数会记一条「准备退出」', stormed.includes('一分钟内崩了'), stormed.slice(-200));
+  check('并且真的以非零码退出（让用户看见、去重启）', stormCode === 1, String(stormCode));
+
+  for (const file of [script, logPath, `${logPath}.1`]) {
+    try {
+      rmSync(file, { force: true });
+    } catch {
+      /* 清理失败不影响结论 */
+    }
+  }
 }
 
 // ---------------------------------------------------------------- 汇总

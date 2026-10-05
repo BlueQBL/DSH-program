@@ -214,7 +214,11 @@ runner.run('左格不再是定位祖先（开关会飘到整页右上角去）',
 );
 
 runner.run('「新对话」改回黑底实心', CSS, (src) =>
-  src.replace('.rail-new {\n  display: block;', '.rail-new {\n  background: var(--ink);\n  display: block;'),
+  // 现在两个入口的样式都收在 .rail-actions .ghost-button 那一组里
+  src.replace(
+    '.rail-actions .ghost-button {\n  flex: 1 1 0;',
+    '.rail-actions .ghost-button {\n  background: var(--ink);\n  flex: 1 1 0;',
+  ),
 );
 
 // ---- 会话列表的置顶 / 最近（两组各自收放）
@@ -270,6 +274,131 @@ runner.run('置顶之后按钮不改口（没法取消置顶）', APP, (src) =>
 
 runner.run('组标题上的条数不更新（收起来就不知道里面有几条）', APP, (src) =>
   src.replace('    group.count.textContent = String(rows.length);', '    group.count.textContent = String(0);'),
+);
+
+// ---- 会话分支：从这一轮分出一个新会话
+
+runner.run('「分出新会话」点了没反应', APP, (src) =>
+  src.replace("  if (kind === 'branch') {", "  if (false && kind === 'branch') {"),
+);
+
+runner.run('分支分出来了，但正文区不说明它从哪儿来', APP, (src) =>
+  src.replace('  note.hidden = false;', '  note.hidden = true;'),
+);
+
+runner.run('正在生成时也允许分支（把半截内容复制走）', APP, (src) =>
+  src.replace(
+    "    if (runtime.busy) {\n      flashHint('正在生成，等这一轮结束再分出新会话', 2600);",
+    "    if (false) {\n      flashHint('正在生成，等这一轮结束再分出新会话', 2600);",
+  ),
+);
+
+runner.run('分支会话行不再标箭头（一眼看不出它是岔出来的）', CSS, (src) =>
+  src.replace(
+    '.session-item[data-branch="true"] .session-name::before {',
+    '.session-item-branch-renamed .session-name::before {',
+  ),
+);
+
+// ---- 错误文案：服务端拒绝 ≠ 连不上服务端
+
+runner.run('服务端拒了请求（400）也报成「连不上服务端」（把人引去查进程）', APP, (src) =>
+  src.replace('    } else if (err.httpStatus) {', '    } else if (false) {'),
+);
+
+runner.run('不给错误带上 HTTP 状态码（上面那条分支就永远走不到）', APP, (src) =>
+  src.replace('      rejected.httpStatus = response.status;', '      void response.status;'),
+);
+
+// ---- 会话引用：面板、材料条、上限文案
+
+runner.run('引用确认之后不开新会话（材料挂到了原会话上）', APP, (src) =>
+  src.replace(
+    "  if (store.session.messages.length === 0) {\n    // 当前就是个空白会话：直接用掉它，别再堆一个「新对话」\n    store.updateSessionSettings({ personaId: DEFAULT_PERSONA_ID, systemPrompt: '' });\n  } else {\n    store.createSession();\n  }\n  store.setReference(reference);",
+    '  store.setReference(reference);',
+  ),
+);
+
+runner.run('「移除材料」只是把标注条藏起来（下一轮照样带上）', APP, (src) =>
+  src.replace('  if (!store.session.reference) return;\n  store.clearReference();', '  if (!store.session.reference) return;'),
+);
+
+runner.run('勾选轮次不起作用（勾了也等于没勾）', APP, (src) =>
+  src.replace(
+    '  draft.numbers = box.checked\n    ? [...new Set([...draft.numbers, number])].sort((a, b) => a - b)\n    : draft.numbers.filter((n) => n !== number);',
+    '  draft.numbers = draft.numbers;',
+  ),
+);
+
+runner.run('超过 3 轮时不说「原文」档走不通（让用户白点一次）', APP, (src) =>
+  src.replace(
+    '    if (picked > MAX_REFERENCE_TURNS || (!picked && pairs.length > MAX_REFERENCE_TURNS)) {',
+    '    if (false) {',
+  ),
+);
+
+runner.run('「材料形式」下拉框不跟着草稿走（面板上写着「原文」，实际按「摘要」走）', APP, (src) =>
+  src.replace("  if (els.referenceKind) els.referenceKind.value = runtime.referenceDraft.kind;\n", ''),
+);
+
+runner.run('「改选轮次」不带回上次勾的轮次（回来是一片空勾选框）', APP, (src) =>
+  src.replace(
+    'openReferencePanel({ sourceId: reference.sessionId, kind: reference.kind, numbers: reference.turns });',
+    'openReferencePanel({ sourceId: reference.sessionId, kind: reference.kind, numbers: [] });',
+  ),
+);
+
+runner.run('源会话被删掉后不清旧轮次号（在新会话上勾出用户没勾过的轮次）', APP, (src) =>
+  src.replace(
+    "  if (!sessions.some((s) => s.id === draft.sourceId)) {\n    draft.sourceId = sessions[0]?.id ?? '';\n    draft.numbers = [];\n  }",
+    "  if (!sessions.some((s) => s.id === draft.sourceId)) draft.sourceId = sessions[0]?.id ?? '';",
+  ),
+);
+
+runner.run('轮次行不标页数（用户不知道这一轮被编辑过、材料只取了最后一页）', APP, (src) =>
+  src.replace(
+    "      const pages = pair.pages > 1 ? `（${pair.pages} 页）` : '';",
+    "      const pages = '';",
+  ),
+);
+
+runner.run('页数标到问题后面（长问题会把它挤到省略号外，等于没标）', APP, (src) =>
+  src.replace(
+    '      text.textContent = `第 ${pair.number} 轮${pages} · ${preview}`;',
+    '      text.textContent = `第 ${pair.number} 轮 · ${preview}${pages}`;',
+  ),
+);
+
+// 靶点要写足上下文：JS 的 String.replace 传字符串时**只替换第一处匹配** ——
+// `if (draft.kind === 'turns') {` 在 app.js 里出现两次（状态行那处在前、确认那处在后），
+// 只写这一行的话打到的是状态行，标题里说的「去调模型」根本没发生
+//（这条是我自己写的变异，被 .tmp-mutations/one-mutation.mjs 单条复核抓出来的）。
+runner.run('「原文」档也走摘要（选了原文却去调模型）', APP, (src) =>
+  src.replace(
+    "  if (draft.kind === 'turns') {\n    const plan = referencePlan({ source, kind: 'turns', numbers });",
+    "  if (false) {\n    const plan = referencePlan({ source, kind: 'turns', numbers });",
+  ),
+);
+
+runner.run('面板说明里不提「带的是最新那一页」', HTML, (src) =>
+  src.replace(
+    '\n              某一轮被编辑重发过多次时，材料带的是**最新那一页**（轮次后面标着「N 页」），\n              想连旧页一起搬走就用「分出新会话」。',
+    '',
+  ),
+);
+
+// ---- 会话栏顶部的两个入口（新建 / 引用）：同一件事在两个地方要长得一样
+
+runner.run('收起列表时不露出「引用会话」的备用入口（收起就引用不了）', APP, (src) =>
+  src.replace('  if (els.referenceCompact) els.referenceCompact.hidden = visible;\n', ''),
+);
+
+runner.run('「引用会话」改回一行小字（同一件事两个地方两个样）', HTML, (src) =>
+  src.replace('class="ghost-button rail-reference"', 'class="link-button rail-reference"'),
+);
+
+runner.run('两个入口不再并排（新对话自己占满一行）', CSS, (src) =>
+  src.replace('.rail-actions {\n  display: flex;', '.rail-actions {\n  display: block;'),
 );
 
 runner.finish();

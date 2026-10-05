@@ -972,13 +972,19 @@ group('历史构造 · 旧版本必须一起发出去');
   const v = (content, extra = {}) => ({ content, attachments: [], createdAt: 0, ...extra });
   const img = (dataUrl) => ({ dataUrl, name: 'x.png', mime: 'image/png' });
 
-  // 单页：正常一问一答
+  // 单页：历史以「正在回答的那一问」结尾
+  //
+  // ⚠️ 这里曾经断言的是「历史 = 问 + 答」两条。那是错的：正在生成的这条回答
+  // 还没有内容（app 传进来的是刚建好的空占位），把它按「有内容就发」的规则发出去，
+  // 请求就会以 assistant 结尾，服务端直接 400「messages 必须以一条 user 消息结尾」。
+  // 现在这条断言守的是服务端的硬契约。
   {
     const q = { role: 'user', versions: [v('问题')] };
     const a = { role: 'assistant', versions: [v('回答')] };
     const h = buildRequestHistory([q, a], q, a);
-    check('单页时历史是标准的 system 前的 一问一答', h.length === 2, JSON.stringify(h));
-    check('单页时顺序正确', h[0].role === 'user' && h[1].role === 'assistant');
+    check('单页时历史以正在回答的那一问结尾', h.length === 1 && h[0].role === 'user', JSON.stringify(h));
+    check('正在生成的这条回答不进历史（服务端要求末条是 user）',
+      !h.some((x) => x.content === '回答'), JSON.stringify(h));
   }
 
   // 中间还有别的轮次
@@ -988,9 +994,9 @@ group('历史构造 · 旧版本必须一起发出去');
     const q2 = { role: 'user', versions: [v('第二轮问')] };
     const a2 = { role: 'assistant', versions: [v('第二轮答')] };
     const h = buildRequestHistory([q1, a1, q2, a2], q2, a2);
-    check('多轮历史全部带上', h.length === 4, String(h.length));
-    check('多轮顺序正确',
-      h.map((x) => x.content).join('|') === '第一轮问|第一轮答|第二轮问|第二轮答',
+    check('前面几轮全部带上（含它们各自的回答）', h.length === 3, String(h.length));
+    check('顺序正确，并且以正在回答的那一问结尾',
+      h.map((x) => x.content).join('|') === '第一轮问|第一轮答|第二轮问',
       h.map((x) => x.content).join('|'));
   }
 
@@ -1017,10 +1023,23 @@ group('历史构造 · 旧版本必须一起发出去');
     const q = { role: 'user', versions: [v('看这张图', { attachments: [img('data:image/png;base64,AA==')] })] };
     const a = { role: 'assistant', versions: [v('图里是……')] };
     const h = buildRequestHistory([q, a], q, a);
-    // 注意：历史里最后一项是助手的回答，提问在它前面
-    const lastUser = [...h].reverse().find((x) => x.role === 'user');
+    // 注意：历史以「正在回答的那一问」结尾，所以图片就在最后一项上
+    const lastUser = h.at(-1);
     check('末条提问带上了图片', lastUser?.images.length === 1, JSON.stringify(lastUser));
-    check('助手回答不带图片', h.find((x) => x.role === 'assistant').images.length === 0);
+    // 助手条目永远不带图片：多轮历史里那几条也一样（拿有助手条目的形状来验）
+    const multi = buildRequestHistory(
+      [
+        { role: 'user', versions: [v('早前那一问')] },
+        { role: 'assistant', versions: [v('早前那一答')] },
+        q,
+        a,
+      ],
+      q,
+      a,
+    );
+    check('助手回答不带图片',
+      multi.filter((x) => x.role === 'assistant').every((x) => x.images.length === 0),
+      JSON.stringify(multi.map((x) => [x.role, x.images.length])));
   }
 
   {
@@ -1261,6 +1280,10 @@ group('会话列表的置顶 / 最近：分组是界面的事，置顶本身是�
   const orderBefore = store.sessions.map((s) => s.id).join(',');
 
   check('默认一条都没置顶', store.sessions.every((s) => s.pinned === false));
+  // 先等两毫秒：updatedAt 的精度就是毫秒，不等的话「置顶顺手 touch 了一下」
+  // 在同一个毫秒里发生，时间戳看起来纹丝不动 —— 这条断言就会时灵时不灵。
+  // （变异测试正是这么抓出来的：改坏成 touch 之后它居然还能过。）
+  await new Promise((r) => setTimeout(r, 5));
   check('置顶成功', store.setPinned(keep, true) === true);
   check('置顶状态记在会话上', store.sessions.find((s) => s.id === keep).pinned === true);
   check('置顶**不改**最近使用时间（会话行上的时钟不该跳）',
@@ -1322,6 +1345,603 @@ group('会话列表的置顶 / 最近：分组是界面的事，置顶本身是�
   for (const session of store.sessions) store.setPinned(session.id, true);
   store.createSession();
   check('全是置顶时也会腾出位置（不会卡在上限）', store.sessions.length === 50, String(store.sessions.length));
+}
+
+group('会话分支 · 纯函数：标题、复制、图片');
+
+{
+  const { branchTitle, branchNumber, branchMessages, countImages } = await loadModule('branch.js');
+
+  check('第一个分支叫「原标题-分支1」', branchTitle('论文思路') === '论文思路-分支1', branchTitle('论文思路'));
+  check('标题是空的也有兜底', branchTitle('') === '新对话-分支1', branchTitle(''));
+  check('已有分支就接着编号', branchTitle('X', ['X-分支1']) === 'X-分支2');
+  check('删掉中间那条之后也不会重名（按最大编号 +1，不是按数量 +1）',
+    branchTitle('X', ['X-分支2']) === 'X-分支3', branchTitle('X', ['X-分支2']));
+  check('用户自己改过名的分支不参与编号', branchTitle('X', ['我自己的名字']) === 'X-分支1');
+  check('尾巴上的编号认得出来', branchNumber('X-分支12') === 12 && branchNumber('X') === 0);
+  check('标题太长时先砍原标题，不砍「-分支N」（那是它唯一的出处线索）',
+    branchTitle('长'.repeat(80)).endsWith('-分支1') && branchTitle('长'.repeat(80)).length <= 60,
+    `${branchTitle('长'.repeat(80)).length} 字`);
+
+  const messages = [
+    { id: 'm1', role: 'user', content: '问', versions: [{ content: '问', attachments: [] }] },
+    { id: 'm2', role: 'assistant', content: '答', versions: [{ content: '答', attachments: [] }] },
+    {
+      id: 'm3',
+      role: 'user',
+      content: '带图的问',
+      versions: [{ content: '带图的问', attachments: [{ name: 'a.png', dataUrl: 'data:image/png;base64,xx' }] }],
+    },
+    { id: 'm4', role: 'assistant', content: '再答', versions: [{ content: '再答', attachments: [] }] },
+  ];
+
+  const copied = branchMessages(messages, 'm2');
+  check('只复制到那一条为止（含），后面的轮次不带过去',
+    copied.length === 2 && copied[1].id === 'm2', copied.map((m) => m.id).join(','));
+  check('分叉点找不到就返回 null（宁可什么都不做，也不能悄悄多复制几轮）',
+    branchMessages(messages, 'nope') === null);
+  check('复制出来的是副本：改副本不影响原会话',
+    (copied[0].versions[0].content = '改过了', messages[0].versions[0].content === '问'));
+  check('图片一律不带进分支',
+    branchMessages(messages, 'm4').every((m) => m.versions.every((v) => v.attachments.length === 0)));
+  check('图片数如实数出来（要告诉用户几张没带过来）', countImages(messages) === 1, String(countImages(messages)));
+  check('没有图时数出来是 0', countImages([{ versions: [{ attachments: [] }] }]) === 0);
+}
+
+group('会话分支 · 从某一轮分出一个新会话');
+
+{
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+
+  const sourceId = store.session.id;
+  store.renameSession(sourceId, '闭包那点事');
+  const q = store.pushUser('讲讲闭包').message;
+  const a = store.pushAssistant({ question: q, version: 1 }).message;
+  store.appendDelta(a, '闭包是函数加上它捕获的作用域');
+  store.updateSessionSettings({ personaId: 'coding', systemPrompt: '只用中文回答' });
+
+  const sourceMessages = store.session.messages.length;
+  // 先给原会话那条回答打个分：评价是「对原会话这一页」的态度，不该跟着复制过去
+  store.setFeedback(a, 1, { rating: 'up', reasons: [], note: '' });
+  const branch = store.branchFrom(sourceId, a.id);
+  const sourceNow = store.sessions.find((s) => s.id === sourceId);
+
+  check('分出了一个新会话', Boolean(branch) && branch.id !== sourceId);
+  check('它成了当前会话', store.sessionId === branch.id);
+  check('标题是「原标题-分支1」', branch.title === '闭包那点事-分支1', branch.title);
+  check('标题来源标成手动（「AI 起名」不许覆盖分支名）', branch.titleSource === 'manual', branch.titleSource);
+  check('内容复制过来了', branch.messages.length === sourceMessages, String(branch.messages.length));
+  check('拿到的是副本，不是原会话那批对象', branch.messages[0] !== sourceNow.messages[0]);
+  check('角色跟着走', branch.personaId === 'coding', branch.personaId);
+  check('系统提示词跟着走', branch.systemPrompt === '只用中文回答');
+  check('新分支不置顶', branch.pinned === false);
+  check('记下了出处（哪个会话、从哪一条分的）',
+    branch.branchOf?.id === sourceId && branch.branchOf?.messageId === a.id,
+    JSON.stringify(branch.branchOf));
+  check('出处里存了当时的标题（源会话被删掉也说得清自己从哪来）',
+    branch.branchOf?.title === '闭包那点事');
+  check('原会话一个字节都没动（消息数、标题都不变）',
+    sourceNow.messages.length === sourceMessages && sourceNow.title === '闭包那点事');
+  check('原会话上的评价还在原会话',
+    sourceNow.messages[1].versions[0].feedback?.rating === 'up');
+  check('评价不跟着进分支（那是对原会话那几页的态度，复制过去等于替用户表了态）',
+    branch.messages[1].versions[0].feedback === null || branch.messages[1].versions[0].feedback === undefined,
+    JSON.stringify(branch.messages[1].versions[0].feedback));
+  check('镜像字段上的评价也一并清掉',
+    branch.messages[1].feedback === null || branch.messages[1].feedback === undefined,
+    JSON.stringify(branch.messages[1].feedback));
+  check('分叉点找不到就什么都不做', store.branchFrom(sourceId, 'nope') === null);
+  check('源会话不存在也什么都不做', store.branchFrom('nope', a.id) === null);
+
+  // 分支上再分支
+  const again = store.branchFrom(branch.id, branch.messages[1].id);
+  check('分支上还能再分（嵌套编号接在后面）',
+    again?.title === '闭包那点事-分支1-分支1', again?.title);
+  check('嵌套分支的出处指向它爸（不是最上面那个）', again?.branchOf?.id === branch.id);
+
+  // 同一个源会话的第二个分支
+  const sibling = store.branchFrom(sourceId, a.id);
+  check('同一个源会话的第二个分支叫「-分支2」', sibling?.title === '闭包那点事-分支2', sibling?.title);
+
+  // 刷新之后还在
+  simulatePageHide();
+  const reloaded = createStore();
+  const branchAfterReload = reloaded.sessions.find((s) => s.id === branch.id);
+  check('刷新之后分支关系还在', branchAfterReload?.branchOf?.id === sourceId);
+  check('刷新之后出处里连当时的标题也在（源会话删掉才说得清它从哪来）',
+    branchAfterReload?.branchOf?.title === '闭包那点事', JSON.stringify(branchAfterReload?.branchOf));
+  check('刷新之后分支内容还在', branchAfterReload?.messages.length === sourceMessages);
+}
+
+{
+  // 从中间分叉：只带「到那一条为止」，后面的轮次留在原会话
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+  const sourceId = store.session.id;
+
+  const q1 = store.pushUser('第一轮').message;
+  const a1 = store.pushAssistant({ question: q1, version: 1 }).message;
+  store.appendDelta(a1, '第一轮的回答');
+  const q2 = store.pushUser('第二轮').message;
+  const a2 = store.pushAssistant({ question: q2, version: 1 }).message;
+  store.appendDelta(a2, '第二轮的回答');
+
+  const partial = store.branchFrom(sourceId, a1.id);
+  check('从中间分叉只带前两条', partial?.messages.length === 2, String(partial?.messages.length));
+  check('后面的轮次留在原会话里',
+    store.sessions.find((s) => s.id === sourceId)?.messages.length === 4);
+}
+
+{
+  // 摘要的越界保护：源会话的摘要覆盖不到分叉点时，不能照抄过去
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+  const sourceId = store.session.id;
+
+  const q1 = store.pushUser('第一轮').message;
+  const a1 = store.pushAssistant({ question: q1, version: 1 }).message;
+  store.appendDelta(a1, '第一轮');
+  const q2 = store.pushUser('第二轮').message;
+  const a2 = store.pushAssistant({ question: q2, version: 1 }).message;
+  store.appendDelta(a2, '第二轮');
+  const q3 = store.pushUser('第三轮').message;
+  const a3 = store.pushAssistant({ question: q3, version: 1 }).message;
+  store.appendDelta(a3, '第三轮');
+
+  // 摘要说它盖住了前 5 条（一共 6 条，合法）
+  store.setSummary({ text: '前两轮聊了什么', covers: 5, at: Date.now(), model: 'gpt-4o' });
+  check('先把摘要装上去', store.session.summary?.covers === 5);
+
+  const deep = store.branchFrom(sourceId, a3.id);
+  check('摘要没越界就跟着分支走（分支的上下文和源会话一致）', deep?.summary?.covers === 5);
+
+  const shallow = store.branchFrom(sourceId, a1.id);
+  check('分叉点在摘要覆盖范围之内时，摘要**丢掉**（否则那条请求里连用户消息都不剩）',
+    shallow?.summary === null, JSON.stringify(shallow?.summary));
+  check('丢掉摘要之后消息仍然是完整的', shallow?.messages.length === 2);
+}
+
+{
+  // 图片：一律不带，但要如实告诉用户几张没带过来
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+  const sourceId = store.session.id;
+
+  const q = store.pushUser('看看这张图', {
+    attachments: [{ name: 'a.png', mime: 'image/png', dataUrl: TINY_PNG, width: 1, height: 1 }],
+  }).message;
+  const a = store.pushAssistant({ question: q, version: 1 }).message;
+  store.appendDelta(a, '我看到了一张图');
+
+  const branch = store.branchFrom(sourceId, a.id);
+  check('图片没有跟着进分支',
+    branch.messages.every((m) => m.versions.every((v) => v.attachments.length === 0)));
+  check('出处里记着有几张图没带过来', branch.branchOf?.images === 1, String(branch.branchOf?.images));
+  check('原会话的图还在（分支是复制，不是搬走）',
+    store.sessions.find((s) => s.id === sourceId).messages[0].versions[0].attachments.length === 1);
+}
+
+{
+  // 源会话被删掉之后，分支自己照样活得好好的（出处是快照，不是活引用）
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+  const sourceId = store.session.id;
+  const q = store.pushUser('会被删掉的那个会话').message;
+  const a = store.pushAssistant({ question: q, version: 1 }).message;
+  store.appendDelta(a, '回答');
+  store.createSession(); // 免得删到只剩一条时删不掉
+  const branch = store.branchFrom(sourceId, a.id);
+
+  check('源会话可以删掉', store.deleteSession(sourceId) === true);
+  const orphan = store.sessions.find((s) => s.id === branch.id);
+  check('源会话删了，分支的消息一条没少', orphan?.messages.length === 2, String(orphan?.messages.length));
+  check('出处还留着当时的标题（界面据此说「原会话已删除」）',
+    orphan?.branchOf?.title === '会被删掉的那个会话');
+}
+
+{
+  // 会话数到上限时：分出新会话也要能腾出位置，而且仍然先淘汰没置顶的
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+  const keepId = store.session.id;
+  store.pushUser('这条很重要');
+  store.setPinned(keepId, true);
+  for (let i = 0; i < 60; i += 1) store.createSession();
+  check('先灌到上限', store.sessions.length === 50, String(store.sessions.length));
+
+  const q = store.pushUser('在别的会话里说一句').message;
+  const a = store.pushAssistant({ question: q, version: 1 }).message;
+  store.appendDelta(a, '回答');
+  const branch = store.branchFrom(store.sessionId, a.id);
+  check('到上限时也分得出新会话', store.sessions.length === 50 && Boolean(branch));
+  check('被淘汰的仍然不是置顶那条', store.sessions.some((s) => s.id === keepId));
+}
+
+group('请求历史 · 最后一条必须是 user（服务端的硬校验）');
+
+{
+  // 这一组是踩出来的：服务端 /api/chat 有一道硬校验 —— 请求必须以一条 user 消息结尾，
+  // 否则 400「messages 必须以一条 user 消息结尾」。
+  // 而「编辑更早的那一问」这条路会把那一问**之后**的轮次也发出去（旧那条线的轮次还在
+  // messages 里，我们永远不删消息），于是请求以 assistant 结尾，被服务端当场拒掉。
+  // 界面上的表现是一句莫名其妙的「连不上服务端」。
+  //
+  // 老测试看不见它：ui-tests 的假服务端不校验请求体。所以这里专门盯**真正发出去的那份历史**。
+  const { buildRequestHistory } = await loadModule('versions.js');
+
+  /** 走 app 的那条路：pushUser → pushAssistant → **此刻**构造历史（占位回答还是空的） */
+  function turn(store, text, opts = {}) {
+    const asked = store.pushUser(text, opts);
+    const placeholder = store.pushAssistant({ question: asked.message, version: asked.version }).message;
+    const history = buildRequestHistory(store.messages, asked.message, placeholder, {
+      summary: store.session.summary,
+    });
+    store.appendDelta(placeholder, `回答：${text}`);
+    store.finish(placeholder, 'done');
+    return { question: asked.message, placeholder, history };
+  }
+  const endsWithUser = (history) => history.at(-1)?.role === 'user';
+
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+
+  check('首轮：以 user 结尾', endsWithUser(turn(store, '第一问').history));
+  const q1 = store.messages[0];
+  check('编辑第 1 问生成第二页：以 user 结尾',
+    endsWithUser(turn(store, '第二版问法', { edit: q1, version: 1 }).history));
+  check('接着再问一轮：以 user 结尾', endsWithUser(turn(store, '第三轮').history));
+
+  const again = turn(store, '又改了一次第 1 问', { edit: q1, version: store.viewVersion(q1) });
+  check('编辑**更早**的那一问：请求仍然以 user 结尾（这是那次 400 的正主）',
+    endsWithUser(again.history), again.history.map((m) => m.role).join(','));
+  check('而且不再把那一问之后的轮次发出去（旧那条线不该打扰它）',
+    !again.history.some((m) => String(m.content).includes('第三轮')),
+    JSON.stringify(again.history.map((m) => m.content)));
+  check('历史里带着那一问的旧版本（编辑要发的是「修正过程」）',
+    again.history.filter((m) => m.role === 'user').length >= 2,
+    again.history.map((m) => m.content).join(' | '));
+
+  // 重新生成（reuse）
+  const lastQ = store.messages.at(-2);
+  check('重新生成（reuse）：以 user 结尾',
+    endsWithUser(turn(store, lastQ.versions.at(-1).content, {
+      edit: lastQ,
+      version: store.viewVersion(lastQ),
+      reuse: true,
+    }).history));
+
+  // 只带图、没有文字的一轮
+  const imageTurn = turn(store, '', {
+    attachments: [{ name: 'a.png', mime: 'image/png', dataUrl: TINY_PNG, width: 1, height: 1 }],
+  });
+  check('只带图、没有文字：以 user 结尾', endsWithUser(imageTurn.history));
+  check('图片跟着这最后一条走', imageTurn.history.at(-1).images.length === 1);
+
+  // 末尾那一问按引用找不到时的兜底：宁可削掉尾巴上的回答，也不发坏请求
+  const guarded = buildRequestHistory(store.messages, { role: 'user', versions: [{ content: '不在 messages 里的对象' }] }, null, {});
+  check('末尾那一问按引用找不到时，也不会发出以 assistant 结尾的请求',
+    endsWithUser(guarded), guarded.map((m) => m.role).join(','));
+}
+
+{
+  // 压缩摘要 + 编辑更早的那一问：摘要不能把「这一轮要回答的提问」也压掉
+  const { buildRequestHistory } = await loadModule('versions.js');
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+
+  function turn(text, opts = {}) {
+    const asked = store.pushUser(text, opts);
+    const placeholder = store.pushAssistant({ question: asked.message, version: asked.version }).message;
+    const history = buildRequestHistory(store.messages, asked.message, placeholder, { summary: store.session.summary });
+    store.appendDelta(placeholder, `回答：${text}`);
+    store.finish(placeholder, 'done');
+    return { question: asked.message, history };
+  }
+
+  turn('第一轮');
+  turn('第二轮');
+  turn('第三轮');
+  store.setSummary({ text: '前面的摘要', covers: 5, at: Date.now(), model: 'gpt-4o' });
+
+  const q1 = store.messages[0];
+  const edited = turn('改过的第一问', { edit: q1, version: store.viewVersion(q1) });
+  check('有摘要时编辑更早的一问：仍然以 user 结尾', edited.history.at(-1)?.role === 'user',
+    edited.history.map((m) => m.role).join(','));
+  // 改的那一问本身就在摘要覆盖范围之内 → 摘要必须让路：
+  // 否则「这一轮要回答的提问」会被摘要顶掉，请求里一条用户消息都不剩。
+  check('编辑的一问被摘要盖住时，摘要不参与这次请求（宁可多发几条原文）',
+    edited.history[0]?.role === 'user', edited.history.map((m) => m.role).join(','));
+
+  const q2 = store.messages[2];
+  const edited2 = turn('改过的第二问', { edit: q2, version: store.viewVersion(q2) });
+  check('有摘要时编辑中间那一问：也以 user 结尾', edited2.history.at(-1)?.role === 'user',
+    edited2.history.map((m) => m.role).join(','));
+  check('摘要盖不到这一问时，摘要照发', edited2.history[0]?.role === 'system',
+    JSON.stringify(edited2.history[0]?.content));
+  check('摘要没有把这一轮要回答的提问也压进去',
+    !String(edited2.history[0]?.content ?? '').includes('改过的第二问'));
+}
+
+group('会话引用 · 另一个会话的内容当背景材料');
+
+{
+  const {
+    turnPairs,
+    referencePlan,
+    referenceLabel,
+    isValidReference,
+    referenceFailureText,
+    MAX_REFERENCE_TURNS,
+    MAX_REFERENCE_CHARS,
+  } = await loadModule('reference.js');
+  const { buildRequestHistory } = await loadModule('versions.js');
+
+  const v = (content, extra = {}) => ({ content, attachments: [], createdAt: 0, ...extra });
+  const msg = (role, content, extra = {}) => ({ role, versions: [v(content, extra)] });
+
+  const conversation = [
+    msg('user', '第一问'),
+    msg('assistant', '第一答'),
+    msg('user', '第二问'),
+    msg('assistant', '第二答'),
+    msg('user', '', { attachments: [{ dataUrl: 'data:image/png;base64,AA==' }] }),
+    msg('assistant', '看图回答'),
+    msg('user', '还没回答的一问'),
+  ];
+  const source = { id: 's_source', title: '论文思路', messages: conversation };
+  const pairs = turnPairs(conversation);
+
+  check('按一问一答切成轮次', pairs.length === 4 && pairs[0].question === '第一问' && pairs[0].answer === '第一答',
+    JSON.stringify(pairs.map((p) => p.number)));
+  check('全空的轮次不算一轮',
+    turnPairs([msg('user', '  '), msg('assistant', '')]).length === 0);
+  check('只带图的那一轮照样算一轮，并如实写明图片没带过来',
+    pairs[2].question.includes('图片没有带过来'), pairs[2].question);
+  check('还没回答的那一轮也在列表里（界面会把它标出来）',
+    pairs[3].answer === '' && pairs[3].question === '还没回答的一问');
+
+  // ---- 原文档档：一问一答成对，最多 3 轮
+  const twoTurns = referencePlan({ source, kind: 'turns', numbers: [1, 2] });
+  check('原文档档能带 2 轮', twoTurns.ok === true, JSON.stringify(twoTurns));
+  check('材料里写明了来自哪个会话、哪几轮',
+    twoTurns.reference.text.includes('论文思路') && twoTurns.reference.text.includes('第 1、2 轮'),
+    twoTurns.reference.text.slice(0, 100));
+  check('带过去的是一问一答成对（不是只有回答）',
+    twoTurns.reference.text.includes('用户：第一问') && twoTurns.reference.text.includes('助手：第一答'));
+  check('材料里明确说了「这是背景资料，不是你们聊过的」',
+    twoTurns.reference.text.includes('背景资料') &&
+      twoTurns.reference.text.includes('不是你和用户现在这段对话'),
+    twoTurns.reference.text.slice(0, 160));
+  check('材料块有头有尾（模型看得出哪儿结束）',
+    twoTurns.reference.text.startsWith('【背景材料】') && twoTurns.reference.text.endsWith('【背景材料结束】'));
+  check('原文档档记下了带的是哪几轮', twoTurns.reference.turns.join(',') === '1,2');
+  check(`超过 ${MAX_REFERENCE_TURNS} 轮直接拒绝`,
+    referencePlan({ source, kind: 'turns', numbers: [1, 2, 3, 4] }).reason === 'too-many-turns');
+  check('「一轮都不勾」= 整个会话，同样受 3 轮上限管（否则整段就被搬过去了）',
+    referencePlan({ source, kind: 'turns', numbers: [] }).reason === 'too-many-turns');
+  check('拒绝时给出的下一步是「用分出新会话」',
+    referenceFailureText('too-many-turns').includes('分出新会话'), referenceFailureText('too-many-turns'));
+  check('材料太长时明确拒绝，不静默截断',
+    referencePlan({
+      source: { id: 'x', title: '长会话', messages: conversation.map((m, i) => msg(m.role, `${i}${'长'.repeat(2000)}`)) },
+      kind: 'turns',
+      numbers: [1, 2],
+    }).reason === 'too-long');
+  check('太长时告诉用户怎么办', referenceFailureText('too-long').includes('摘要'));
+
+  // ---- 摘要档：要模型，离线不可用
+  const summaryPlan = referencePlan({ source, kind: 'summary', summaryText: '那边聊了论文的选题和结构。' });
+  check('摘要档能带上模型给的摘要', summaryPlan.ok === true);
+  check('摘要档的材料也写明是背景资料',
+    summaryPlan.reference.text.includes('背景资料') && summaryPlan.reference.text.includes('论文思路'));
+  check('摘要档不限轮数（整段会话都算进去）', summaryPlan.reference.covers === pairs.length,
+    String(summaryPlan.reference.covers));
+  check('离线模式明确拒绝摘要档（不装作带上了）',
+    referencePlan({ source, kind: 'summary', summaryText: 'x', mode: 'mock' }).reason === 'no-model');
+  check('离线时给的建议是改成原文档', referenceFailureText('no-model').includes('原文'));
+  check('模型没给出摘要时也拒绝', referencePlan({ source, kind: 'summary', summaryText: '' }).reason === 'no-summary');
+  check('没有内容的会话直接拒绝', referencePlan({ source: { id: 'y', messages: [] }, kind: 'summary' }).reason === 'empty');
+
+  // ---- 多页轮次：材料取**最后一页**，而且必须把这件事写出来
+  //
+  // 页 = 同一问被编辑重发过几次。取最后一页是**正常用法**（材料要的是这个会话现在的样子），
+  // 但不能藏着：不写这一句，用户会以为自己引的是当时看的那一页，或者以为本来只有一页。
+  const multiConversation = [
+    msg('user', '第一问'),
+    msg('assistant', '第一答'),
+    {
+      role: 'user',
+      versions: [v('改过的第二问 第1版'), v('改过的第二问 第2版'), v('改过的第二问 第3版')],
+    },
+    {
+      role: 'assistant',
+      versions: [v('第二答 第1版'), v('第二答 第2版'), v('第二答 第3版')],
+    },
+  ];
+  const multiPairs = turnPairs(multiConversation);
+  check('每一轮标出它有几页（提问和回答各按自己的版本数算，取大的那个）',
+    multiPairs[0].pages === 1 && multiPairs[1].pages === 3,
+    JSON.stringify(multiPairs.map((p) => p.pages)));
+  check('回答那边多出来的页也算数（不只看提问）',
+    turnPairs([msg('user', '问'), { role: 'assistant', versions: [v('答1'), v('答2')] }])[0].pages === 2);
+
+  const multiSource = { id: 's_multi', title: '多页会话', messages: multiConversation };
+  const multiTurns = referencePlan({ source: multiSource, kind: 'turns', numbers: [2] });
+  check('多页的那一轮，材料取的是最后一页',
+    multiTurns.reference.text.includes('第二答 第3版') && !multiTurns.reference.text.includes('第二答 第1版'),
+    multiTurns.reference.text.slice(0, 200));
+  check('材料里写明这一轮原先有几页、给的是哪一页',
+    multiTurns.reference.text.includes('第 2 轮原先有 3 页') && multiTurns.reference.text.includes('这里给的是最后一页'),
+    multiTurns.reference.text);
+  check('只有一页的轮次不写这句（不制造噪音）',
+    !referencePlan({ source, kind: 'turns', numbers: [1, 2] }).reference.text.includes('原先有'));
+  check('摘要档同样写明（摘要也是从最后一页压出来的）',
+    referencePlan({ source: multiSource, kind: 'summary', numbers: [2], summaryText: '那边聊了结构。' })
+      .reference.text.includes('第 2 轮原先有 3 页'));
+
+  // ---- 摘要档要记住「压的是哪几轮」
+  //
+  // 界面上的「改选轮次」就是靠这份记录把勾选框还原回来的：摘要档如果只记
+  // 「覆盖了几轮」而不记「是哪几轮」，用户点回去会看到一片空勾选框，
+  // 状态行还会改口说「整个会话」—— 等于把用户选的范围悄悄放大了。
+  const partSummary = referencePlan({ source, kind: 'summary', numbers: [2], summaryText: '只压了第二问那一轮。' });
+  check('摘要档记下勾的是哪几轮', partSummary.ok === true && partSummary.reference.turns.join(',') === '2',
+    JSON.stringify(partSummary.reference?.turns));
+  check('摘要档的标注写明是哪几轮的摘要', referenceLabel(partSummary.reference).includes('第 2 轮'),
+    referenceLabel(partSummary.reference));
+  check('摘要档「一轮都不勾」= 整个会话，轮次记录留空（界面上勾选框就该是空的）',
+    summaryPlan.reference.turns.length === 0, JSON.stringify(summaryPlan.reference.turns));
+
+  // ---- 标签与合法性
+  check('原文档档的标注写明第几轮', referenceLabel(twoTurns.reference).includes('第 1、2 轮'),
+    referenceLabel(twoTurns.reference));
+  check('摘要档的标注写明是摘要', referenceLabel(summaryPlan.reference).includes('摘要'));
+  check('空材料不算材料', isValidReference(null) === false && isValidReference({ text: '  ' }) === false);
+  check('有正文才算材料', isValidReference(twoTurns.reference) === true);
+}
+
+{
+  // ---- 落到会话上：进请求、不进消息、可移除、刷新还在
+  const { referencePlan } = await loadModule('reference.js');
+  const { buildRequestHistory } = await loadModule('versions.js');
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+
+  // 先造一个「被引用」的会话
+  const sourceId = store.session.id;
+  store.renameSession(sourceId, '论文思路');
+  const refQ = store.pushUser('选题怎么定').message;
+  const refA = store.pushAssistant({ question: refQ, version: 1 }).message;
+  store.appendDelta(refA, '先看你想解决什么问题');
+
+  const plan = referencePlan({
+    source: store.session,
+    kind: 'turns',
+    numbers: [1],
+  });
+  check('从当前会话造出一份材料', plan.ok === true);
+
+  // 开新会话，把材料挂上去
+  store.createSession();
+  const targetId = store.sessionId;
+  store.setReference(plan.reference);
+  check('材料挂上了当前会话', store.session.reference?.text === plan.reference.text);
+  check('材料带出处（哪个会话、哪几轮）',
+    store.session.reference?.sessionId === sourceId && store.session.reference?.turns?.join(',') === '1',
+    JSON.stringify(store.session.reference));
+
+  const q = store.pushUser('带着背景问一个新问题').message;
+  const a = store.pushAssistant({ question: q, version: 1 }).message;
+  const history = buildRequestHistory(store.messages, q, a, { reference: store.session.reference });
+
+  check('材料进了请求（最前面那条 system）',
+    history[0].role === 'system' && history[0].content.includes('背景材料'), JSON.stringify(history[0]).slice(0, 120));
+  check('请求仍然以 user 结尾', history.at(-1).role === 'user');
+  check('材料**不进**本地消息（不算聊过的）',
+    store.messages.every((m) => !JSON.stringify(m).includes('【背景材料】')));
+  check('消息条数没被材料影响', store.messages.length === 2, String(store.messages.length));
+
+  // 和压缩摘要并存：必须合成**一条** system（服务端只认打头那一条）
+  //
+  // 注意这里要造够轮次：摘要不能盖住「这一轮要回答的那一问」
+  //（buildRequestHistory 会把它挡掉，那是另一条防线），所以先多问一轮再设摘要。
+  const q2 = store.pushUser('再问一轮').message;
+  const a2 = store.pushAssistant({ question: q2, version: 1 }).message;
+  store.appendDelta(a2, '第二轮回答');
+  store.setSummary({ text: '本会话前面的摘要', covers: 2, at: Date.now(), model: 'gpt-4o' });
+  const q3 = store.pushUser('带着材料和摘要再问').message;
+  const a3 = store.pushAssistant({ question: q3, version: 1 }).message;
+  const withBoth = buildRequestHistory(store.messages, q3, a3, {
+    summary: store.session.summary,
+    reference: store.session.reference,
+  });
+  check('材料与摘要是两份前缀材料，这里合成一条 system（服务端只认打头那一条）',
+    withBoth.filter((m) => m.role === 'system').length === 1,
+    withBoth.map((m) => m.role).join(','));
+  check('摘要确实进来了（它没盖住这一轮要回答的提问）',
+    withBoth[0].content.includes('本会话前面的摘要'), withBoth[0].content.slice(0, 80));
+  check('材料在摘要前面（摘要紧贴正文）',
+    withBoth[0].content.indexOf('【背景材料】') < withBoth[0].content.indexOf('本会话前面的摘要'),
+    withBoth[0].content.slice(0, 120));
+  check('请求仍然以 user 结尾（两条前缀材料不影响这条硬契约）',
+    withBoth.at(-1).role === 'user', withBoth.map((m) => m.role).join(','));
+
+  // 移除材料
+  store.clearReference();
+  check('移除之后会话上没有材料了', store.session.reference === null);
+  const afterDrop = buildRequestHistory(store.messages, q, a, { reference: store.session.reference });
+  check('移除之后请求里也没有材料了',
+    !JSON.stringify(afterDrop).includes('【背景材料】'), JSON.stringify(afterDrop).slice(0, 120));
+
+  // 刷新之后还在
+  store.setReference(plan.reference);
+  simulatePageHide();
+  const reloaded = createStore();
+  check('刷新之后材料还在', reloaded.sessions.find((s) => s.id === targetId)?.reference?.text === plan.reference.text);
+  check('刷新之后材料的出处也在',
+    reloaded.sessions.find((s) => s.id === targetId)?.reference?.title === '论文思路');
+}
+
+{
+  // ---- 脏数据：空正文的材料等于没挂
+  freshEnvironment({
+    seed: {
+      [SESSIONS_KEY]: JSON.stringify({
+        activeId: 'sess1',
+        sessions: [
+          { id: 'sess1', title: '手改过的', messages: [], reference: { kind: 'summary', text: '   ' } },
+          { id: 'sess2', title: '另一个', messages: [], reference: { kind: 'turns', text: '有正文', turns: [1, 2, 3, 4, 5] } },
+          { id: 'sess3', title: '摘要档', messages: [], reference: { kind: 'summary', text: '有正文', turns: [1, 2, 3, 4, 5] } },
+        ],
+      }),
+    },
+  });
+  const { createStore } = await loadStore();
+  const store = createStore();
+  check('空正文的材料当成没挂', store.sessions[0].reference === null);
+  check('轮次号被夹在上限以内（脏数据不会让它变成一条引用链）',
+    store.sessions[1].reference.turns.length <= 3, JSON.stringify(store.sessions[1].reference.turns));
+  check('摘要档的轮次记录**不**受「原文最多 3 轮」那条限制（那 3 轮管的是材料，不是记录）',
+    store.sessions[2].reference.turns.length === 5, JSON.stringify(store.sessions[2].reference.turns));
+}
+
+{
+  // ---- 导出：材料要如实交代，但不能混进对话正文
+  const { referencePlan } = await loadModule('reference.js');
+  const { toMarkdown, toPlainText, toJson } = await loadModule('exporters.js');
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+  store.pushUser('被引用的那一问');
+
+  const plan = referencePlan({ source: store.session, kind: 'turns', numbers: [1] });
+  store.createSession();
+  store.setReference(plan.reference);
+  store.pushUser('带着材料问的新问题');
+
+  const session = store.session;
+  const md = toMarkdown(session, { exportAll: false });
+  const txt = toPlainText(session);
+  const bundle = JSON.parse(toJson(session, { exportAll: false }));
+
+  check('JSON 导出里材料单独一个字段', Boolean(bundle.sessions[0]?.reference?.text),
+    JSON.stringify(bundle.sessions[0]?.reference ?? null));
+  check('JSON 导出里的消息没被材料污染',
+    (bundle.sessions[0]?.messages ?? []).every((m) => !String(m.content).includes('【背景材料】')));
+  check('Markdown 里交代了背景材料', md.includes('【背景材料】'), md.slice(0, 200));
+  check('纯文本里也交代了', txt.includes('【背景材料】'));
+  check('Markdown 的对话正文里没有把材料当成一轮',
+    !/\*\*答\*\*[\s\S]*【背景材料】[\s\S]*### 02/.test(md));
 }
 
 // ---------------------------------------------------------------- 汇总

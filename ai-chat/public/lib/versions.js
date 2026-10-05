@@ -8,6 +8,7 @@
 
 import { composeUserContent } from './quote.js';
 import { coveredCount, summaryBlock } from './compress.js';
+import { isValidReference } from './reference.js';
 
 /**
  * 该显示第几页。
@@ -133,11 +134,13 @@ function outboundContent(role, version) {
  * @param {Array} messages 会话里的消息（提问与回答交替）
  * @param {object} lastUserMessage 末尾那条提问
  * @param {object} [answerMessage] 与它配对的那条助手消息（用来取旧版本的回答）
- * @param {{summary?: object|null}} [options]
+ * @param {{summary?: object|null, reference?: object|null}} [options]
+ *   `summary` 是本会话的压缩摘要；`reference` 是挂着的背景材料（会话引用，见 lib/reference.js）。
+ *   两者都只进请求、不进本地消息。
  * @returns {Array<{role: string, content: string, images: string[]}>}
  */
 export function buildRequestHistory(messages, lastUserMessage, answerMessage = null, options = {}) {
-  const { summary = null } = options;
+  const { summary = null, reference = null } = options;
   const history = [];
   const answerVersions = Array.isArray(answerMessage?.versions) ? answerMessage.versions : [];
 
@@ -153,8 +156,19 @@ export function buildRequestHistory(messages, lastUserMessage, answerMessage = n
   const ceiling = lastIndex >= 0 ? lastIndex : Math.max(0, total - 1);
   const covered = Math.min(coveredCount(all, summary), ceiling);
   const block = summaryBlock(summary);
-  if (covered > 0 && block) {
-    history.push({ role: 'system', content: block, images: [] });
+
+  // 打头的 system 消息：**背景材料 + 本会话摘要合成一条**。
+  //
+  // 为什么必须合成一条：服务端只认打头的那一条 system（后面再冒出来的会被丢掉，
+  // 见 server.mjs 的 normalizeMessages）。两份分开塞的话，后一份就白写了。
+  //
+  // 顺序也有讲究：背景材料在最外面，本会话摘要在它后面、紧贴正文 ——
+  // 摘要替代的正是正文的开头那一段，贴着正文读才顺。
+  const material = isValidReference(reference) ? String(reference.text).trim() : '';
+  const summaryPart = covered > 0 ? block : '';
+  const prefix = [material, summaryPart].filter(Boolean).join('\n\n');
+  if (prefix) {
+    history.push({ role: 'system', content: prefix, images: [] });
   }
 
   for (let index = 0; index < all.length; index += 1) {
@@ -185,7 +199,13 @@ export function buildRequestHistory(messages, lastUserMessage, answerMessage = n
         content: outboundContent('user', latest),
         images: versionImages(latest),
       });
-      continue;
+      // 到这里就**停**：这一问之后的轮次不属于这次要走的这条线。
+      //
+      // 「改更早的那一页会生成新的一页」意味着会话里那一问之后还挂着**旧那条线**的轮次
+      // （我们永远不删消息）。如果把它们也发出去，两个后果都很糟：
+      //   · 请求会以一条 assistant 结尾 —— 服务端直接 400「messages 必须以一条 user 消息结尾」；
+      //   · 就算服务端收下，模型也会以为那些轮次接在这一问后面，等于把两条线混在一起。
+      break;
     }
 
     const current = versions[versions.length - 1];
@@ -194,6 +214,12 @@ export function buildRequestHistory(messages, lastUserMessage, answerMessage = n
     const images = [];
     history.push({ role: m.role, content: outboundContent(m.role, current), images });
   }
+
+  // 最后一道保险：请求**必须**以一条 user 消息结尾（服务端就是这么校验的）。
+  // 正常路径上面那个 break 已经保证了这点；万一「末尾那条提问」按引用找不到
+  // （调用方传进来的不是 messages 里的那个对象），就会漏到这里 ——
+  // 与其把一条坏请求发出去换个看不懂的 400，不如把尾巴上多出来的回答削掉。
+  while (history.length > 1 && history[history.length - 1].role !== 'user') history.pop();
 
   return history;
 }

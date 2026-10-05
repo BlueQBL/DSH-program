@@ -177,22 +177,33 @@ body::before {
   border-bottom: 1px solid var(--rule);
 }
 
-/* 「新对话」在会话列表头上：占满这一栏，但用描边的淡样式 ——
-   它天天在那儿，实心黑块在这一列里太抢眼（用户反馈：用背景色就行）。
-   悬停时才浮出一层底色，仍然看得出是能点的。 */
-.rail-new {
-  display: block;
-  width: 100%;
+/*
+ * 会话栏顶部的两个入口：新建 / 引用，并排各占一半。
+ *
+ * 为什么不叠成两行、也不分主次：它们是并列的两件事（开新话题 / 带着材料开新话题），
+ * 做成「一个实心大按钮 + 一个脚注」会让人以为引用是次要功能。而且同一件事在报头那边
+ * 也是按钮（列表收起时的备用入口）—— 两边长得一样，才不会让人怀疑是两个不同的功能。
+ */
+.rail-actions {
+  display: flex;
+  gap: 8px;
   margin-top: 18px;
-  padding: 8px 12px;
+}
+
+.rail-actions .ghost-button {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 8px;
   text-align: center;
   color: var(--ink-soft);
 }
-.rail-new:hover {
+
+.rail-actions .ghost-button:hover {
   color: var(--ink);
 }
-/* 上面那个按钮自己带间距，头部就不用再留那么多了 */
-.rail-new + .rail-head {
+
+/* 上面那行按钮自己带间距，头部就不用再留那么多了 */
+.rail-actions + .rail-head {
   padding-top: 16px;
 }
 
@@ -328,6 +339,13 @@ body::before {
   white-space: nowrap;
 }
 
+/* 分支会话：行首一个小箭头，一眼看出它是从别处岔出来的。
+   用 ::before 而不是往标题文本里塞字符 —— 标题要留给导出和改名用，得保持干净。 */
+.session-item[data-branch="true"] .session-name::before {
+  content: '↳ ';
+  color: color-mix(in srgb, var(--ink) 45%, transparent);
+}
+
 .session-meta {
   display: block;
   margin-top: 2px;
@@ -398,6 +416,157 @@ body::before {
 
 .stage {
   min-width: 0;
+}
+
+/*
+ * 「这条会话是从哪儿分出来的」（只有分支会话显示）。
+ *
+ * 它是**出处标注**，不是对话内容 —— 不进 messages、也不发给模型，
+ * 所以样子做成一枚安静的旁注（一道细边 + 一层浅底），不冒充对话气泡。
+ */
+.branch-note {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 16px 0 0;
+  padding: 8px 12px;
+  border-left: 2px solid var(--rule-strong);
+  background: var(--wash);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+
+.branch-note-mark {
+  font-family: var(--font-mono);
+  color: color-mix(in srgb, var(--ink) 45%, transparent);
+}
+
+.branch-note-text {
+  min-width: 0;
+}
+
+/* 「引用会话」和「＋ 新对话」并排：样式由 .rail-actions 那一组统一给 */
+.rail-reference {
+  white-space: nowrap;
+}
+
+/*
+ * 背景材料那条标注（会话引用，见 lib/reference.js）。
+ * 和分支标注是同一套语言（安静的旁注、不冒充对话内容），但用**虚线边**区分开：
+ * 分支说的是「这条线从哪儿来」，材料说的是「手边放着一份参考资料」，两件事别混。
+ */
+.reference-note {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 10px 0 0;
+  padding: 8px 12px;
+  border-left: 2px dashed var(--rule-strong);
+  background: var(--paper-lift);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+
+.reference-note-mark {
+  font-family: var(--font-mono);
+  color: color-mix(in srgb, var(--ink) 50%, transparent);
+}
+
+.reference-note-text {
+  min-width: 0;
+}
+
+/* 材料原文（点「查看材料」才展开）：等宽 + 可滚，读起来像附注而不是正文 */
+.reference-note-body {
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  max-height: 240px;
+  overflow: auto;
+  border-left: 2px dashed var(--rule-strong);
+  background: var(--wash);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ink-soft);
+}
+
+/* 引用面板：选会话 / 选形式 / 勾轮次 */
+.reference-panel {
+  margin: 16px 0 0;
+  padding: 14px 16px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background: var(--paper-lift);
+}
+
+.reference-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.reference-panel-title {
+  font-family: var(--font-display);
+  font-size: 15px;
+  letter-spacing: 0.06em;
+}
+
+.reference-panel-hint {
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--ink-soft);
+}
+
+.reference-turns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 10px 0 0;
+}
+
+.reference-turn {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.reference-turn input {
+  margin: 0;
+}
+
+.reference-turn-text {
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reference-panel-status {
+  margin: 10px 0 0;
+  min-height: 1.2em;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--ink-soft);
+}
+
+.reference-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
 }
 
 /* ------------------------------------------------------------ 角色与模型 */

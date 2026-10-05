@@ -35,9 +35,10 @@ runner.run('置顶顺手改了「最近使用时间」（会话行上的时钟�
 );
 
 runner.run('淘汰最旧会话时不管置顶（用户说过重要的那条被删掉）', STORE, (src) =>
+  // 这条规则现在收在 store.js 的 makeRoom() 里（新建会话和分出新会话共用一份）
   src.replace(
-    '        const oldest = byOldest.find((s) => s.pinned !== true) ?? byOldest[0];',
-    '        const oldest = byOldest[0];',
+    '    const oldest = byOldest.find((s) => s.pinned !== true) ?? byOldest[0];',
+    '    const oldest = byOldest[0];',
   ),
 );
 

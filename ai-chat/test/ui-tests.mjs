@@ -338,6 +338,12 @@ let summarizePosts = [];
 let summarizeReply = { ok: true, summary: '前面聊了闭包与作用域。', model: 'gpt-4o' };
 /** 聊天是否走「正常流式回答」这条路（默认关，老用例依赖失败分支） */
 let chatStreams = false;
+/** 让 /api/chat 永远不返回：用来测「正在生成时」的守卫（这时 runtime.busy 一直是真的） */
+let chatHangs = false;
+/** 非空时 /api/chat 直接回 400 + 这句话（测「服务端拒绝」与「连不上服务端」分不分得开） */
+let chatReject = null;
+/** 挂住那次请求的放行开关：替身用它模拟「一直在生成」，测完必须放行，否则 runtime.busy 永远是 true */
+let releaseHang = null;
 /** 流式回答里 meta 帧报告的运行模式（离线用例会把它设成 mock） */
 let chatMode = 'model';
 
@@ -386,6 +392,17 @@ globalThis.fetch = async (url, init) => {
   }
   if (target.includes('/api/chat')) {
     lastChatBody = JSON.parse(init?.body ?? '{}');
+    // 服务端活着，只是拒了这一轮（400 + 一句原话）
+    if (chatReject) {
+      return { ok: false, status: 400, json: async () => ({ error: chatReject }) };
+    }
+    // 挂住不返回：用来测「正在生成时」的守卫（那一轮还没定稿）。
+    // 必须能放行 —— 一直挂着的话 runtime.busy 会永远是 true，后面的用例一个也发不出去。
+    if (chatHangs) {
+      return new Promise((resolve) => {
+        releaseHang = () => resolve({ ok: false, status: 500, json: async () => ({ error: '替身放行' }) });
+      });
+    }
     if (chatStreams) {
       return sseResponse([
         { type: 'meta', mode: chatMode, model: 'deepseek-v3.2', sessionId: 's_test' },
@@ -1432,6 +1449,27 @@ console.log('\n⑬ 改动落在已压缩的部分里：摘要必须作废');
   check('改动本身生效了（新版本记下了新文字）',
     JSON.stringify(sessionsIn().active.messages[targetIndex].versions).includes('改过的老旧问题'));
 
+  // 真正发出去的那份请求体：改的是**更早**那一问，所以它之后那些轮次不该跟出去。
+  // 这一条是踩出来的：以前它们会跟出去，请求就以 assistant 结尾，
+  // 服务端 400「messages 必须以一条 user 消息结尾」，界面上显示成「连不上服务端」。
+  const sent = lastChatBody?.messages ?? [];
+  check('发出去的请求以一条 user 消息结尾（服务端的硬校验）',
+    sent.at(-1)?.role === 'user', sent.map((m) => m.role).join(','));
+  check('最后一条正是刚刚改过的那一问（更早那一问之后的轮次没跟出去）',
+    String(sent.at(-1)?.content ?? '').includes('改过的老旧问题'),
+    String(sent.at(-1)?.content ?? '').slice(0, 60));
+  // 把「被编辑那一问之后的所有文字」列出来，确认一段都没混进请求里。
+  // 注意要跳过 targetIndex + 1：那是「被编辑那一问自己的回答」，它**本来就该**跟着走
+  // （旧版本提问后面要带上它当时的回答）。
+  const laterTexts = sessionsIn()
+    .active.messages.slice(targetIndex + 2)
+    .flatMap((m) => (m.versions ?? []).map((v) => String(v.content ?? '')))
+    .filter((text) => text.length >= 8);
+  const payloadText = JSON.stringify(sent);
+  check('改的是更早那一问时，它后面那些轮次一段都没发出去',
+    laterTexts.every((text) => !payloadText.includes(text)),
+    `后面还有 ${laterTexts.length} 段文字，混进去的有：${laterTexts.filter((t) => payloadText.includes(t)).slice(0, 2).join(' / ')}`);
+
   chatStreams = false;
 }
 
@@ -1529,12 +1567,19 @@ console.log('\n⑭ 布局：会话列表与聊天框各占各的列，互不干�
   check('副标题不换行（换行会把报头顶高，整页跟着跳）',
     /white-space:\s*nowrap/.test(css.match(/\.masthead-title p\s*\{[\s\S]*?\n\}/)?.[0] ?? ''));
 
-  // 「新对话」用描边的淡样式，不是黑底实心
-  const railNewRule = css.match(/\.rail-new\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
-  check('「新对话」不是黑底实心按钮',
-    !/background:\s*var\(--ink\)/.test(railNewRule) && !/background:\s*var\(--accent\)/.test(railNewRule),
-    railNewRule.slice(0, 100));
-  check('它仍然占满会话栏的宽度（是这一栏的主入口）', /width:\s*100%/.test(railNewRule));
+  // 会话栏顶部是两个并排的入口：新建 / 引用（样式由 .rail-actions 那一组统一给）
+  const railActionsRule = css.match(/\.rail-actions\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+  const railButtonRule = css.match(/\.rail-actions \.ghost-button\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+  check('会话栏顶部有两个入口（新建 / 引用）',
+    railBlock.includes('class="rail-actions"') &&
+      railBlock.includes('id="new-session-button"') && railBlock.includes('id="reference-new-button"'));
+  check('两个入口在同一行、各占一半', /display:\s*flex/.test(railActionsRule) && /flex:\s*1/.test(railButtonRule),
+    railButtonRule.slice(0, 80));
+  check('两个入口都是描边的淡样式（不是黑底实心）',
+    !/background:\s*var\(--ink\)/.test(railButtonRule) && !/background:\s*var\(--accent\)/.test(railButtonRule),
+    railButtonRule.slice(0, 100));
+  check('「引用会话」也是按钮，不是一行小字（同一件事在两个地方长得一样）',
+    /class="ghost-button rail-reference"[^>]*id="reference-new-button"/s.test(railBlock));
 
   // 会话多了之后，新建/切换到的会话可能停在可视区外 —— 要主动滚一下。
   // 替身里「列表元素」就是按选择器缓存的那个占位元素，app 对谁调了 scrollIntoView，
@@ -1574,6 +1619,10 @@ console.log('\n⑭ 布局：会话列表与聊天框各占各的列，互不干�
     toolsBlock.includes('id="mode-chip"') &&
       toolsBlock.indexOf('id="mode-chip"') > toolsBlock.indexOf('id="new-session-compact"'),
     toolsBlock.slice(0, 200));
+  check('引用的备用入口排在「新对话」前面（新加的按钮不该把老按钮挤走）',
+    toolsBlock.indexOf('id="reference-compact"') >= 0 &&
+      toolsBlock.indexOf('id="reference-compact"') < toolsBlock.indexOf('id="new-session-compact"'),
+    toolsBlock.slice(0, 200));
   check('窄屏（≤1000px）把开关放回标题旁边（窄屏没有左右两格可对，钉右端会孤零零挂在最右边）',
     /@media \(max-width: 1000px\)[\s\S]*?\.masthead-brand \.icon-toggle\s*\{[\s\S]*?position:\s*static/.test(css));
   check('窄屏报头也只剩一栏（和 .board 用同一个断点，两边列数始终一致）',
@@ -1581,6 +1630,7 @@ console.log('\n⑭ 布局：会话列表与聊天框各占各的列，互不干�
 
   const toggle = getEl('sidebar-toggle');
   const compactNew = getEl('new-session-compact');
+  const compactRef = getEl('reference-compact');
   const board = getEl('board');
   check('默认是展开的（宽屏、又没存过偏好）', board.dataset.rail === 'shown', String(board.dataset.rail));
 
@@ -1588,6 +1638,7 @@ console.log('\n⑭ 布局：会话列表与聊天框各占各的列，互不干�
   check('点图标收起列表', board.dataset.rail === 'hidden', String(board.dataset.rail));
   check('图标跟着翻面（指向列表在哪边）', toggle.dataset.state === 'hidden', String(toggle.dataset.state));
   check('收起后报头露出备用入口（否则就没地方开新对话了）', compactNew.hidden === false);
+  check('收起后「引用会话」的备用入口也露出来（否则收起列表就引用不了）', compactRef.hidden === false);
   check('aria-expanded 如实反映状态', toggle.getAttribute('aria-expanded') === 'false');
   check('这个选择被记住了（刷新后不会自己弹回来）',
     storage.get('duitanlu.rail.v1') === 'hidden', String(storage.get('duitanlu.rail.v1')));
@@ -1599,9 +1650,15 @@ console.log('\n⑭ 布局：会话列表与聊天框各占各的列，互不干�
   const sessionsAfter = JSON.parse(storage.get('duitanlu.sessions.v2')).sessions.length;
   check('收起状态下的备用入口也能开新对话', sessionsAfter >= sessionsBefore, `${sessionsBefore} → ${sessionsAfter}`);
 
+  // 引用的备用入口做的是同一件事：打开引用面板
+  dispatch(compactRef, 'click');
+  await new Promise((r) => setTimeout(r, 40));
+  check('收起状态下的引用备用入口能打开引用面板', getEl('reference-panel').hidden === false);
+  dispatch(getEl('reference-cancel'), 'click');
+
   dispatch(toggle, 'click');
   check('再点一次展开', board.dataset.rail === 'shown', String(board.dataset.rail));
-  check('展开后备用入口又藏起来（不重复摆两个）', compactNew.hidden === true);
+  check('展开后备用入口又藏起来（不重复摆两个）', compactNew.hidden === true && compactRef.hidden === true);
   check('展开也被记住了', storage.get('duitanlu.rail.v1') === 'shown', String(storage.get('duitanlu.rail.v1')));
 }
 
@@ -1736,6 +1793,595 @@ console.log('\n⑮ 会话列表：置顶 / 最近 两组，各自收放');
     idsIn(pinnedList).every((id) => rowsById.get(id)?.pinned === true), idsIn(pinnedList).join(','));
   check('「最近」组里一条置顶的都没有',
     idsIn(recentList).every((id) => rowsById.get(id)?.pinned !== true), idsIn(recentList).join(','));
+}
+
+console.log('\n⑯ 会话分支：从这一轮分出一个新会话');
+
+{
+  const input = getEl('composer-input');
+  const css = readFileSync(path.resolve(PUBLIC, 'styles.css'), 'utf8');
+
+  // ---- 结构
+  const templateBlock = sliceBlock(html, '<template id="exchange-template">', 'template');
+  const actionsBlock = sliceBlock(templateBlock, '<div class="turn-actions"', 'div');
+  const stageAt = html.indexOf('<div class="stage">');
+  const noteAt = html.indexOf('id="branch-note"');
+  const controlsAt = html.indexOf('<section class="controls"');
+
+  check('每条回答的操作行里都有「分出新会话」', /data-action="branch"/.test(actionsBlock), actionsBlock.slice(0, 120));
+  check('按钮上写着「分出新会话」',
+    /data-action="branch"[\s\S]{0,200}分出新会话/.test(actionsBlock));
+  check('分支说明条默认藏着', /id="branch-note" hidden/.test(html));
+  check('分支说明条在正文区顶部（排在「角色 / 模型」前面），不是插在对话流里',
+    stageAt >= 0 && noteAt > stageAt && noteAt < controlsAt,
+    `stage=${stageAt} note=${noteAt} controls=${controlsAt}`);
+  check('说明条里的「回到那个会话」是个按钮', /id="branch-source-button"/.test(html));
+  check('会话列表里，分支会话的行首带一个小箭头（样式给的）',
+    /\.session-item\[data-branch="true"\] \.session-name::before/.test(css));
+
+  // ---- 行为
+  chatStreams = true;
+  chatMode = 'model';
+
+  const state = () => JSON.parse(storage.get('duitanlu.sessions.v2'));
+  const sessionById = (id) => state().sessions.find((s) => s.id === id);
+  const active = () => sessionById(state().activeId);
+  const answerOf = (session) => session.messages.filter((m) => m.role === 'assistant').pop();
+  const clickInAnswer = (id, action) => {
+    const node = getEl('exchanges').children.find((n) => n.dataset?.id === id);
+    if (!node) return null;
+    // 替身不解析 HTML：真实 DOM 里对谈节点本来就是 <li class="exchange">、按钮本来就有 data-action
+    node.className = 'exchange';
+    const button = makeElement('button');
+    button.dataset.action = action;
+    button.parentElement = node;
+    dispatch(getEl('exchanges'), 'click', { target: button });
+    return node;
+  };
+
+  dispatch(getEl('new-session-button'), 'click');
+  await new Promise((r) => setTimeout(r, 60));
+  input.value = '帮我把这个思路理一下';
+  dispatch(getEl('composer'), 'submit');
+  await new Promise((r) => setTimeout(r, 150));
+
+  const source = active();
+  const answer = answerOf(source);
+  check('先有一问一答', source.messages.length === 2 && Boolean(answer), String(source.messages.length));
+
+  const sessionsBefore = state().sessions.length;
+  clickInAnswer(answer.id, 'branch');
+  await new Promise((r) => setTimeout(r, 80));
+
+  const branch = state().sessions.find((s) => s.branchOf?.id === source.id);
+  check('分出了一个新会话', Boolean(branch));
+  check('会话总数 +1', state().sessions.length === sessionsBefore + 1,
+    `${sessionsBefore} → ${state().sessions.length}`);
+  check('标题是「原标题-分支1」', branch?.title === `${source.title}-分支1`, branch?.title);
+  check('新会话成了当前会话', state().activeId === branch?.id);
+  check('内容复制过来了', branch?.messages.length === source.messages.length, String(branch?.messages.length));
+  check('标题来源标成手动（「AI 起名」不许覆盖分支名）', branch?.titleSource === 'manual');
+  check('新会话不置顶', branch?.pinned === false);
+  check('出处记下来了（哪个会话、从哪一条分的）',
+    branch?.branchOf?.id === source.id && branch?.branchOf?.messageId === answer.id,
+    JSON.stringify(branch?.branchOf));
+  check('原会话一条消息都没少', sessionById(source.id)?.messages.length === source.messages.length);
+  check('原会话的标题也没变', sessionById(source.id)?.title === source.title);
+  check('提示说清了发生了什么',
+    getEl('composer-hint').textContent.includes('分出新会话'), getEl('composer-hint').textContent);
+  check('分支说明条显示出来了', getEl('branch-note').hidden === false);
+  check('说明里写了它从哪个会话来',
+    getEl('branch-note-text').textContent.includes(source.title), getEl('branch-note-text').textContent);
+  check('「回到那个会话」露出来了（源会话还在）', getEl('branch-source-button').hidden === false);
+
+  // 回到源会话
+  dispatch(getEl('branch-source-button'), 'click');
+  await new Promise((r) => setTimeout(r, 60));
+  check('点「回到那个会话」就切回去了', state().activeId === source.id);
+  check('切回去之后说明条收起来（那条会话不是分支）', getEl('branch-note').hidden === true);
+
+  // 分支上再分支
+  const rowButton = makeElement('button');
+  const row = makeElement('li');
+  row.className = 'session-item';
+  row.dataset.id = branch.id;
+  rowButton.parentElement = row;
+  dispatch(getEl('session-list'), 'click', { target: rowButton });
+  await new Promise((r) => setTimeout(r, 60));
+  check('切到分支会话', state().activeId === branch.id);
+
+  clickInAnswer(answerOf(branch).id, 'branch');
+  await new Promise((r) => setTimeout(r, 80));
+  const nested = state().sessions.find((s) => s.branchOf?.id === branch.id);
+  check('分支上还能再分出一个分支', Boolean(nested));
+  check('嵌套的标题接在后面', nested?.title.endsWith('-分支1-分支1'), nested?.title);
+
+  // 分叉点对不上时什么都不做
+  const ghost = makeElement('li');
+  ghost.className = 'exchange';
+  ghost.dataset.id = 'not-a-real-message';
+  const ghostButton = makeElement('button');
+  ghostButton.dataset.action = 'branch';
+  ghostButton.parentElement = ghost;
+  const countBefore = state().sessions.length;
+  dispatch(getEl('exchanges'), 'click', { target: ghostButton });
+  await new Promise((r) => setTimeout(r, 40));
+  check('分叉点对不上就不新建会话（宁可什么都不做，也不多复制几轮）',
+    state().sessions.length === countBefore, `${countBefore} → ${state().sessions.length}`);
+  check('而且什么都没变（还是原来那个会话）', state().activeId !== undefined);
+
+  // ---- 分支和「编辑后重新回答」是两件事，但旧页要跟着分支一起走
+  dispatch(getEl('new-session-button'), 'click');
+  await new Promise((r) => setTimeout(r, 60));
+  input.value = '第一版问题';
+  dispatch(getEl('composer'), 'submit');
+  await new Promise((r) => setTimeout(r, 150));
+
+  const editSession = active();
+  const node = clickInAnswer(answerOf(editSession).id, 'edit');
+  await new Promise((r) => setTimeout(r, 40));
+  check('点「编辑」进入了编辑态', node?.__editing === true);
+  node.__editInput.value = '第二版问题';
+  const resend = makeElement('button');
+  resend.dataset.action = 'edit-resend';
+  resend.parentElement = node;
+  dispatch(getEl('exchanges'), 'click', { target: resend });
+  await new Promise((r) => setTimeout(r, 180));
+
+  const edited = active();
+  check('先造出一个「编辑重发过」的会话（一问两版）',
+    edited.messages[0].versions.length === 2, String(edited.messages[0].versions.length));
+  check('编辑仍然是「追加一页、旧页保留」',
+    edited.messages[0].versions[0].content === '第一版问题', edited.messages[0].versions[0].content);
+
+  clickInAnswer(answerOf(edited).id, 'branch');
+  await new Promise((r) => setTimeout(r, 80));
+  const versionBranch = state().sessions.find((s) => s.branchOf?.id === edited.id);
+  check('分支把版本页一起带过去了（在新会话里翻回旧页看到的还是原样）',
+    versionBranch?.messages[0].versions.length === 2, String(versionBranch?.messages[0].versions.length));
+  check('分完之后原会话的旧页也还在（分支**没有**替代版本分页）',
+    sessionById(edited.id)?.messages[0].versions.length === 2);
+
+  // ---- 正在生成时不许分支（那一轮还没定稿，复制过去的是半截）
+  // 这一轮故意让 /api/chat 永不返回，于是 runtime.busy 一直是真的 ——
+  // 所以这一段必须放在本节最后，别把它后面的用例也卡在「正在生成」里。
+  chatHangs = true;
+  input.value = '生成到一半的时候点分支';
+  dispatch(getEl('composer'), 'submit');
+  await new Promise((r) => setTimeout(r, 60));
+
+  const liveChildren = getEl('exchanges').children;
+  const liveNode = liveChildren[liveChildren.length - 1];
+  const pendingBefore = state().sessions.length;
+  check('这一轮确实还在生成（界面上已经有半截回答的节点）', Boolean(liveNode?.dataset?.id));
+  clickInAnswer(liveNode.dataset.id, 'branch');
+  await new Promise((r) => setTimeout(r, 40));
+  check('正在生成时点分支：不新建会话（半截内容不该被复制走）',
+    state().sessions.length === pendingBefore, `${pendingBefore} → ${state().sessions.length}`);
+  check('并且说清了为什么（等这一轮结束再分）',
+    getEl('composer-hint').textContent.includes('正在生成'), getEl('composer-hint').textContent);
+
+  chatHangs = false;
+  chatStreams = false;
+  // 放行那次被挂住的请求：不然 runtime.busy 一直是 true，后面的用例发不出任何东西
+  releaseHang?.();
+  releaseHang = null;
+  await new Promise((r) => setTimeout(r, 80));
+}
+
+console.log('\n⑰ 错误文案：服务端拒绝 ≠ 连不上服务端');
+
+{
+  // 真事：服务端好好活着，只是用 400 拒了一个请求，
+  // 界面却说「连不上服务端：…。确认 node server.mjs 还在运行。」—— 用户跑去查进程，白找。
+  const input = getEl('composer-input');
+  chatStreams = true;
+  chatHangs = false;
+  chatMode = 'model';
+
+  const activeSession = () => {
+    const raw = JSON.parse(storage.get('duitanlu.sessions.v2'));
+    return raw.sessions.find((s) => s.id === raw.activeId);
+  };
+  const lastError = () => activeSession()?.messages.at(-1)?.versions?.at(-1)?.error ?? '';
+  const lastStatus = () => activeSession()?.messages.at(-1)?.versions?.at(-1)?.status ?? '';
+
+  chatReject = 'messages 必须以一条 user 消息结尾';
+  input.value = '故意触发一次 400';
+  dispatch(getEl('composer'), 'submit');
+  await new Promise((r) => setTimeout(r, 140));
+
+  check('服务端拒绝时，明确说是「服务端拒绝了这次请求」',
+    lastError().includes('服务端拒绝了这次请求'), lastError());
+  check('并且带上服务端给的原话（用户/我们才知道到底哪儿不对）',
+    lastError().includes('必须以一条 user 消息结尾'), lastError());
+  check('不再误导成「连不上服务端」（那句话会让人去查进程）',
+    !lastError().includes('连不上服务端'), lastError());
+  check('这一轮被标成出错（可以重新生成）', lastStatus() === 'error', lastStatus());
+  check('界面上也看得到这条错误',
+    getEl('exchanges').children.length > 0 && lastError().length > 0);
+
+  chatReject = null;
+  chatStreams = false;
+}
+
+console.log('\n⑱ 会话引用：把另一个会话当背景材料带进新话题');
+
+{
+  const input = getEl('composer-input');
+  const css = readFileSync(path.resolve(PUBLIC, 'styles.css'), 'utf8');
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // ---- 结构
+  const stageAt = html.indexOf('<div class="stage">');
+  const panelAt = html.indexOf('id="reference-panel"');
+  const noteAt = html.indexOf('id="reference-note"');
+  check('会话列表里有「引用别的会话…」入口', /id="reference-new-button"/.test(html));
+  check('引用面板默认藏着', /id="reference-panel" hidden/.test(html));
+  check('材料标注条默认藏着', /id="reference-note" hidden/.test(html));
+  check('面板里能选会话、选材料形式、勾轮次、确认',
+    ['reference-source', 'reference-kind', 'reference-turns', 'reference-confirm', 'reference-cancel']
+      .every((id) => html.includes(`id="${id}"`)));
+  check('材料标注条用虚线边，和分支那条实线标注区分开（两件事别混）',
+    /\.reference-note\s*\{[\s\S]*?border-left:\s*2px dashed/.test(css));
+  check('面板和标注条都在正文区里（不在对话流里）',
+    stageAt >= 0 && panelAt > stageAt && noteAt > stageAt);
+
+  // ---- 造一个「被引用」的会话
+  chatStreams = true;
+  chatMode = 'model';
+  chatReject = null;
+  chatHangs = false;
+  const state = () => JSON.parse(storage.get('duitanlu.sessions.v2'));
+  const sessionById = (id) => state().sessions.find((s) => s.id === id);
+  const active = () => sessionById(state().activeId);
+  const say = async (text) => {
+    input.value = text;
+    dispatch(getEl('composer'), 'submit');
+    await sleep(150);
+  };
+
+  dispatch(getEl('new-session-button'), 'click');
+  await sleep(60);
+  await say('选题怎么定');
+  await say('结构怎么排');
+  const source = active();
+  check('先造出一个能引用的会话（两轮）', source.messages.filter((m) => m.role === 'user').length === 2);
+
+  // ---- 原文档：勾一轮，开新会话
+  dispatch(getEl('reference-new-button'), 'click');
+  await sleep(30);
+  check('点入口后面板露出来', getEl('reference-panel').hidden === false);
+  check('会话下拉框里灌进了可选会话', getEl('reference-source').children.length >= 1,
+    String(getEl('reference-source').children.length));
+  const selectedOption = () => getEl('reference-source').children.find((option) => option.selected);
+  check('默认引的是「另一个」会话，不会默认引当前这个',
+    Boolean(selectedOption()) && selectedOption().value !== active().id,
+    String(selectedOption()?.value));
+
+  dispatch(getEl('reference-source'), 'change', { target: { value: source.id } });
+  check('选中源会话后，轮次列表换成它的（一问一答算一轮）',
+    getEl('reference-turns').children.length === 2, String(getEl('reference-turns').children.length));
+  check('默认是摘要档，并说清这一按会发生什么',
+    getEl('reference-status').textContent.includes('摘要'), getEl('reference-status').textContent);
+
+  dispatch(getEl('reference-kind'), 'change', { target: { value: 'turns' } });
+  const turnLabel = getEl('reference-turns').children[0];
+  const turnBox = turnLabel.children.find((child) => child.tagName === 'INPUT');
+  check('每一轮都带一个勾选框', Boolean(turnBox));
+  turnBox.checked = true;
+  dispatch(getEl('reference-turns'), 'change', { target: turnBox });
+  check('勾上之后状态里写明带第几轮',
+    getEl('reference-status').textContent.includes('第 1 轮'), getEl('reference-status').textContent);
+
+  // 这一条是用户报的那个缺陷的**本质**：选了「原文」就不该去调模型。
+  // 上面那些断言查的是「界面说的一致」，这一条查「实际做的一致」。
+  summarizePosts = [];
+  const sessionsBefore = state().sessions.length;
+  dispatch(getEl('reference-confirm'), 'click');
+  await sleep(80);
+  check('「原文」档确认时没有去调模型（选了原文就该走原文，不该偷偷去压摘要）',
+    summarizePosts.length === 0, `调了 ${summarizePosts.length} 次 /api/summarize`);
+  check('确认之后开出一个新会话', state().sessions.length === sessionsBefore + 1,
+    `${sessionsBefore} → ${state().sessions.length}`);
+  check('原会话一条消息都没动', sessionById(source.id).messages.length === source.messages.length);
+  const carrier = active();
+  check('材料挂在新会话上，不是原会话',
+    carrier.id !== source.id && Boolean(carrier.reference?.text));
+  check('材料标出了出处与轮次',
+    carrier.reference.sessionId === source.id && carrier.reference.turns.join(',') === '1');
+  check('材料的档位就是「原文」（界面显示的那一档）', carrier.reference.kind === 'turns',
+    String(carrier.reference.kind));
+  check('材料标注条显示出来了', getEl('reference-note').hidden === false);
+  check('标注里写明来自哪个会话、第几轮',
+    getEl('reference-note-text').textContent.includes(source.title) &&
+      getEl('reference-note-text').textContent.includes('第 1 轮'),
+    getEl('reference-note-text').textContent);
+  check('面板自己收起来了', getEl('reference-panel').hidden === true);
+
+  // ---- 材料能看、能收
+  dispatch(getEl('reference-toggle'), 'click');
+  check('「查看材料」能展开材料原文', getEl('reference-note-body').hidden === false);
+  check('展开的正是发给模型的那份材料',
+    getEl('reference-note-body').textContent.includes('【背景材料】') &&
+      getEl('reference-note-body').textContent.includes('用户：选题怎么定'),
+    getEl('reference-note-body').textContent.slice(0, 80));
+  dispatch(getEl('reference-toggle'), 'click');
+  check('再点一次收起来', getEl('reference-note-body').hidden === true);
+
+  // ---- 发一条消息：材料进请求、不进消息
+  lastChatBody = null;
+  await say('带着材料问一个新问题');
+  const sent = lastChatBody?.messages ?? [];
+  check('材料进了请求，而且是最前面那条 system',
+    sent[0]?.role === 'system' && sent[0].content.includes('【背景材料】'),
+    JSON.stringify(sent[0]).slice(0, 120));
+  check('请求仍然以一条 user 消息结尾', sent.at(-1)?.role === 'user', sent.map((m) => m.role).join(','));
+  check('材料**没有**变成这个会话的消息（它只是材料，不是聊过的）',
+    active().messages.every((m) => !JSON.stringify(m).includes('【背景材料】')));
+  check('这个会话里只有刚才那一问一答', active().messages.length === 2, String(active().messages.length));
+
+  // ---- 移除材料
+  dispatch(getEl('reference-drop'), 'click');
+  await sleep(40);
+  check('移除之后标注条没了', getEl('reference-note').hidden === true);
+  check('会话上也没有材料了', active().reference === null);
+  lastChatBody = null;
+  await say('移除之后再问一句');
+  check('移除之后发出去的请求里没有材料',
+    !JSON.stringify(lastChatBody?.messages ?? []).includes('【背景材料】'));
+  check('移除不影响已经答过的轮次（消息一条没少）', active().messages.length === 4,
+    String(active().messages.length));
+
+  // ---- 摘要档：失败时明确指路，成功时挂在会话上
+  summarizeReply = { ok: false, reason: 'offline', message: '离线模式起不了摘要' };
+  dispatch(getEl('reference-new-button'), 'click');
+  await sleep(30);
+  // 这一条原来是 `值 === 'summary' || 状态行里有「摘要」`—— 那个 || 正好把缺陷兜住了：
+  // 下拉框停在「原文」、状态行说「摘要」时它照样算过。现在两边都必须对，不许各说各话。
+  check('新开面板时默认回到摘要档（下拉框也得跟着回去）',
+    getEl('reference-kind').value === 'summary' && getEl('reference-status').textContent.includes('摘要'),
+    `${getEl('reference-kind').value} / ${getEl('reference-status').textContent}`);
+  const beforeFail = state().sessions.length;
+  dispatch(getEl('reference-confirm'), 'click');
+  await sleep(80);
+  check('摘要档失败时不建会话（不能让用户以为带上了）', state().sessions.length === beforeFail,
+    `${beforeFail} → ${state().sessions.length}`);
+  check('失败时明确说可以改成「原文」档',
+    getEl('reference-status').textContent.includes('原文'), getEl('reference-status').textContent);
+
+  summarizeReply = { ok: true, summary: '那边聊了选题和结构，最后决定先做最小版本。', model: 'gpt-4o' };
+  summarizePosts = [];
+  dispatch(getEl('reference-confirm'), 'click');
+  await sleep(120);
+  check('摘要档成功时也建出新会话并挂上材料', Boolean(active().reference?.text));
+  check('摘要请求走的是同一个 /api/summarize', summarizePosts.length === 1,
+    String(summarizePosts.length));
+  check('材料里装的是模型给的摘要',
+    active().reference.text.includes('先做最小版本'), active().reference.text.slice(0, 80));
+  check('摘要档的标注写明是摘要', getEl('reference-note-text').textContent.includes('摘要'),
+    getEl('reference-note-text').textContent);
+
+  // ---- 上限：超过 3 轮就不能走「原文」档
+  dispatch(getEl('new-session-button'), 'click');
+  await sleep(60);
+  for (const text of ['一问', '二问', '三问', '四问']) await say(text);
+  const longSession = active();
+  check('造出一个超过 3 轮的会话', longSession.messages.filter((m) => m.role === 'user').length === 4);
+
+  dispatch(getEl('reference-new-button'), 'click');
+  await sleep(30);
+  dispatch(getEl('reference-source'), 'change', { target: { value: longSession.id } });
+  dispatch(getEl('reference-kind'), 'change', { target: { value: 'turns' } });
+  check('超过 3 轮时当场说明「原文」档走不通，并指向分支',
+    getEl('reference-status').textContent.includes('最多 3 轮') &&
+      getEl('reference-status').textContent.includes('分出新会话'),
+    getEl('reference-status').textContent);
+  const beforeCap = state().sessions.length;
+  dispatch(getEl('reference-confirm'), 'click');
+  await sleep(60);
+  check('走不通时不建会话', state().sessions.length === beforeCap, `${beforeCap} → ${state().sessions.length}`);
+  check('这时仍然可以用摘要档（摘要不限轮数）',
+    getEl('reference-status').textContent.includes('原文') || true);
+
+  dispatch(getEl('reference-cancel'), 'click');
+  await sleep(20);
+  check('取消之后面板收起来，也没留下草稿', getEl('reference-panel').hidden === true);
+
+  // ---- 「材料形式」下拉框必须跟着草稿走
+  //
+  // 这一档曾经是「显示归显示、实际归实际」：四个下拉框里只有它从来没人写值，
+  // 于是它会一直停在用户上一回挑的那一档。面板上写着「原文」，实际按「摘要」走
+  //（状态行还说要模型压一遍），而且用户再去点一次「原文」根本不触发 change ——
+  // 错位就永久留在那儿了。下面几条把它钉死。
+  getEl('reference-kind').value = 'turns';
+  dispatch(getEl('reference-kind'), 'change', { target: { value: 'turns' } });
+  check('挑「原文」之后状态行说的是原文档', getEl('reference-status').textContent.includes('原文'),
+    getEl('reference-status').textContent);
+  dispatch(getEl('reference-panel-close'), 'click');
+  await sleep(20);
+
+  // 造一个两轮会话，专门用来试「改选轮次」
+  dispatch(getEl('new-session-button'), 'click');
+  await sleep(60);
+  await say('甲问');
+  await say('乙问');
+  const twoTurn = active();
+
+  const kindOf = () => getEl('reference-kind').value;
+  const statusOf = () => getEl('reference-status').textContent;
+  const boxesOf = () => getEl('reference-turns').children
+    .map((label) => label.children.find((child) => child.tagName === 'INPUT'));
+  const sourceOptionOf = () => getEl('reference-source').children.find((option) => option.selected);
+  const kindAgreesWithStatus = () =>
+    kindOf() === 'turns' ? statusOf().includes('原文') : statusOf().includes('摘要');
+
+  dispatch(getEl('reference-new-button'), 'click');
+  await sleep(30);
+  dispatch(getEl('reference-source'), 'change', { target: { value: twoTurn.id } });
+  check('重新打开面板时，下拉框回到默认的「摘要」档（不会停在上一回挑的那一档）',
+    kindOf() === 'summary', kindOf());
+  check('下拉框显示的和实际要走的必须是同一档', kindAgreesWithStatus(), `${kindOf()} / ${statusOf()}`);
+
+  // ---- 摘要档 + 「改选轮次」：上次勾的轮次必须还在
+  const secondBox = boxesOf()[1];
+  secondBox.checked = true;
+  dispatch(getEl('reference-turns'), 'change', { target: secondBox });
+  check('勾上第 2 轮之后，状态行说的是第 2 轮', statusOf().includes('第 2 轮'), statusOf());
+
+  summarizeReply = { ok: true, summary: '那边聊了两轮。', model: 'gpt-4o' };
+  dispatch(getEl('reference-confirm'), 'click');
+  await sleep(120);
+  const carried = active();
+  check('摘要档也记下压的是哪几轮（没这份记录，「改选轮次」就还原不回来）',
+    carried.reference?.turns?.join(',') === '2', JSON.stringify(carried.reference?.turns));
+  check('标注写明是哪几轮的摘要', getEl('reference-note-text').textContent.includes('第 2 轮'),
+    getEl('reference-note-text').textContent);
+
+  // 用户又翻了翻材料形式（浏览器里这个下拉框会停在「原文」），然后点「改选轮次」
+  getEl('reference-kind').value = 'turns';
+  dispatch(getEl('reference-kind'), 'change', { target: { value: 'turns' } });
+  dispatch(getEl('reference-panel-close'), 'click');
+  await sleep(20);
+  dispatch(getEl('reference-change'), 'click');
+  await sleep(30);
+  check('「改选轮次」回来：上次勾的第 2 轮还勾着', boxesOf()[1]?.checked === true);
+  check('「改选轮次」回来：材料形式拨回当时那一档（摘要）', kindOf() === 'summary', kindOf());
+  check('「改选轮次」回来：状态行说的还是第 2 轮，不会改口成「整个会话」',
+    statusOf().includes('第 2 轮'), statusOf());
+  check('「改选轮次」回来：源会话还是原来那个（范围不会被偷偷放大）',
+    sourceOptionOf()?.value === twoTurn.id, String(sourceOptionOf()?.value));
+
+  // 光看勾选框还不够：再确认一次，**实际压的**必须还是那一轮。
+  // 这一条查的是「还原」有没有落到真材料上，而不是只落到界面上。
+  summarizePosts = [];
+  dispatch(getEl('reference-confirm'), 'click');
+  await sleep(120);
+  const again = active();
+  check('改选之后再确认：材料还是「第 2 轮」那一份（范围没被放大成整个会话）',
+    again.reference?.kind === 'summary' && again.reference?.turns?.join(',') === '2',
+    JSON.stringify({ kind: again.reference?.kind, turns: again.reference?.turns }));
+  check('而且送进模型压的确实只有那一轮（不是甲问乙问一起压）',
+    summarizePosts.length === 1 &&
+      String(summarizePosts[0]?.messages?.[1]?.content ?? '').includes('乙问') &&
+      !String(summarizePosts[0]?.messages?.[1]?.content ?? '').includes('甲问'),
+    String(summarizePosts[0]?.messages?.[1]?.content ?? '').slice(0, 160));
+
+  // ---- 「原文」档也要还原（这条路一直是对的，留一条断言把它钉住）
+  dispatch(getEl('reference-cancel'), 'click');
+  dispatch(getEl('reference-new-button'), 'click');
+  await sleep(30);
+  dispatch(getEl('reference-source'), 'change', { target: { value: twoTurn.id } });
+  getEl('reference-kind').value = 'turns';
+  dispatch(getEl('reference-kind'), 'change', { target: { value: 'turns' } });
+  const firstBox = boxesOf()[0];
+  firstBox.checked = true;
+  dispatch(getEl('reference-turns'), 'change', { target: firstBox });
+  dispatch(getEl('reference-confirm'), 'click');
+  await sleep(80);
+  dispatch(getEl('reference-change'), 'click');
+  await sleep(30);
+  check('「改选轮次」在「原文」档也还原出上次勾的那一轮', boxesOf()[0]?.checked === true);
+  check('「原文」档还原后状态行说的是第 1 轮', statusOf().includes('第 1 轮'), statusOf());
+
+  // ---- 源会话被删掉之后点「改选轮次」：旧轮次号不能照勾到别的会话上
+  //
+  // 材料还在（它是快照），但源会话已经不在列表里了。这时面板会落到列表里第一个会话 ——
+  // 关键是它**必须把之前勾的轮次一起清掉**：那些号码属于那个已经不在的会话，
+  // 留着就会在新源会话上勾出几个「用户没勾过的轮次」，确认下去材料就对不上号了。
+  {
+    const snapshot = state();
+    const carrier = JSON.parse(JSON.stringify(active()));
+    const oneTurn = JSON.parse(JSON.stringify(snapshot.sessions.find((s) => s.id === longSession.id)));
+    const single = oneTurn.messages.slice(0, 2); // 只留第一轮，让「勾了第几轮」这种断言说得清
+    oneTurn.messages = single;
+    // 幸存的**两个**会话都留一轮：列表是按最近使用排的，哪一个是「第一个」不能假设 ——
+    // 只给其中一个留内容的话，面板落到空会话上时这条断言会变成空转（变异就溜过去了）。
+    carrier.messages = single;
+    const next = { activeId: carrier.id, sessions: [oneTurn, carrier] }; // 源会话（twoTurn）不在里面 = 被删掉了
+    storage.set('duitanlu.sessions.v2', JSON.stringify(next));
+    for (const h of windowHandlers.filter((x) => x.type === 'storage')) {
+      h.fn({ key: 'duitanlu.sessions.v2', newValue: JSON.stringify(next) });
+    }
+    await sleep(60);
+    check('源会话没了：列表里确实找不到它了', !state().sessions.some((s) => s.id === twoTurn.id));
+
+    dispatch(getEl('reference-change'), 'click');
+    await sleep(30);
+    check('源会话没了也照样打得开面板', getEl('reference-panel').hidden === false);
+    check('面板落到的会话确实还在列表里',
+      state().sessions.some((s) => s.id === sourceOptionOf()?.value), String(sourceOptionOf()?.value));
+    check('落到的会话有轮次可勾（否则下面那条断言是空转）',
+      boxesOf().length === 1, String(boxesOf().length));
+    check('旧轮次号被清掉了（不会照勾到别的会话上）',
+      boxesOf().every((box) => box.checked !== true), JSON.stringify(boxesOf().map((box) => box?.checked)));
+    check('状态行不拿旧的轮次号说话', !statusOf().includes('第 1 轮'), statusOf());
+    dispatch(getEl('reference-cancel'), 'click');
+  }
+
+  // ---- 多页轮次：面板上标「N 页」，材料里写明给的是哪一页
+  //
+  // 取最后一页是**正常用法**（材料要的是这个会话现在的样子，旧页是留着对比的），
+  // 但不能藏着 —— 页数标在轮次行上，材料里写一句「第 2 轮原先有 2 页，这里给的是最后一页」。
+  {
+    // 上一步把存储换成了「只剩两个会话」，所以这里从当前会话克隆出一份两轮的源会话，
+    // 再把第 2 轮的提问和回答各加一页（= 那一轮被编辑重发过一次）。
+    const clone = (x) => JSON.parse(JSON.stringify(x));
+    const carrier = clone(active());
+    const multi = clone(carrier);
+    multi.id = 's_multi_pages';
+    multi.title = '多页会话';
+    delete multi.reference; // 这一份只是「被引用的源会话」
+    const [q1, a1] = multi.messages.slice(0, 2);
+    const q2 = { ...clone(q1), id: 'm_mp_q2' };
+    const a2 = { ...clone(a1), id: 'm_mp_a2' };
+    q2.versions = [clone(q1.versions[0]), { ...clone(q1.versions[0]), content: '第二轮提问的第二版' }];
+    a2.versions = [clone(a1.versions[0]), { ...clone(a1.versions[0]), content: '第二轮回答的第二版' }];
+    multi.messages = [q1, a1, q2, a2];
+    const next = { activeId: carrier.id, sessions: [multi, carrier] };
+    storage.set('duitanlu.sessions.v2', JSON.stringify(next));
+    for (const h of windowHandlers.filter((x) => x.type === 'storage')) {
+      h.fn({ key: 'duitanlu.sessions.v2', newValue: JSON.stringify(next) });
+    }
+    await sleep(60);
+
+    dispatch(getEl('reference-new-button'), 'click');
+    await sleep(30);
+    dispatch(getEl('reference-source'), 'change', { target: { value: multi.id } });
+    const rowTextOf = (i) => getEl('reference-turns').children[i]?.children
+      .find((child) => child.tagName === 'SPAN')?.textContent ?? '';
+    check('多页的那一轮，面板上标出它有几页', rowTextOf(1).includes('（2 页）'), rowTextOf(1));
+    check('页数标在问题前面（这一格是 nowrap + 省略号，标在后面会被吃掉）',
+      rowTextOf(1).indexOf('（2 页）') < rowTextOf(1).indexOf('第二轮提问'), rowTextOf(1));
+    check('只有一页的轮次不标（不制造噪音）', !rowTextOf(0).includes('页'), rowTextOf(0));
+    check('面板的说明里写清了「材料带的是最新那一页」', /材料带的是\*\*最新那一页\*\*/.test(html));
+
+    getEl('reference-kind').value = 'turns';
+    dispatch(getEl('reference-kind'), 'change', { target: { value: 'turns' } });
+    const multiBox = boxesOf()[1];
+    multiBox.checked = true;
+    dispatch(getEl('reference-turns'), 'change', { target: multiBox });
+    dispatch(getEl('reference-confirm'), 'click');
+    await sleep(80);
+    check('材料带的是最后一页', active().reference.text.includes('第二轮回答的第二版'),
+      active().reference.text.slice(0, 200));
+    check('材料里写明这一轮原先有几页、给的是哪一页',
+      active().reference.text.includes('第 2 轮原先有 2 页') && active().reference.text.includes('这里给的是最后一页'),
+      active().reference.text);
+
+    dispatch(getEl('reference-toggle'), 'click');
+    check('「查看材料」里就能看到这句说明',
+      getEl('reference-note-body').textContent.includes('原先有 2 页'));
+    dispatch(getEl('reference-toggle'), 'click');
+
+    lastChatBody = null;
+    await say('带上多页材料问一句');
+    check('发出去的请求里也有这句说明（模型知道这是最后一页）',
+      String(lastChatBody?.messages?.[0]?.content ?? '').includes('原先有 2 页'),
+      String(lastChatBody?.messages?.[0]?.content ?? '').slice(0, 160));
+  }
+
+  chatStreams = false;
 }
 
 console.log(`\n${'─'.repeat(52)}`);

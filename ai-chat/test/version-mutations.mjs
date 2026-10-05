@@ -85,5 +85,22 @@ runner.run('失败时不给补救提示（用户不知道怎么手动复制）',
   src.replace("return ok ? `${label}已复制` : '复制失败，请手动选择';", "return '';"),
 );
 
+// ---- 请求历史的末条：服务端的硬校验（必须以一条 user 消息结尾）
+//
+// 这两条对应的正是「第二页生成」那次 400：编辑更早的那一问时，把那一问**之后**的轮次
+// 也发了出去，请求以 assistant 结尾，服务端当场拒掉，界面还报成「连不上服务端」。
+
+runner.run('编辑更早的那一问时，把那一问之后的轮次也发出去', VERSIONS, (src) =>
+  // versions.js 里只有这一处 break（其余都是 continue）
+  src.replace('      break;', '      continue;'),
+);
+
+runner.run('去掉「请求必须以 user 结尾」的最后一道保险', VERSIONS, (src) =>
+  src.replace(
+    "  while (history.length > 1 && history[history.length - 1].role !== 'user') history.pop();",
+    '  void history;',
+  ),
+);
+
 runner.finish();
 

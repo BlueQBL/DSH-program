@@ -55,9 +55,17 @@
         -->
         <div class="masthead-tools">
           <!--
-            列表收起来（或窄屏）时的备用入口：新建会话的主按钮在会话列表里，
-            但列表藏起来之后总得留一个够得着的入口。平时隐藏，由 setRailVisible() 决定露不露。
+            列表收起来（或窄屏）时的两个备用入口：**引用在前、新对话在后**。
+            这样已有的「新对话」还待在原位（新加的东西不该把老按钮挤走），
+            模型框继续钉在最右边（它是这一组的最后一个）。
           -->
+          <button
+            type="button"
+            class="ghost-button"
+            id="reference-compact"
+            hidden
+            title="把另一个会话的内容当背景材料，带进一个新话题"
+          >引用会话</button>
           <button type="button" class="ghost-button" id="new-session-compact" hidden>新对话</button>
           <span class="mode-chip" id="mode-chip" title="当前回答由谁生成">
             <span class="mode-dot" aria-hidden="true"></span>
@@ -71,10 +79,26 @@
       <div class="board" id="board">
         <!-- 会话列表 -->
         <aside class="rail" id="rail" aria-label="对话列表">
-          <!-- 新建会话放在它自己的地盘上：新会话就是从这里生出来的，按钮在列表头上最顺手。
-               样式用描边的（不是黑底实心）—— 这一栏本来就安静，实心黑块太抢眼。
-               它不归任何一组管：置顶 / 最近各自收起来，它照样在（新会话永远开得了）。 -->
-          <button type="button" class="ghost-button rail-new" id="new-session-button">＋ 新对话</button>
+          <!--
+            会话栏顶部的两个入口，并排各占一半：新建 / 引用。
+            两件事同等重要，所以长得一样（都是描边的淡按钮）—— 一个实心、一个像脚注，
+            会让人以为「引用」是次要功能（而且同一件事在两个地方不该长两个样，见报头那两个备用入口）。
+            它们都不归任何一组管：置顶 / 最近各自收起来，这两个照样在。
+          -->
+          <div class="rail-actions">
+            <button type="button" class="ghost-button rail-new" id="new-session-button">＋ 新对话</button>
+            <!--
+              引用另一个会话当**背景材料**（见 lib/reference.js）。
+              它和「分出新会话」的分工：那个是把整段对话**搬过去继续聊**（抄一份，两边各走各的）；
+              这个只是把那边的内容当**参考资料**带进一个新话题 —— 不进本会话的消息，随时能换能删。
+            -->
+            <button
+              type="button"
+              class="ghost-button rail-reference"
+              id="reference-new-button"
+              title="把另一个会话的内容当背景材料，带进一个新话题"
+            >引用会话</button>
+          </div>
           <div class="rail-head">
             <span class="rail-title">会话</span>
             <span class="rail-count" id="session-count"></span>
@@ -133,6 +157,67 @@
         </aside>
 
         <div class="stage">
+          <!--
+            这条会话是从哪儿分出来的（只有分支会话才显示）。
+            它只是**出处**，不是活引用：内容早在建分支的时候就复制成本会话自己的消息了，
+            源会话改标题、被删掉，这里都不受影响（顶多标注上写一句「已删除」）。
+          -->
+          <p class="branch-note" id="branch-note" hidden>
+            <span class="branch-note-mark" aria-hidden="true">↳</span>
+            <span class="branch-note-text" id="branch-note-text"></span>
+            <button type="button" class="link-button" id="branch-source-button">回到那个会话</button>
+          </p>
+
+          <!--
+            挂着的**背景材料**（会话引用，见 lib/reference.js）。
+            它不进这个会话的消息：只在构造请求时拼在最前面一条 system 里，
+            所以导出正文、压缩下标、消息数都不受影响 —— 随时能换能删。
+          -->
+          <p class="reference-note" id="reference-note" hidden>
+            <span class="reference-note-mark" aria-hidden="true">参</span>
+            <span class="reference-note-text" id="reference-note-text"></span>
+            <button type="button" class="link-button" id="reference-toggle" aria-expanded="false">查看材料</button>
+            <button type="button" class="link-button" id="reference-change">改选轮次</button>
+            <button type="button" class="link-button" id="reference-drop">移除材料</button>
+          </p>
+          <pre class="reference-note-body" id="reference-note-body" hidden></pre>
+
+          <!--
+            引用面板：选一个会话、选材料形式、勾选轮次，然后开一个新会话。
+            「原文」档最多 3 轮 —— 超过就该用「分出新会话」（那是把整段搬过去继续聊）。
+          -->
+          <section class="reference-panel" id="reference-panel" hidden aria-label="引用另一个会话">
+            <div class="reference-panel-head">
+              <span class="reference-panel-title">引用另一个会话当背景材料</span>
+              <button type="button" class="link-button" id="reference-panel-close">收起</button>
+            </div>
+            <p class="reference-panel-hint">
+              材料是**背景知识**：模型会把它当成你给的参考资料，而不是「你们聊过」。
+              它不算这个会话的消息，随时能查看、能移除。
+              某一轮被编辑重发过多次时，材料带的是**最新那一页**（轮次后面标着「N 页」），
+              想连旧页一起搬走就用「分出新会话」。
+            </p>
+            <div class="control-row">
+              <label class="control-field">
+                <span class="control-label">引用哪一个会话</span>
+                <select id="reference-source"></select>
+              </label>
+              <label class="control-field">
+                <span class="control-label">材料形式</span>
+                <select id="reference-kind">
+                  <option value="summary">摘要（整段压成一段，不限轮数）</option>
+                  <option value="turns">原文（一问一答照搬，最多 3 轮）</option>
+                </select>
+              </label>
+            </div>
+            <div class="reference-turns" id="reference-turns"></div>
+            <p class="reference-panel-status" id="reference-status"></p>
+            <div class="reference-actions">
+              <button type="button" class="solid-button" id="reference-confirm">用这份材料开新会话</button>
+              <button type="button" class="ghost-button" id="reference-cancel">取消</button>
+            </div>
+          </section>
+
           <!-- 角色 / 模型 / 提示词 -->
           <section class="controls" aria-label="角色与模型设置">
             <div class="control-row">
@@ -352,6 +437,18 @@
             <div class="turn-actions" data-field="answer-actions">
               <button type="button" class="link-button" data-action="copy">复制回答</button>
               <button type="button" class="link-button" data-action="retry">重新生成</button>
+              <!--
+                从这一轮分出一个新会话（参考 ChatGPT 的「在新聊天中分支」）：
+                把「到这条回答为止」的内容复制到新会话，原会话一个字节都不动。
+                注意这和上面提问的「编辑 → 重新回答」是两件事：那个是在**本会话里**
+                给同一个问题多留一页，这个是从这里**换条路走**（跨会话）。
+              -->
+              <button
+                type="button"
+                class="link-button"
+                data-action="branch"
+                title="把这一轮之前的对话复制到一个新会话，之后两边各聊各的"
+              >分出新会话</button>
               <span class="feedback-buttons">
                 <button type="button" class="link-button feedback-button" data-action="rate-up" aria-pressed="false" title="这条回答有用">👍 有用</button>
                 <button type="button" class="link-button feedback-button" data-action="rate-down" aria-pressed="false" title="这条回答没帮上忙">👎 没用</button>

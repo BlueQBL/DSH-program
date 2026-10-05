@@ -56,6 +56,14 @@ import {
 } from './lib/feedback.js';
 import { buildSummaryMessages, compressionPlan, normalizeSummary, summaryLabel } from './lib/compress.js';
 import {
+  MAX_REFERENCE_TURNS,
+  isValidReference,
+  referenceFailureText,
+  referenceLabel,
+  referencePlan,
+  turnPairs,
+} from './lib/reference.js';
+import {
   resolveStartingSession as resolveStartingSessionDecide,
   resolveRailVisible as resolveRailVisibleDecide,
   shouldCreateSession,
@@ -69,6 +77,28 @@ const els = {
   sessionList: document.getElementById('session-list'),
   sessionCount: document.getElementById('session-count'),
   sessionTemplate: document.getElementById('session-template'),
+  // 「这条会话是从哪儿分出来的」那条说明（只有分支会话显示）
+  branchNote: document.getElementById('branch-note'),
+  branchNoteText: document.getElementById('branch-note-text'),
+  // 会话引用：入口按钮、引用面板、材料标注条
+  referenceNewButton: document.getElementById('reference-new-button'),
+  // 列表收起时，报头上的备用入口（和「新对话」并排）
+  referenceCompact: document.getElementById('reference-compact'),
+  referencePanel: document.getElementById('reference-panel'),
+  referencePanelClose: document.getElementById('reference-panel-close'),
+  referenceSource: document.getElementById('reference-source'),
+  referenceKind: document.getElementById('reference-kind'),
+  referenceTurns: document.getElementById('reference-turns'),
+  referenceStatus: document.getElementById('reference-status'),
+  referenceConfirm: document.getElementById('reference-confirm'),
+  referenceCancel: document.getElementById('reference-cancel'),
+  referenceNote: document.getElementById('reference-note'),
+  referenceNoteText: document.getElementById('reference-note-text'),
+  referenceNoteBody: document.getElementById('reference-note-body'),
+  referenceToggle: document.getElementById('reference-toggle'),
+  referenceChange: document.getElementById('reference-change'),
+  referenceDrop: document.getElementById('reference-drop'),
+  branchSourceButton: document.getElementById('branch-source-button'),
   // 会话列表的两组（置顶 / 最近）。每组：section（整组，空组整块藏起来）、
   // list（会话行容器，组内收起时藏的是它）、count、toggle（组标题右边的收起/展开）
   groupPinned: {
@@ -212,6 +242,10 @@ const runtime = {
   feedbackDraft: null,
   /** 摘要正文是否展开着（按消息条数记忆，换会话不串） */
   summaryOpen: false,
+  /** 背景材料的原文是否展开着（会话引用） */
+  referenceOpen: false,
+  /** 引用面板上正在编辑的草稿（选哪个会话、哪种形式、勾了哪几轮） */
+  referenceDraft: null,
   /** 正在压缩的会话 id，避免同一会话重复请求 */
   compressing: null,
   exportAll: false,
@@ -525,13 +559,17 @@ for (const name of RAIL_GROUPS) {
   RAIL_GROUP_ELS[name]?.toggle?.addEventListener('click', () => toggleRailGroup(name));
 }
 
-/** 一条会话行（两组共用）。置顶的那条，按钮改成「取消置顶」。 */
+/**
+ * 一条会话行（两组共用）。
+ * 置顶的那条，按钮改成「取消置顶」；分支会话在行首带一个小箭头（样式给的）。
+ */
 function sessionRow(session, activeId) {
   const frag = els.sessionTemplate.content.cloneNode(true);
   const item = frag.querySelector('.session-item');
   item.dataset.id = session.id;
   item.dataset.active = String(session.id === activeId);
   item.dataset.pinned = String(session.pinned === true);
+  item.dataset.branch = String(Boolean(session.branchOf));
 
   frag.querySelector('[data-field="name"]').textContent = session.title || '新对话';
   const turns = session.messages.filter((m) => m.role === 'user').length;
@@ -647,18 +685,7 @@ els.sessionList.addEventListener('click', (event) => {
   // 切到已有对话前，先把「进来时自动开的那个空白会话」清掉 ——
   // 留着它只会让列表里堆一串没用的「新对话」。
   // 注意 keepId：如果点的那个会话本身是空的（也是新建的），要留着它。
-  const dropped = store.dropEmptySessions({ keepId: id });
-
-  if (store.switchSession(id)) {
-    runtime.pinned = true;
-    runtime.liveTurn = null;
-    runtime.renderNode = null;
-    railRevealPending = true; // 点的是列表里的哪一条，就把它滚进可视区
-    renderAfterSessionSwitch();
-    scrollToBottom();
-    els.input.focus();
-    if (dropped > 0) flashHint('已清掉空白的「新对话」', 2200);
-  }
+  switchToSession(id);
 });
 
 // ---------------------------------------------------------------- 会话标题
@@ -1239,12 +1266,356 @@ async function postFeedback({ message, version, feedback, action = 'set' }) {
   }
 }
 
+/**
+ * 「这条会话是从哪儿分出来的」那条说明。
+ *
+ * 出处是**快照**，不是活引用：源会话还在就显示它现在的标题（点得进去），
+ * 被删掉了就退回建分支时存下的那个标题，并标一句「已删除」。
+ * 图片一律不带进分支，所以这里要如实说清带走了几张图 —— 不说的话，
+ * 模型看不见图、用户却以为它看过（它会答「我没看到图」，那不是它的错）。
+ */
+function paintBranchNote() {
+  const note = els.branchNote;
+  if (!note) return;
+  const origin = store.session.branchOf;
+  if (!origin) {
+    note.hidden = true;
+    return;
+  }
+
+  const source = store.sessions.find((s) => s.id === origin.id);
+  const parts = [`分支自《${source?.title || origin.title || '那个会话'}》`];
+  if (!source) parts.push('原会话已删除');
+  if (origin.images > 0) parts.push(`原会话的 ${origin.images} 张图没有带过来`);
+
+  els.branchNoteText.textContent = parts.join(' · ');
+  els.branchSourceButton.hidden = !source;
+  note.hidden = false;
+}
+
+/**
+ * 切到某个会话。
+ *
+ * 会话列表里的点击、以及分支说明条上的「回到那个会话」，都走这里 ——
+ * 两处的行为必须一模一样（清掉空白会话、恢复运行时、滚进可视区、回到输入框），
+ * 各写一份迟早会分叉。
+ */
+function switchToSession(id) {
+  // 切走之前，把「进来时自动开的那个空白会话」清掉 —— 留着只会让列表里堆一串「新对话」。
+  // 注意 keepId：要切过去的那个会话本身是空的（也是新建的）时，得留着它。
+  const dropped = store.dropEmptySessions({ keepId: id });
+  if (!store.switchSession(id)) return false;
+
+  runtime.pinned = true;
+  runtime.liveTurn = null;
+  runtime.renderNode = null;
+  railRevealPending = true; // 切到哪一条，就把它滚进可视区
+  renderAfterSessionSwitch();
+  scrollToBottom();
+  els.input.focus();
+  if (dropped > 0) flashHint('已清掉空白的「新对话」', 2200);
+  return true;
+}
+
+// 分支说明条上的「回到那个会话」（源会话还在才显示这个按钮）
+els.branchSourceButton?.addEventListener('click', () => {
+  const origin = store.session.branchOf;
+  if (!origin) return;
+  const source = store.sessions.find((s) => s.id === origin.id);
+  if (!source) {
+    flashHint('那个会话已经删掉了', 2600);
+    return;
+  }
+  switchToSession(source.id);
+});
+
+// ---------------------------------------------------------------- 会话引用（背景材料）
+//
+// 和「分出新会话」的分工（详见 lib/reference.js 顶部那段）：
+//   分支 = 把整段对话**搬过去继续聊**（复制品变成新会话自己的消息，两边各走各的）；
+//   引用 = 把另一个会话的内容当**材料**带进一个新话题 —— 不进本会话的消息、不进导出的正文、
+//          不占压缩的下标，随时能换能删。
+// 判据的另一半是上限：摘要不限轮数，「原文」最多 3 轮 —— 超过就该去用分支。
+
+/** 把勾选的轮次还原成消息数组（摘要档要交给 /api/summarize） */
+function referenceSlice(source, numbers) {
+  const messages = Array.isArray(source?.messages) ? source.messages : [];
+  const pairs = turnPairs(messages);
+  const picked = numbers.length ? pairs.filter((pair) => numbers.includes(pair.number)) : pairs;
+  const out = [];
+  for (const pair of picked) {
+    const question = messages[pair.index];
+    const answer = messages[pair.index + 1];
+    if (question) out.push(question);
+    if (answer?.role === 'assistant') out.push(answer);
+  }
+  return out;
+}
+
+/** 面板上那句实时说明：说清这一按会发生什么，哪条路走不通也讲明白 */
+function referenceStatusText() {
+  const draft = runtime.referenceDraft;
+  const source = store.sessions.find((s) => s.id === draft?.sourceId);
+  if (!source) return '先选一个会话';
+
+  const pairs = turnPairs(source.messages);
+  if (!pairs.length) return '这个会话还没有可以引用的内容（至少要有一问一答）';
+
+  const picked = draft.numbers.length;
+  const scope = picked ? `第 ${draft.numbers.join('、')} 轮` : `整个会话（${pairs.length} 轮）`;
+
+  if (draft.kind === 'turns') {
+    if (picked > MAX_REFERENCE_TURNS || (!picked && pairs.length > MAX_REFERENCE_TURNS)) {
+      const scopeText = picked ? `你勾了 ${picked} 轮` : `整个会话有 ${pairs.length} 轮`;
+      return `「原文」档最多 ${MAX_REFERENCE_TURNS} 轮 —— ${scopeText}。少勾几轮，或者改成「摘要」档；想整段接着聊就用「分出新会话」`;
+    }
+    return `会把 ${picked ? scope : `全部 ${pairs.length} 轮`} 的一问一答原文照搬过去（最多 ${MAX_REFERENCE_TURNS} 轮）`;
+  }
+  if (runtime.config.mode === 'mock') {
+    return '离线模式起不了摘要 —— 改成「原文」档就能用（它不需要模型）';
+  }
+  return `会先让模型把 ${scope} 压成一段摘要，再带进新会话`;
+}
+
+/** 哪些会话可以被引用（下拉框） */
+function paintReferenceSources() {
+  const draft = runtime.referenceDraft;
+  const sessions = store.sessions;
+  // 源会话找不到了（被删掉了）就落到列表里第一个，并且**把之前勾的轮次一起清掉**：
+  // 那些轮次号属于那个已经不在的会话，留着会被当成新源会话的轮次照勾出来 ——
+  // 用户看到几个「自己没勾过的勾」，确认下去带走的是一份来源和轮次都对不上号的材料。
+  if (!sessions.some((s) => s.id === draft.sourceId)) {
+    draft.sourceId = sessions[0]?.id ?? '';
+    draft.numbers = [];
+  }
+  els.referenceSource.replaceChildren(
+    ...sessions.map((session) => {
+      const option = document.createElement('option');
+      option.value = session.id;
+      option.textContent = `${session.title || '新对话'} · ${turnPairs(session.messages).length} 轮`;
+      option.selected = session.id === draft.sourceId;
+      return option;
+    }),
+  );
+}
+
+/** 把可选的轮次列成勾选框（不勾 = 整个会话） */
+function paintReferenceTurns() {
+  const draft = runtime.referenceDraft;
+  const source = store.sessions.find((s) => s.id === draft.sourceId);
+  els.referenceTurns.replaceChildren(
+    ...turnPairs(source?.messages).map((pair) => {
+      const label = document.createElement('label');
+      label.className = 'reference-turn';
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.dataset.action = 'reference-turn';
+      box.dataset.number = String(pair.number);
+      box.checked = draft.numbers.includes(pair.number);
+      const text = document.createElement('span');
+      text.className = 'reference-turn-text';
+      // 多页的轮次要标出来：材料取的是**最后一页**，用户得看得见这件事
+      //（他改过这一问几版，就说明这里本来有几页可选）
+      //
+      // 页数写在**问题前面**：这一格是 nowrap + 省略号（`.reference-turn-text` 的
+      // max-width: 300px），24 个字的问题本来就顶到宽度上限 —— 把「N 页」放在后面
+      // 会被省略号直接吃掉，而那正是这条标记存在的理由。
+      const pages = pair.pages > 1 ? `（${pair.pages} 页）` : '';
+      const preview = pair.question.replace(/\s+/g, ' ').slice(0, 24);
+      text.textContent = `第 ${pair.number} 轮${pages} · ${preview}`;
+      label.appendChild(box);
+      label.appendChild(text);
+      return label;
+    }),
+  );
+}
+
+function paintReferencePanel() {
+  if (!runtime.referenceDraft) return;
+  // 「材料形式」下拉框是**视图**，值必须跟着草稿走。
+  //
+  // 少这一行就会出岔子：下拉框会一直停在用户上一回挑的那一档，于是面板上写着「原文」、
+  // 实际按「摘要」走（状态行还说要模型压一遍）；更麻烦的是用户再去点一次「原文」
+  // 不会触发 change（值本来就是它），错位就永久留在那儿了。
+  if (els.referenceKind) els.referenceKind.value = runtime.referenceDraft.kind;
+  paintReferenceSources();
+  paintReferenceTurns();
+  els.referenceStatus.textContent = referenceStatusText();
+}
+
+/**
+ * 打开引用面板。
+ * 默认引「最近用过的另一个会话」——没有别的会话时引自己（列表里总得有一个）。
+ */
+function openReferencePanel({ sourceId = '', kind = 'summary', numbers = [] } = {}) {
+  const others = store.sessions.filter((s) => s.id !== store.sessionId);
+  runtime.referenceDraft = {
+    sourceId: sourceId || others[0]?.id || store.sessionId,
+    kind: kind === 'turns' ? 'turns' : 'summary',
+    numbers: Array.isArray(numbers) ? [...numbers] : [],
+  };
+  els.referencePanel.hidden = false;
+  paintReferencePanel();
+}
+
+function closeReferencePanel() {
+  runtime.referenceDraft = null;
+  els.referencePanel.hidden = true;
+}
+
+/** 材料挂到一个新会话上：这就是「带着背景开新话题」 */
+function applyReference(reference) {
+  if (store.session.messages.length === 0) {
+    // 当前就是个空白会话：直接用掉它，别再堆一个「新对话」
+    store.updateSessionSettings({ personaId: DEFAULT_PERSONA_ID, systemPrompt: '' });
+  } else {
+    store.createSession();
+  }
+  store.setReference(reference);
+
+  closeReferencePanel();
+  runtime.referenceOpen = false;
+  runtime.pinned = true;
+  runtime.liveTurn = null;
+  runtime.renderNode = null;
+  railRevealPending = true;
+  renderAfterSessionSwitch();
+  scrollToBottom();
+  els.input.focus();
+  flashHint(`已带上《${reference.title}》的材料，可以开始新话题了`, 3600);
+}
+
+/** 确认：原文档本地就能拼；摘要档要问模型要一段摘要 */
+async function submitReference() {
+  const draft = runtime.referenceDraft;
+  if (!draft) return;
+  const source = store.sessions.find((s) => s.id === draft.sourceId);
+  const numbers = [...draft.numbers];
+
+  if (draft.kind === 'turns') {
+    const plan = referencePlan({ source, kind: 'turns', numbers });
+    if (!plan.ok) {
+      els.referenceStatus.textContent = referenceFailureText(plan.reason);
+      flashHint(referenceFailureText(plan.reason), 4400);
+      return;
+    }
+    applyReference(plan.reference);
+    return;
+  }
+
+  const slice = referenceSlice(source, numbers);
+  if (!slice.length) {
+    els.referenceStatus.textContent = referenceFailureText('empty');
+    return;
+  }
+
+  els.referenceConfirm.disabled = true;
+  els.referenceStatus.textContent = '正在让模型压摘要…';
+  try {
+    const response = await fetch('/api/summarize', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        messages: buildSummaryMessages({ messages: slice }),
+        model: currentModelForRequest() || undefined,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data?.ok || !data.summary) {
+      throw new Error(data?.message || '摘要没生成出来');
+    }
+    const plan = referencePlan({ source, kind: 'summary', numbers, summaryText: data.summary });
+    if (!plan.ok) {
+      els.referenceStatus.textContent = referenceFailureText(plan.reason);
+      return;
+    }
+    applyReference(plan.reference);
+  } catch (err) {
+    const text = `${err.message} —— 可以改成「原文」档（它不需要模型）`;
+    els.referenceStatus.textContent = text;
+    flashHint(text, 4800);
+  } finally {
+    els.referenceConfirm.disabled = false;
+  }
+}
+
+/** 那条材料标注：写清从哪来、能展开看原文、能改选轮次、能移除 */
+function paintReferenceNote() {
+  const note = els.referenceNote;
+  if (!note) return;
+  const reference = store.session.reference;
+  if (!isValidReference(reference)) {
+    note.hidden = true;
+    els.referenceNoteBody.hidden = true;
+    els.referenceToggle.setAttribute('aria-expanded', 'false');
+    runtime.referenceOpen = false;
+    return;
+  }
+
+  const label = referenceLabel(reference);
+  // 材料是快照：源会话被删掉照样能用，只是标注里说清出处已经不在
+  const alive = store.sessions.some((s) => s.id === reference.sessionId);
+  els.referenceNoteText.textContent = alive ? label : `${label}（原会话已删除）`;
+  els.referenceNoteBody.textContent = reference.text;
+  els.referenceNoteBody.hidden = !runtime.referenceOpen;
+  els.referenceToggle.textContent = runtime.referenceOpen ? '收起材料' : '查看材料';
+  els.referenceToggle.setAttribute('aria-expanded', String(runtime.referenceOpen));
+  note.hidden = false;
+}
+
+els.referenceNewButton?.addEventListener('click', () => openReferencePanel());
+// 列表收起时，报头上那个备用入口做的是同一件事
+els.referenceCompact?.addEventListener('click', () => openReferencePanel());
+els.referencePanelClose?.addEventListener('click', () => closeReferencePanel());
+els.referenceCancel?.addEventListener('click', () => closeReferencePanel());
+els.referenceConfirm?.addEventListener('click', () => void submitReference());
+els.referenceSource?.addEventListener('change', (event) => {
+  if (!runtime.referenceDraft) return;
+  runtime.referenceDraft.sourceId = event.target.value;
+  // 换了会话，之前勾的轮次号不再有意义
+  runtime.referenceDraft.numbers = [];
+  paintReferencePanel();
+});
+els.referenceKind?.addEventListener('change', (event) => {
+  if (!runtime.referenceDraft) return;
+  runtime.referenceDraft.kind = event.target.value === 'turns' ? 'turns' : 'summary';
+  els.referenceStatus.textContent = referenceStatusText();
+});
+els.referenceTurns?.addEventListener('change', (event) => {
+  const draft = runtime.referenceDraft;
+  const box = event.target.closest?.('[data-action="reference-turn"]');
+  if (!draft || !box) return;
+  const number = Number(box.dataset.number);
+  draft.numbers = box.checked
+    ? [...new Set([...draft.numbers, number])].sort((a, b) => a - b)
+    : draft.numbers.filter((n) => n !== number);
+  els.referenceStatus.textContent = referenceStatusText();
+});
+els.referenceToggle?.addEventListener('click', () => {
+  runtime.referenceOpen = !runtime.referenceOpen;
+  paintReferenceNote();
+});
+els.referenceChange?.addEventListener('click', () => {
+  const reference = store.session.reference;
+  if (!reference) return;
+  openReferencePanel({ sourceId: reference.sessionId, kind: reference.kind, numbers: reference.turns });
+});
+els.referenceDrop?.addEventListener('click', () => {
+  if (!store.session.reference) return;
+  store.clearReference();
+  runtime.referenceOpen = false;
+  render();
+  flashHint('已移除背景材料 —— 之后不再带上它，已经答过的轮次一个字没变', 4200);
+});
+
 function render({ keepLive = false } = {}) {
   const assistants = store.messages.filter((m) => m.role === 'assistant');
   const isBlank = store.messages.length === 0;
 
   els.blank.hidden = !isBlank;
   els.clear.disabled = isBlank;
+  paintBranchNote();
+  paintReferenceNote();
 
   if (keepLive && runtime.liveTurn && runtime.renderNode) {
     // 流式写入中：只增量重画这一条，其余不动（否则光标位置、滚动锚点都会跳）
@@ -1899,6 +2270,9 @@ async function send(rawText, { edit = null, version = null, reuse = false } = {}
   // 并保证图片只跟末条一起发。
   const history = buildRequestHistory(store.messages, question, placeholder, {
     summary: store.session.summary,
+    // 挂着的背景材料（会话引用）：只进请求，不进本地消息 ——
+    // 所以它不占压缩的下标、不进导出的正文，删掉也只是下一轮不再带
+    reference: store.session.reference,
   });
 
   const controller = new AbortController();
@@ -1930,7 +2304,12 @@ async function send(rawText, { edit = null, version = null, reuse = false } = {}
       } catch {
         /* 忽略 */
       }
-      throw new Error(detail || `请求失败（HTTP ${response.status}）`);
+      // 带上 httpStatus：下面的 catch 要靠它把「服务端拒绝了请求」和
+      // 「连不上服务端」分开说。以前两种情况共用一句「确认 node server.mjs 还在运行」，
+      // 结果服务端明明活着、只是拒了一个请求，用户却跑去查进程（真事：400 就是这么被误报的）。
+      const rejected = new Error(detail || `请求失败（HTTP ${response.status}）`);
+      rejected.httpStatus = response.status;
+      throw rejected;
     }
 
     await readEventStream(response, (event) => {
@@ -1979,6 +2358,10 @@ async function send(rawText, { edit = null, version = null, reuse = false } = {}
   } catch (err) {
     if (err.name === 'AbortError') {
       store.interrupt(placeholder);
+    } else if (err.httpStatus) {
+      // 服务端活着，它只是拒了这一轮（400 之类）。别再说「确认 node server.mjs 还在运行」——
+      // 那句话会把人带去查进程，而真正的原因在服务端给的原话里。
+      store.finish(placeholder, 'error', `服务端拒绝了这次请求（HTTP ${err.httpStatus}）：${err.message}`);
     } else if (placeholder.content) {
       store.finish(placeholder, 'interrupted', `连接中断：${err.message}`);
     } else {
@@ -2327,7 +2710,10 @@ function setRailVisible(visible) {
   els.board.dataset.rail = visible ? 'shown' : 'hidden';
   els.sidebarToggle.setAttribute('aria-expanded', String(visible));
   els.sidebarToggle.dataset.state = visible ? 'shown' : 'hidden';
+  // 两个备用入口一起露/一起藏：列表收起来之后，新建和引用都得够得着
+  //（它们的主入口都在列表顶上，见 index.html 的 .rail-actions）
   if (els.newSessionCompact) els.newSessionCompact.hidden = visible;
+  if (els.referenceCompact) els.referenceCompact.hidden = visible;
   writeRailPreference(visible);
 }
 
@@ -2426,6 +2812,41 @@ els.exchanges.addEventListener('click', (event) => {
 
   if (kind === 'retry') {
     retryLast(message);
+    return;
+  }
+
+  // ---- 从这一轮分出一个新会话（见 lib/branch.js）
+  //
+  // 和上面提问的「编辑 → 重新回答」是两件事：那个是**在本会话里**给同一个问题
+  // 多留一页（旧页不覆盖），这个是**从这里换条路走**：内容复制到一个新会话，
+  // 原会话一个字节都不动，两边从此各聊各的。
+  if (kind === 'branch') {
+    // 正在生成时不分：那一轮还没定稿，复制过去的是半截
+    if (runtime.busy) {
+      flashHint('正在生成，等这一轮结束再分出新会话', 2600);
+      return;
+    }
+    const created = store.branchFrom(store.sessionId, message.id);
+    if (!created) {
+      flashHint('这一轮还没落定，先别分支', 2600);
+      return;
+    }
+
+    runtime.pinned = true;
+    runtime.liveTurn = null;
+    runtime.renderNode = null;
+    railRevealPending = true; // 新会话排在列表最后，滚一下才看得见
+    renderAfterSessionSwitch();
+    scrollToBottom();
+    els.input.focus();
+
+    const images = created.branchOf?.images ?? 0;
+    flashHint(
+      images > 0
+        ? `已分出新会话「${created.title}」—— 原会话的 ${images} 张图没有带过来`
+        : `已分出新会话「${created.title}」，两边从此各聊各的`,
+      3600,
+    );
     return;
   }
 

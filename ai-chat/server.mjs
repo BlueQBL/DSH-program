@@ -15,6 +15,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createMockReply } from './lib/mock-responder.mjs';
+import { installCrashLog } from './lib/crash-log.mjs';
 import {
   classifyUpstreamError,
   pickModelCandidates,
@@ -33,6 +34,11 @@ const PUBLIC_DIR = path.join(HERE, 'public');
 const DATA_DIR = path.join(HERE, 'data');
 /** 用户评价的追加日志（一行一条 JSON），和兜底副本一样属于运行时数据 */
 const FEEDBACK_FILE = path.join(DATA_DIR, 'feedback.jsonl');
+/**
+ * 服务端日志：启动 / 崩溃 / 结束都记在这里（见 lib/crash-log.mjs）。
+ * 用 AI_SERVER_LOG 可以换地方 —— 测试就靠它写到临时文件，不污染正经日志。
+ */
+const LOG_FILE = process.env.AI_SERVER_LOG || path.join(DATA_DIR, 'server.log');
 
 const PORT = Number(process.env.PORT || 5250);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -76,6 +82,12 @@ const LIMITS = {
 /** 评价的原因最多几条、补充说明最长多少字（与前端 lib/feedback.js 的规则一致） */
 const MAX_FEEDBACK_REASONS = 3;
 const MAX_FEEDBACK_NOTE = 500;
+
+// ---------------------------------------------------------------- 日志与崩溃兜底
+//
+// 启动 / 崩溃 / 结束都写进日志文件（见 lib/crash-log.mjs 顶部那段：为什么要有它、怎么读它）。
+// AI_SERVER_LOG 可以换路径 —— 测试就靠它写到临时文件，不污染正经日志。
+const serverLog = installCrashLog({ logFile: LOG_FILE, dir: DATA_DIR });
 
 /** 拼出本次请求要用的系统提示词：角色提示词在前，通用要求在后 */
 function buildSystemPrompt(custom) {
@@ -1127,6 +1139,9 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, HOST, () => {
   const where = `http://${HOST}:${PORT}`;
+  // 日志里先留一行「什么时候起的、什么配置」：下次进程不见了，
+  // 至少能从这一行和时间戳判断它是刚起就没了，还是跑了一阵才没的
+  serverLog.start({ port: PORT, model: API_MODEL, mode: MODE, baseUrl: HAS_MODEL ? API_BASE : '' });
   console.log('');
   console.log('  对谈录 · AI 聊天助手已启动');
   console.log(`  ${where}`);
