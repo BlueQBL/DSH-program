@@ -13,6 +13,8 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// 导出器是纯函数，直接拿它核对「窗口只管画、不管存」：画 20 轮，导出必须还是 45 轮
+import { toMarkdown } from '../public/lib/exporters.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.resolve(HERE, '../public');
@@ -201,6 +203,8 @@ function dispatch(el, type, event = {}) {
 const scrollHandlers = [];
 /** window 上的全部监听（按类型），用来触发 storage 这类事件 */
 const windowHandlers = [];
+/** 补历史之后 app 会把视口往下挪一截（滚动锚定），这里记下每次挪了多少 */
+const scrollByCalls = [];
 
 const registry = new Map();
 const getEl = (id) => {
@@ -280,6 +284,12 @@ globalThis.window = {
   },
   matchMedia: () => ({ matches: false, addEventListener() {} }),
   scrollTo() {},
+  // 真实浏览器里 scrollBy 会真的滚；替身只记账，顺便把 scrollY 跟着挪，
+  // 这样「补完历史之后视口有没有被顶走」才有据可查
+  scrollBy(dx, dy) {
+    scrollByCalls.push({ dx, dy });
+    globalThis.window.scrollY = Math.max(0, globalThis.window.scrollY + (Number(dy) || 0));
+  },
   open() {},
   prompt: () => null,
   scrollY: 0,
@@ -1738,10 +1748,12 @@ console.log('\n⑮ 会话列表：置顶 / 最近 两组，各自收放');
   const pinnedToggle = getEl('pinned-toggle');
   const recentToggle = getEl('recent-toggle');
   const board = getEl('board');
-  const idsIn = (list) => list.children.map((frag) => frag.querySelector('.session-item')?.dataset.id);
+  // 列表里每一条**就是**那个 .session-item（app 的 sessionRow 现在直接返回它）。
+  // 早期它返回的是模板片段，所以这里两种形状都认：自己就是那一行，或者从片段里取。
+  const rowElementOf = (node) => (node?.dataset?.id ? node : node?.querySelector('.session-item') ?? null);
+  const idsIn = (list) => list.children.map((node) => rowElementOf(node)?.dataset.id);
   /** 取某一行里的东西（会话行是模板克隆出来的，替身里按选择器缓存） */
-  const rowOf = (list, id) =>
-    list.children.find((frag) => frag.querySelector('.session-item')?.dataset.id === id) ?? null;
+  const rowOf = (list, id) => list.children.find((node) => rowElementOf(node)?.dataset.id === id) ?? null;
   const pinLabelIn = (list, id) => rowOf(list, id)?.querySelector('[data-action="pin"]')?.textContent ?? '';
   const rowsIn = () => JSON.parse(storage.get('duitanlu.sessions.v2')).sessions;
   const groupState = () => JSON.parse(storage.get('duitanlu.railGroups.v1') ?? '{}');
@@ -1772,7 +1784,7 @@ console.log('\n⑮ 会话列表：置顶 / 最近 两组，各自收放');
   check('没置顶的那条写着「置顶」',
     pinLabelIn(recentList, idsIn(recentList)[0]) === '置顶', pinLabelIn(recentList, idsIn(recentList)[0]));
   check('行上打了置顶标记（样式靠它标出已经置顶）',
-    rowOf(pinnedList, targetId)?.querySelector('.session-item')?.dataset.pinned === 'true');
+    rowElementOf(rowOf(pinnedList, targetId))?.dataset.pinned === 'true');
   check('给了反馈：告诉用户它去哪儿了',
     getEl('composer-hint').textContent.includes('置顶'), getEl('composer-hint').textContent);
 
@@ -2138,6 +2150,10 @@ console.log('\n⑯ 会话标题太长：两行 + 悬停看全文');
       h.fn({ key: 'duitanlu.sessions.v2', newValue: JSON.stringify(payload) });
     }
     await new Promise((r) => setTimeout(r, 60));
+
+    // 「最近」这一组默认只画 6 条，而这里要核对 8 档时间各怎么写 —— 先展开全部。
+    // （不展开的话后两行压根没画出来，那不是缺陷，是这个显示开关的正常行为。）
+    dispatch(getEl('recent-more'), 'click');
 
     const ages = new Map();
     for (const listId of ['pinned-list', 'recent-list']) {
@@ -2931,6 +2947,425 @@ console.log('\n⑲ 会话引用：把另一个会话当背景材料带进新话�
   }
 
   chatStreams = false;
+}
+
+console.log('\n⑳ 正文的渲染窗口：只画最近 20 轮，更早的按需补');
+
+{
+  // 替身不解析 HTML：模板克隆出来的节点 className 是空的，所以「哪一行是哪一个」只能靠
+  // app 自己写在节点上的东西认 —— 对谈节点带 dataset.id，而「更早的 N 轮」那一行是
+  // createElement 建的（className 是真的），两边都认得出。
+  const exchanges = getEl('exchanges');
+  const earlierRow = () => exchanges.children.find((n) => n.className === 'exchange-earlier') ?? null;
+  const earlierButton = () => earlierRow()?.children[0] ?? null;
+  const turnNodes = () => exchanges.children.filter((n) => n.dataset?.id);
+  const numbers = () => turnNodes().map((n) => n.querySelector('[data-field="number"]').textContent);
+  const turnIds = () => turnNodes().map((n) => n.dataset.turn ?? '');
+  // 压缩标记：只有它自己的 label 会被写上文字（和上半场同一个认法）
+  const notes = () =>
+    exchanges.children.filter(
+      (n) => String(n.querySelector('[data-field="context-note-label"]')?.textContent ?? '').length > 0,
+    );
+  const noteLabel = (node) => node?.querySelector('[data-field="context-note-label"]')?.textContent ?? '';
+  const last = (arr) => arr[arr.length - 1];
+  const dataNow = () => JSON.parse(storage.get('duitanlu.sessions.v2'));
+  const seededMessages = (id) => dataNow().sessions.find((s) => s.id === id)?.messages ?? [];
+
+  /** 造一个 n 轮的会话（一轮 = 一问一答），字段形状和别处的夹具一致 */
+  function makeSession(id, title, turns, extra = {}) {
+    const messages = [];
+    for (let i = 1; i <= turns; i += 1) {
+      messages.push({
+        id: `${id}_u${i}`,
+        role: 'user',
+        content: `第 ${i} 个问题`,
+        versions: [{ content: `第 ${i} 个问题`, createdAt: 0, attachments: [], quote: null, feedback: null }],
+        versionCount: 1,
+      });
+      messages.push({
+        id: `${id}_a${i}`,
+        role: 'assistant',
+        content: `第 ${i} 个回答`,
+        versions: [
+          {
+            content: `第 ${i} 个回答`,
+            createdAt: 0,
+            attachments: [],
+            quote: null,
+            feedback: null,
+            status: 'done',
+            model: 'gpt-4o',
+          },
+        ],
+        versionCount: 1,
+      });
+    }
+    return { id, title, createdAt: 1000, updatedAt: 2000, messages, ...extra };
+  }
+
+  /** 灌进 localStorage，再走 app 自己的跨标签页通道让它接进去（等价于刷新一次） */
+  function seed(payload) {
+    storage.set('duitanlu.sessions.v2', JSON.stringify(payload));
+    for (const h of windowHandlers.filter((x) => x.type === 'storage')) {
+      h.fn({ key: 'duitanlu.sessions.v2', newValue: JSON.stringify(payload) });
+    }
+    reloadActiveSession();
+  }
+
+  const clickEarlier = () => dispatch(exchanges, 'click', { target: earlierButton() });
+  const payloadOf = (extra = {}) => ({
+    activeId: 's_win_a',
+    sessions: [makeSession('s_win_a', '长会话', 45, extra), makeSession('s_win_b', '短会话', 3)],
+  });
+
+  configMode = 'model';
+  chatMode = 'model';
+  chatStreams = true;
+
+  seed(payloadOf());
+  await new Promise((r) => setTimeout(r, 60));
+
+  check('45 轮的会话默认只画最近 20 轮', turnNodes().length === 20, `${turnNodes().length} 轮`);
+  check('编号仍是全局序号（第 26–45 轮，不是从 01 重来）',
+    numbers().join(',') === Array.from({ length: 20 }, (_v, i) => String(26 + i).padStart(2, '0')).join(','),
+    numbers().join(','));
+  check('正文里那个编号和节点上记的编号是同一个（两处不许各说各的）',
+    numbers().join(',') === turnIds().join(','), `${numbers().join(',')} / ${turnIds().join(',')}`);
+  check('顶上有一条「更早的 20 轮」', earlierButton()?.textContent === '更早的 20 轮', earlierButton()?.textContent);
+  check('按钮上说明上面还藏着几轮',
+    String(earlierButton()?.title ?? '').includes('还有 25 轮'), String(earlierButton()?.title ?? ''));
+  check('「更早的」排在第一条对谈上面（它就是窗口的顶边）', exchanges.children[0] === earlierRow());
+  check('窗口只管画、不管存：落盘里还是 90 条消息',
+    seededMessages('s_win_a').length === 90, String(seededMessages('s_win_a').length));
+  {
+    // 数据这一侧单独守一遍：画 20 轮，导出必须还是全部 45 轮。
+    // （分页只准决定「画哪些」，一旦渗进「有什么」，导出、摘要、引用原文就都会缺料。）
+    const md = toMarkdown(dataNow().sessions.find((s) => s.id === 's_win_a'));
+    check('导出用的是全部消息：藏在窗口之上的第 1 轮也在里面',
+      md.includes('第 1 个问题') && md.includes('第 45 个问题'), `${md.length} 字`);
+    check('导出的回答条数 = 45（不是画出来的 20）',
+      (md.match(/第 \d+ 个回答/g) ?? []).length === 45,
+      String((md.match(/第 \d+ 个回答/g) ?? []).length));
+  }
+
+  check('点「更早的」确实有处理器接住（不是画了个死按钮）', clickEarlier() > 0);
+  check('点一次补到 40 轮', turnNodes().length === 40, `${turnNodes().length} 轮`);
+  check('补进来的历史编号接得上（从第 6 轮开始）', numbers()[0] === '06', numbers()[0]);
+  check('按钮改口成「更早的 5 轮」（只补剩下的那几轮）',
+    earlierButton()?.textContent === '更早的 5 轮', earlierButton()?.textContent);
+  clickEarlier();
+  check('再点一次就全画出来了（45 轮）', turnNodes().length === 45, `${turnNodes().length} 轮`);
+  check('全画出来之后「更早的」那一行就收了', earlierRow() === null);
+
+  // ---- 滚到最上面也会自动补一段；在页面中间不许乱补
+  //
+  // 先把窗口弄回 20 轮：**换走再换回来**（切会话就复位）。
+  // 这里不能靠「重新灌一份数据」来复位 —— 会话 id 没变，窗口本来就不该复位，
+  // 那正是「按会话复位」这条规矩的另一面（下面单独有一条断言守它）。
+  const rowFor = (id) => {
+    const row = makeElement('li');
+    row.className = 'session-item';
+    row.dataset.id = id;
+    return row;
+  };
+  const switchTo = (id) => dispatch(getEl('session-list'), 'click', { target: rowFor(id) });
+  switchTo('s_win_b');
+  switchTo('s_win_a');
+  check('切走再回来的会话回到最近 20 轮', turnNodes().length === 20, `${turnNodes().length} 轮`);
+  window.scrollY = 900;
+  for (const fn of scrollHandlers) fn({});
+  check('在页面中间滚动不会凭空补历史', turnNodes().length === 20, `${turnNodes().length} 轮`);
+  window.scrollY = 10;
+  for (const fn of scrollHandlers) fn({});
+  check('滚到最上面自动补一段', turnNodes().length === 40, `${turnNodes().length} 轮`);
+
+  // ---- 滚动锚定：往上插内容会把正在看的那一行顶下去，视口得跟着往下挪同样多
+  {
+    const realDocEl = document.documentElement;
+    let reads = 0;
+    scrollByCalls.length = 0;
+    // 「补之前文档 1000 高、补之后 1600 高」—— 长高了 600，视口就该往下挪 600
+    document.documentElement = {
+      ...realDocEl,
+      get scrollHeight() {
+        reads += 1;
+        return reads === 1 ? 1000 : 1600;
+      },
+    };
+    clickEarlier();
+    document.documentElement = realDocEl;
+    check('补历史之后把视口往下挪「文档长高的那一截」（屏幕上的内容不动）',
+      last(scrollByCalls)?.dx === 0 && last(scrollByCalls)?.dy === 600,
+      JSON.stringify(last(scrollByCalls) ?? null));
+  }
+
+  // ---- 压缩界线落在窗口之上时，标记挂在窗口顶部（位置说的还是实话）
+  //
+  // 两个用例都要先把窗口复位（切走再回来）：压缩标记的位置只有在「只画 20 轮」的前提下
+  // 才谈得上「落在窗口之上」。
+  seed(payloadOf({ summary: { covers: 10, text: '前五轮的摘要', at: 1500 } }));
+  switchTo('s_win_b');
+  switchTo('s_win_a');
+  check('摘要覆盖的轮次藏在窗口之上时，标记挂在窗口最前面（不是凭空消失）',
+    notes().length === 1 && exchanges.children.indexOf(notes()[0]) === 1,
+    `第 ${exchanges.children.indexOf(notes()[0])} 个孩子，共 ${exchanges.children.length} 个`);
+  check('挂在顶上那条说的还是实话（以上 10 条已压缩）',
+    noteLabel(notes()[0]).includes('以上 10 条'), noteLabel(notes()[0]));
+  check('它下面紧跟的就是窗口里的第一轮（第 26 轮）',
+    exchanges.children[2]?.dataset?.turn === '26', String(exchanges.children[2]?.dataset?.turn));
+
+  // covers = 88 条 = 44 轮：界线正好落在第 44 轮那条回答后面，而它是画得出来的
+  seed(payloadOf({ summary: { covers: 88, text: '几乎都压了', at: 1500 } }));
+  switchTo('s_win_b');
+  switchTo('s_win_a');
+  {
+    const at = exchanges.children.indexOf(notes()[0]);
+    check('界线那一轮画得出来时，标记照旧紧跟在那条回答后面',
+      notes().length === 1 && exchanges.children[at - 1]?.dataset?.turn === '44',
+      `标记在第 ${at} 位，它前面是第 ${exchanges.children[at - 1]?.dataset?.turn} 轮`);
+    check('后面的轮次照旧排在它下面（第 45 轮）',
+      exchanges.children[at + 1]?.dataset?.turn === '45', String(exchanges.children[at + 1]?.dataset?.turn));
+  }
+
+  // ---- 换会话就复位：展开状态不持久化（少一份要跟会话对齐的状态）
+  switchTo('s_win_b');
+  switchTo('s_win_a');
+  check('（准备）切回来又是 20 轮', turnNodes().length === 20, `${turnNodes().length} 轮`);
+  clickEarlier();
+  clickEarlier();
+  check('（准备）在这个会话里已经全展开（45 轮）', turnNodes().length === 45, `${turnNodes().length} 轮`);
+  switchTo('s_win_b');
+  check('切到短会话：画的是它自己的 3 轮',
+    turnNodes().length === 3 && numbers()[0] === '01', `${turnNodes().length} 轮 / 首个编号 ${numbers()[0]}`);
+  switchTo('s_win_a');
+  check('切回来又回到最近 20 轮（展开状态不持久化）', turnNodes().length === 20, `${turnNodes().length} 轮`);
+}
+
+console.log('\n㉑ 会话列表：最近这一组默认只显示几个');
+
+{
+  const recentRows = () => getEl('recent-list').children;
+  const pinnedRows = () => getEl('pinned-list').children;
+  const more = () => getEl('recent-more');
+  const rowTitle = (row) => row.querySelector('[data-field="name"]')?.textContent ?? '';
+  const rowIds = (rows) => rows.map((row) => row.dataset.id).join(',');
+
+  const MIN = 60 * 1000;
+  const DAY = 24 * 60 * MIN;
+  const now = Date.now();
+  const make = (id, title, { ago = 1, pinned = false } = {}) => ({
+    id,
+    title,
+    createdAt: now - 100 * DAY,
+    updatedAt: now - ago * MIN,
+    pinned,
+    messages: [],
+  });
+
+  const payload = {
+    // active 故意选**最老的那个会话**：它在默认显示的 6 条之外，必须仍然出现在列表里。
+    // id 必须过得了 store 那关（`/^[A-Za-z0-9_-]{4,64}$/`）—— 太短的会被整条丢掉，
+    // 表现是「数据灌进去了但列表纹丝不动」（我第一次写成 r_1 就是这么被耍的）。
+    activeId: 'rec_12',
+    sessions: [
+      // 置顶 7 个（超过 6）——「置顶」这一组**不裁**：用户明确说过它重要
+      ...Array.from({ length: 7 }, (_v, i) => make(`pin_0${i + 1}`, `置顶${i + 1}`, { ago: 500 + i, pinned: true })),
+      ...Array.from({ length: 12 }, (_v, i) =>
+        make(`rec_${String(i + 1).padStart(2, '0')}`, `会话${i + 1}`, { ago: i + 1 })),
+    ],
+  };
+  storage.set('duitanlu.sessions.v2', JSON.stringify(payload));
+  for (const h of windowHandlers.filter((x) => x.type === 'storage')) {
+    h.fn({ key: 'duitanlu.sessions.v2', newValue: JSON.stringify(payload) });
+  }
+  await new Promise((r) => setTimeout(r, 60));
+
+  // ⑯ 那段为了核对 8 档时间点过「显示全部」，所以这里先把它收回来（同一个开关）
+  if (/^只看最近/.test(more()?.textContent ?? '')) dispatch(more(), 'click');
+  // ⑮ 结束时把两组都收着了（那是用户的选择，会记住）—— 这里先都展开，
+  // 否则下面「收起 / 展开」那两条断言点下去的方向正好相反
+  if (getEl('recent-list').hidden === true) dispatch(getEl('recent-toggle'), 'click');
+  if (getEl('pinned-list').hidden === true) dispatch(getEl('pinned-toggle'), 'click');
+
+  check('「最近」默认只画 6 个 + 当前这一个（不是 12 行全铺出来）',
+    recentRows().length === 7, `${recentRows().length} 行`);
+  check('默认画的是最近的那几个', rowIds(recentRows()).startsWith('rec_01,rec_02,rec_03,rec_04,rec_05,rec_06'),
+    rowIds(recentRows()));
+  check('当前会话在列 —— 哪怕它是最老的那个（刷新之后也一样，不该像丢了）',
+    recentRows().some((row) => row.dataset.id === 'rec_12' && row.dataset.active === 'true'),
+    rowIds(recentRows()));
+  check('「最近」标题上的条数写的是真实条数（12，不是画出来的 7）',
+    getEl('recent-count').textContent === '12', getEl('recent-count').textContent);
+  check('按钮上写着还藏着几个', more().textContent === '显示全部（还藏着 5 个）', more().textContent);
+  check('按钮记着藏起来的条数（5）', more().dataset.hiddenCount === '5', more().dataset.hiddenCount);
+  check('「置顶」那一组不裁：7 个全在', pinnedRows().length === 7, `${pinnedRows().length} 行`);
+  check('总条数没变（19 个会话，一个都没少）',
+    getEl('session-count').textContent === '19', getEl('session-count').textContent);
+
+  dispatch(more(), 'click');
+  check('点「显示全部」：12 行全画出来', recentRows().length === 12, `${recentRows().length} 行`);
+  check('展开之后按钮改口成「只看最近 6 个」（不是死胡同）',
+    more().textContent === '只看最近 6 个', more().textContent);
+  check('展开只是多画几行：条数还是 12、总数还是 19',
+    getEl('recent-count').textContent === '12' && getEl('session-count').textContent === '19',
+    `${getEl('recent-count').textContent} / ${getEl('session-count').textContent}`);
+  check('这个选择记在本地（刷新之后还是展开的）',
+    JSON.parse(storage.get('duitanlu.railGroups.v1') ?? '{}').recentAll === true,
+    storage.get('duitanlu.railGroups.v1'));
+
+  dispatch(more(), 'click');
+  check('再点回来：又只剩 7 行（当前会话仍然在）',
+    recentRows().length === 7 && recentRows().some((row) => row.dataset.id === 'rec_12'),
+    `${recentRows().length} 行`);
+  check('按钮的话也跟着回到「显示全部」', more().textContent === '显示全部（还藏着 5 个）', more().textContent);
+
+  // 整组收起来时，这个按钮不该孤零零留在收起状态下面
+  dispatch(getEl('recent-toggle'), 'click');
+  check('「最近」收起来时，这个按钮也跟着藏', more().hidden === true, String(more().hidden));
+  dispatch(getEl('recent-toggle'), 'click');
+  check('展开回来按钮也回来', more().hidden === false, String(more().hidden));
+
+  // 会话本来就不多时，这个按钮没有存在的理由
+  const few = {
+    activeId: 'few_01',
+    sessions: [make('few_01', '只有一个', { ago: 1 }), make('few_02', '两个', { ago: 2 })],
+  };
+  storage.set('duitanlu.sessions.v2', JSON.stringify(few));
+  for (const h of windowHandlers.filter((x) => x.type === 'storage')) {
+    h.fn({ key: 'duitanlu.sessions.v2', newValue: JSON.stringify(few) });
+  }
+  await new Promise((r) => setTimeout(r, 60));
+  check('只有 2 个会话时，不出「显示全部」', more().hidden === true, String(more().hidden));
+  check('（顺便）2 个会话都画出来了', recentRows().length === 2, `${recentRows().length} 行`);
+}
+
+console.log('\n㉒ 搜索会话：按标题或正文找，找到之后列表切成平铺的结果');
+
+{
+  const searchBox = getEl('session-search');
+  const searchSection = getEl('group-search');
+  const results = () => getEl('search-list').children;
+  const resultIds = () => results().map((row) => row.dataset.id).join(',');
+  const metaOf = (id) => results().find((row) => row.dataset.id === id)?.querySelector('[data-field="meta"]')?.textContent ?? '';
+  const more = () => getEl('recent-more');
+  const type = (text) => {
+    searchBox.value = text;
+    dispatch(searchBox, 'input');
+  };
+
+  const MIN2 = 60 * 1000;
+  const now = Date.now();
+  const msg = (id, role, content, versions) => ({
+    id,
+    role,
+    content,
+    versions: (versions ?? [content]).map((text) => ({
+      content: text,
+      createdAt: 0,
+      attachments: [],
+      quote: null,
+      feedback: null,
+      ...(role === 'assistant' ? { status: 'done', model: 'gpt-4o' } : {}),
+    })),
+    versionCount: (versions ?? [content]).length,
+  });
+  const session = (id, title, messages, ago) => ({
+    id,
+    title,
+    createdAt: now - 10 * 24 * 60 * MIN2,
+    updatedAt: now - ago * MIN2,
+    messages,
+  });
+
+  const payload = {
+    // 当前会话故意选一个**搜不到**的、而且排在「最近」那一组的最后一个：
+    // 搜索结果里不该硬塞当前会话（它跟这段字没关系）
+    activeId: 'srch_h',
+    sessions: [
+      session('srch_pin', '置顶的旧笔记', [msg('srch_pin_u1', 'user', '这条一直钉在上面')], 60),
+      // 这一条的提问有两个版本：现在显示的是「什么是闭包」，
+      // 旧那一版里写着「旧版：什么叫闭包」—— 只在当前版里搜是搜不到后者的
+      session('srch_a', '闭包那点事', [
+        msg('srch_a_u1', 'user', '什么是闭包', ['旧版：什么叫闭包', '什么是闭包']),
+        msg('srch_a_a1', 'assistant', '闭包是函数和它的词法环境的组合'),
+      ], 1),
+      session('srch_b', 'React 性能优化', [
+        msg('srch_b_u1', 'user', 'useMemo 什么时候用'),
+        msg('srch_b_a1', 'assistant', '只在计算很贵的时候用'),
+      ], 2),
+      session('srch_c', '今天吃什么', [], 3),
+      session('srch_d', '周报模板', [msg('srch_d_u1', 'user', '本周做了三件事')], 4),
+      session('srch_e', '论文思路', [msg('srch_e_u1', 'user', '先写引言')], 5),
+      session('srch_f', '买菜清单', [msg('srch_f_u1', 'user', '西红柿 鸡蛋')], 6),
+      session('srch_g', '装修预算', [msg('srch_g_u1', 'user', '刷墙多少钱')], 7),
+      session('srch_h', '运动计划', [msg('srch_h_u1', 'user', '每周跑三次')], 8),
+    ],
+  };
+  payload.sessions[0].pinned = true;
+  storage.set('duitanlu.sessions.v2', JSON.stringify(payload));
+  const payloadBefore = storage.get('duitanlu.sessions.v2');
+  for (const h of windowHandlers.filter((x) => x.type === 'storage')) {
+    h.fn({ key: 'duitanlu.sessions.v2', newValue: JSON.stringify(payload) });
+  }
+  await new Promise((r) => setTimeout(r, 60));
+  // 上一段可能把「显示全部」点开过，这里先回到默认（同一个开关）
+  if (/^只看最近/.test(more()?.textContent ?? '')) dispatch(more(), 'click');
+  if (getEl('recent-list').hidden === true) dispatch(getEl('recent-toggle'), 'click');
+
+  check('没输入时：搜索结果区藏着，两组照旧',
+    searchSection.hidden === true && getEl('group-recent').hidden === false);
+  check('（准备）8 个会话时「显示全部」是露着的', more().hidden === false, String(more().hidden));
+
+  type('闭包');
+  check('输入之后：搜索结果区出现', searchSection.hidden === false, String(searchSection.hidden));
+  check('命中数写在标题右边', getEl('search-count').textContent === '1', getEl('search-count').textContent);
+  check('命中的就是那一条', resultIds() === 'srch_a', resultIds());
+  check('结果行里说明命中在哪儿（正文的一段）',
+    metaOf('srch_a').startsWith('匹配：') && metaOf('srch_a').includes('闭包'), metaOf('srch_a'));
+  check('搜索时原来的两组让位（平铺结果，不分组）',
+    getEl('group-recent').hidden === true && getEl('group-pinned').hidden === true);
+  check('搜索结果里不会硬塞当前会话（它跟这段字没关系）', !resultIds().includes('srch_h'), resultIds());
+  check('搜索时「显示全部」也收起来（这时候它没有意义）', more().hidden === true, String(more().hidden));
+
+  type('旧版');
+  check('编辑过的旧版本里的字也搜得到（不是只搜当前那一版）',
+    resultIds() === 'srch_a' && metaOf('srch_a').includes('旧版'), `${resultIds()} / ${metaOf('srch_a')}`);
+
+  type('react');
+  check('标题命中：大小写不敏感', resultIds() === 'srch_b', resultIds());
+  check('标题命中时行里照旧显示「时间 · 几轮 · 角色」（没有可摘的正文）',
+    metaOf('srch_b').includes('轮') && !metaOf('srch_b').startsWith('匹配：'), metaOf('srch_b'));
+
+  type('USEMEMO');
+  check('正文命中：大小写也不敏感',
+    resultIds() === 'srch_b' && metaOf('srch_b').toLowerCase().includes('usememo'),
+    `${resultIds()} / ${metaOf('srch_b')}`);
+
+  type('不存在的字');
+  check('搜不到时：命中数是 0', getEl('search-count').textContent === '0', getEl('search-count').textContent);
+  check('搜不到时给一句话，而不是一个空列表',
+    getEl('search-empty').hidden === false && getEl('search-list').children.length === 0);
+
+  dispatch(searchBox, 'keydown', { key: 'Escape' });
+  check('Esc 清空输入框', searchBox.value === '', searchBox.value);
+  check('清空之后：搜索结果区收起、两组回来',
+    searchSection.hidden === true && getEl('group-recent').hidden === false && getEl('group-pinned').hidden === false);
+  check('清空之后「显示全部」也回来了', more().hidden === false, String(more().hidden));
+  check('最近那一组又只画 7 行（8 个里画 6 + 当前）',
+    getEl('recent-list').children.length === 7, `${getEl('recent-list').children.length} 行`);
+  check('搜索一行数据都没改（落盘的 payload 一模一样）',
+    storage.get('duitanlu.sessions.v2') === payloadBefore);
+  check('所有会话都还在（9 个）', getEl('session-count').textContent === '9', getEl('session-count').textContent);
+
+  // 从搜索结果里直接切过去（这才是「找到它」之后要做的事）。
+  // 注意事件派在 #session-list 上：搜索区在它里面，真实浏览器里靠冒泡上来，替身没有冒泡。
+  type('买菜');
+  dispatch(getEl('session-list'), 'click', { target: results()[0] });
+  check('点搜索结果就切到那个会话', JSON.parse(storage.get('duitanlu.sessions.v2')).activeId === 'srch_f',
+    `activeId=${JSON.parse(storage.get('duitanlu.sessions.v2')).activeId} 命中=${resultIds()} 输入框=${searchBox.value}`);
+  check('切过去之后搜索框里的字还在（方便接着找下一个）', searchBox.value === '买菜', searchBox.value);
+  type('');
+  await new Promise((r) => setTimeout(r, 20));
 }
 
 console.log(`\n${'─'.repeat(52)}`);

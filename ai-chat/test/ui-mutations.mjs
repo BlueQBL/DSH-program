@@ -569,7 +569,12 @@ runner.run('列表重画时浮层不收（那一行可能已经不在了）', AP
 );
 
 runner.run('不给原生 title 兜底（触摸屏和屏幕阅读器就没有出口了）', APP, (src) =>
-  src.replace("  // 原生 title 是最底层兜底（屏幕阅读器、触摸屏、以及我们的浮层没跑起来的任何情况）\n  frag.querySelector('[data-field=\"name\"]').title = fullTitle;\n", ''),
+  // 靶点跟着 sessionRow 的写法挪过一次：它现在把字段写在 item 上（`name` 是那一个 span），
+  // 不再是 `frag.querySelector(...)` —— 替换没匹配上源码时 harness 会直接报「变异没生效」
+  src.replace(
+    "  // 原生 title 是最底层兜底（屏幕阅读器、触摸屏、以及我们的浮层没跑起来的任何情况）\n  name.title = fullTitle;\n",
+    '',
+  ),
 );
 
 // ---- 会话行尾的「⋯」菜单
@@ -727,6 +732,193 @@ runner.run('「多久了」算错档（把分钟当成小时）', APP, (src) =>
 
 runner.run('时间用创建时间而不是最后活动时间（刚发过消息的会话还显示「3 天前」）', APP, (src) =>
   src.replace("  if (age) age.textContent = formatAge(session.updatedAt);", "  if (age) age.textContent = formatAge(session.createdAt);"),
+);
+
+// ---- 正文的渲染窗口（只画最近 20 轮，更早的按需补）
+//
+// 这里每一条对应 ⑳ 里的一组断言。最要紧的是**分页不许渗进数据**：
+// 但只要窗口算错、编号算错、补历史不锚定，用户当场就能看出来，所以都各打掉一次。
+
+runner.run('正文一次画全部轮次（分页形同虚设，几百轮照样一次建完）', APP, (src) =>
+  src.replace(
+    '  const visible = hidden > 0 ? assistants.slice(hidden) : assistants;',
+    '  const visible = assistants;',
+  ),
+);
+
+runner.run('编号按窗口重新排（第 26 轮显示成第 1 轮）', APP, (src) =>
+  src.replace('    const { node } = buildTurnNode(message, hidden + index + 1);', '    const { node } = buildTurnNode(message, index + 1);'),
+);
+
+runner.run('不画「更早的 N 轮」（藏起来的历史没有入口）', APP, (src) =>
+  src.replace(
+    '  if (hidden > 0) {\n    const earlier = buildEarlierNode(hidden);\n    if (earlier) els.exchanges.appendChild(earlier);\n  }\n',
+    '',
+  ),
+);
+
+runner.run('点「更早的」没反应（画了个死按钮）', APP, (src) =>
+  src.replace("  if (action.dataset.action === 'earlier') {\n    expandTranscript();\n    return;\n  }\n", ''),
+);
+
+runner.run('点「更早的」不往前推进（永远停在 20 轮）', APP, (src) =>
+  src.replace('  transcriptWindow += TRANSCRIPT_PAGE;', '  transcriptWindow = TRANSCRIPT_PAGE;'),
+);
+
+runner.run('补历史之后不锚定（正在看的那一行被顶走）', APP, (src) =>
+  src.replace('  if (Number.isFinite(delta) && delta > 0) window.scrollBy?.(0, delta);\n', ''),
+);
+
+runner.run('滚到最上面也不自动补一段', APP, (src) =>
+  src.replace("window.addEventListener('scroll', maybeLoadEarlier, { passive: true });\n", ''),
+);
+
+runner.run('换会话不复位窗口（这个会话展开的，跑到别的会话上还算数）', APP, (src) =>
+  src.replace(
+    '  if (transcriptSessionId !== store.sessionId) {\n    transcriptSessionId = store.sessionId;\n    transcriptWindow = TRANSCRIPT_PAGE;\n  }\n',
+    '',
+  ),
+);
+
+runner.run('压缩界线落在窗口之上时标记干脆不画（凭空消失）', APP, (src) =>
+  src.replace(
+    '  if (boundary && hidden > 0 && !visible.includes(boundary)) {\n    const note = buildContextNote(summary);\n    if (note) els.exchanges.appendChild(note);\n  }\n',
+    '',
+  ),
+);
+
+// ---- 会话列表：「最近」这一组默认只显示几个
+//
+// 它是个**纯显示开关**，所以这里守的是三件事：默认确实只画几个、当前会话不许被藏掉、
+// 计数与总数说的是真话（数字不许跟着「画了几行」走）。
+
+runner.run('「最近」不裁（十几二十个会话照样一次全铺出来）', APP, (src) =>
+  src.replace(
+    '    const visible = name === \'recent\' && !recentShowAll ? trimRecentRows(rows, activeId) : rows;',
+    '    const visible = rows;',
+  ),
+);
+
+runner.run('连「置顶」那一组也裁（用户说重要的东西被藏了）', APP, (src) =>
+  src.replace(
+    "    const visible = name === 'recent' && !recentShowAll ? trimRecentRows(rows, activeId) : rows;",
+    "    const visible = name === 'pinned' && !recentShowAll ? trimRecentRows(rows, activeId) : rows;",
+  ),
+);
+
+runner.run('组标题上的条数跟着「画了几行」走（藏起来的那几个不算数了）', APP, (src) =>
+  src.replace(
+    '    group.count.textContent = String(rows.length);',
+    '    group.count.textContent = String(Math.min(rows.length, RECENT_VISIBLE));',
+  ),
+);
+
+runner.run('当前会话不在前几个时干脆不画（刷新之后像会话丢了）', APP, (src) =>
+  src.replace('  return current ? [...head, current] : head;', '  return head;'),
+);
+
+runner.run('点「显示全部」没反应', APP, (src) =>
+  src.replace(
+    "els.groupRecent?.more?.addEventListener('click', () => {\n  recentShowAll = !recentShowAll;\n  writeGroupPreference();\n  renderSessionList();\n});\n",
+    '',
+  ),
+);
+
+runner.run('展开状态不记住（刷新又回到 6 个）', APP, (src) =>
+  src.replace(
+    'localStorage.setItem(RAIL_GROUPS_KEY, JSON.stringify({ ...groupCollapsed, recentAll: recentShowAll }));',
+    'localStorage.setItem(RAIL_GROUPS_KEY, JSON.stringify(groupCollapsed));',
+  ),
+);
+
+runner.run('「最近」整组收起来时，这个按钮还留在下面', APP, (src) =>
+  src.replace(
+    "  // 搜索时列表是平铺的结果，这个按钮同样没有存在的理由\n  button.hidden = searchQuery !== '' || groupCollapsed.recent === true;",
+    '  button.hidden = false;',
+  ),
+);
+
+runner.run('展开那一组之后按钮不回来（收起再展开就再也点不到了）', APP, (src) =>
+  src.replace(
+    '  // 「显示全部」那个按钮跟着这一组的收起状态走（收起时藏、展开时按有没有藏东西放回来）\n  paintRecentMore();\n',
+    '',
+  ),
+);
+
+runner.run('会话本来就不多时也摆一个「显示全部」（没东西可显示）', APP, (src) =>
+  src.replace(
+    '  if (total <= RECENT_VISIBLE) {\n    button.hidden = true;\n    return;\n  }\n',
+    '',
+  ),
+);
+
+// ---- 搜索会话（标题 + 正文，全局匹配）
+//
+// 搜索最容易出的两类问题是：**漏**（正文里明明有却搜不到、旧版本搜不到）和
+// **多**（把不相干的会话也塞进来、或者搜索时硬塞当前会话）。两条都各打掉一次。
+
+runner.run('搜索只看标题（正文里写过的字搜不到）', APP, (src) =>
+  src.replace(
+    "      String(session.title ?? '').toLowerCase().includes(needle)\n      || session.messages.some((message) => messageTexts(message).some((text) => text.includes(needle))),\n",
+    "      String(session.title ?? '').toLowerCase().includes(needle),\n",
+  ),
+);
+
+runner.run('只搜当前那一版（编辑过的旧版本里的字搜不到）', APP, (src) =>
+  src.replace(
+    'return [message.content, ...(message.versions ?? []).map((v) => v?.content)].map((text) =>',
+    'return [message.content].map((text) =>',
+  ),
+);
+
+runner.run('标题匹配区分大小写（输入 react 搜不到「React」）', APP, (src) =>
+  src.replace(
+    "      String(session.title ?? '').toLowerCase().includes(needle)",
+    "      String(session.title ?? '').includes(needle)",
+  ),
+);
+
+runner.run('打字没反应（输入框不接事件）', APP, (src) =>
+  src.replace(
+    "els.searchInput?.addEventListener('input', () => {\n  searchQuery = els.searchInput.value ?? '';\n  renderSessionList();\n});\n",
+    '',
+  ),
+);
+
+runner.run('Esc 不清空输入框', APP, (src) =>
+  src.replace(
+    "els.searchInput?.addEventListener('keydown', (event) => {\n  if (event.key !== 'Escape') return;\n  els.searchInput.value = '';\n  searchQuery = '';\n  renderSessionList();\n});\n",
+    '',
+  ),
+);
+
+runner.run('搜索结果区赖着不走（清空了还占着位置）', APP, (src) =>
+  src.replace('  box.section.hidden = hits === null;', '  box.section.hidden = false;'),
+);
+
+runner.run('搜索时两组不让位（结果下面还堆着原来的分组）', APP, (src) =>
+  src.replace(
+    '    group.section.hidden = hits !== null || rows.length === 0;',
+    '    group.section.hidden = rows.length === 0;',
+  ),
+);
+
+runner.run('搜索结果里硬塞当前会话（它跟这段字没关系）', APP, (src) =>
+  src.replace(
+    '  box.list.replaceChildren(...hits.map((session) => sessionRow(session, activeId)));',
+    '  box.list.replaceChildren(...[...hits, store.session].filter(Boolean).map((session) => sessionRow(session, activeId)));',
+  ),
+);
+
+runner.run('一个都没搜到时给个空列表，不说一句话', APP, (src) =>
+  src.replace('  if (box.empty) box.empty.hidden = hits.length > 0;', '  if (box.empty) box.empty.hidden = true;'),
+);
+
+runner.run('搜索时「显示全部」还露着（这时候它没有意义）', APP, (src) =>
+  src.replace(
+    "  button.hidden = searchQuery !== '' || groupCollapsed.recent === true;",
+    '  button.hidden = groupCollapsed.recent === true;',
+  ),
 );
 
 runner.finish();

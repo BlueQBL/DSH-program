@@ -116,6 +116,16 @@ const els = {
     list: document.getElementById('recent-list'),
     count: document.getElementById('recent-count'),
     toggle: document.getElementById('recent-toggle'),
+    // 「显示全部 / 只看最近几个」那个开关（纯显示，见 RECENT_VISIBLE）
+    more: document.getElementById('recent-more'),
+  },
+  // 搜索：输入框 + 平铺的「搜索结果」区（有内容时两组让位）
+  searchInput: document.getElementById('session-search'),
+  groupSearch: {
+    section: document.getElementById('group-search'),
+    list: document.getElementById('search-list'),
+    count: document.getElementById('search-count'),
+    empty: document.getElementById('search-empty'),
   },
   newSession: document.getElementById('new-session-button'),
   // 列表收起（或窄屏）时，报头上的备用入口
@@ -619,9 +629,50 @@ function readGroupPreference() {
 
 let groupCollapsed = readGroupPreference();
 
+/**
+ * 「最近」这一组默认画几个。
+ *
+ * 会话多了之后，这一组会把整栏撑得很长：真正要用的通常就是最近那几个，而老会话
+ * 是「想起来才去找」的东西 —— 那件事交给搜索框（见 railSearch）。
+ *
+ * 这是**纯显示开关**：数据一直全在内存里，「显示全部」只是多画几行。
+ * 不做「滚到底再加载」，是因为那会引入加载状态、滚动位置、以及「分组标题上的条数
+ * 到底算画出来的还是算全部的」这类问题 —— 而收益（20 行 DOM）本来就不值这些。
+ */
+const RECENT_VISIBLE = 6;
+
+/** 用户是不是点了「显示全部」（跟分组收起状态存在同一处，刷新后还在） */
+function readRecentShowAll() {
+  try {
+    return JSON.parse(localStorage.getItem(RAIL_GROUPS_KEY) ?? '{}')?.recentAll === true;
+  } catch {
+    return false;
+  }
+}
+
+let recentShowAll = readRecentShowAll();
+
+/**
+ * 「最近」这一组上一次画了多少行 / 一共几行。
+ *
+ * 存成模块状态，是因为「显示全部」那个按钮的显隐要在**两个时机**都算一遍：
+ * 列表重画时（renderSessionList）和这一组被收起/展开时（paintRailGroups）。
+ * 收起时它得跟着藏，展开时要按「有没有藏东西」放回来 —— 只在重画时算，
+ * 收起再展开之后它就不会回来了。
+ */
+let recentMoreState = { total: 0, shown: 0 };
+
+/**
+ * 搜索框里现在有哪几个字（不持久化：刷新回来是干净的列表）。
+ *
+ * 一有内容，列表就切成平铺的「搜索结果」——分组收起状态和「最近只显示 6 个」都让位，
+ * 但**一处都没被改**：清空输入框，原来的样子原封不动回来。
+ */
+let searchQuery = '';
+
 function writeGroupPreference() {
   try {
-    localStorage.setItem(RAIL_GROUPS_KEY, JSON.stringify(groupCollapsed));
+    localStorage.setItem(RAIL_GROUPS_KEY, JSON.stringify({ ...groupCollapsed, recentAll: recentShowAll }));
   } catch {
     /* 存不下就只在这次会话里生效 */
   }
@@ -638,6 +689,8 @@ function paintRailGroups() {
     // 样式靠它翻箭头（收起来时箭头指向右边）
     group.section.dataset.collapsed = collapsed ? 'true' : 'false';
   }
+  // 「显示全部」那个按钮跟着这一组的收起状态走（收起时藏、展开时按有没有藏东西放回来）
+  paintRecentMore();
 }
 
 function setGroupCollapsed(name, collapsed) {
@@ -655,35 +708,173 @@ for (const name of RAIL_GROUPS) {
   RAIL_GROUP_ELS[name]?.toggle?.addEventListener('click', () => toggleRailGroup(name));
 }
 
+// 「显示全部 / 只看最近几个」：只翻一个开关然后重画列表 —— 数据层一点没动
+els.groupRecent?.more?.addEventListener('click', () => {
+  recentShowAll = !recentShowAll;
+  writeGroupPreference();
+  renderSessionList();
+});
+
+// 搜索：输入即筛。会话最多 50 个（store 的上限），用不着防抖；
+// Esc 清空是给键盘用户的出口（不然只能一个个字删掉）。
+els.searchInput?.addEventListener('input', () => {
+  searchQuery = els.searchInput.value ?? '';
+  renderSessionList();
+});
+els.searchInput?.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  els.searchInput.value = '';
+  searchQuery = '';
+  renderSessionList();
+});
+
 /**
  * 一条会话行（两组共用）。
  * 置顶的那条，按钮改成「取消置顶」；分支会话在行首带一个小箭头（样式给的）。
+ *
+ * 字段都写在 `item`（那个 `.session-item`）上、也返回 `item`，不再返回整片模板：
+ * 模板里只有这一个 li，两者在真实浏览器里等价；而「谁被写进去了」保持一处，
+ * 别的代码（和测试）拿着这一行就能读到它的 id / 名字 / 记住的东西。
  */
 function sessionRow(session, activeId) {
   const frag = els.sessionTemplate.content.cloneNode(true);
   const item = frag.querySelector('.session-item');
+  // 这一行的身份在这里写全（class + dataset）：模板只管里面的结构，
+  // 于是「哪一行是哪一条会话」只有一处说法，点它、读它都认这一份。
+  item.className = 'session-item';
   item.dataset.id = session.id;
   item.dataset.active = String(session.id === activeId);
   item.dataset.pinned = String(session.pinned === true);
   item.dataset.branch = String(Boolean(session.branchOf));
 
   const fullTitle = session.title || '新对话';
-  frag.querySelector('[data-field="name"]').textContent = fullTitle;
+  const name = item.querySelector('[data-field="name"]');
+  name.textContent = fullTitle;
   // 原生 title 是最底层兜底（屏幕阅读器、触摸屏、以及我们的浮层没跑起来的任何情况）
-  frag.querySelector('[data-field="name"]').title = fullTitle;
+  name.title = fullTitle;
   const turns = session.messages.filter((m) => m.role === 'user').length;
   item.dataset.turns = String(turns);
-  frag.querySelector('[data-field="meta"]').textContent =
-    `${formatClock(session.updatedAt)} · ${turns} 轮 · ${personaLabel(session.personaId)}`;
+  const meta = item.querySelector('[data-field="meta"]');
+  // 搜索时这一行要回答「它为什么被搜出来」：正文命中的话把那一段摆出来
+  const excerpt = searchQuery ? searchExcerpt(session, searchQuery) : '';
+  meta.textContent = excerpt
+    ? `匹配：${excerpt}`
+    : `${formatClock(session.updatedAt)} · ${turns} 轮 · ${personaLabel(session.personaId)}`;
   // 行尾那个「多久了」：平时显示它，鼠标停在行上时换成「⋯」（见 styles.css 的 .session-slot）
-  const age = frag.querySelector('[data-field="age"]');
+  const age = item.querySelector('[data-field="age"]');
   if (age) age.textContent = formatAge(session.updatedAt);
 
-  const pin = frag.querySelector('[data-action="pin"]');
+  const pin = item.querySelector('[data-action="pin"]');
   const pinned = session.pinned === true;
   pin.textContent = pinned ? '取消置顶' : '置顶';
   pin.title = pinned ? '取消置顶，回到「最近」' : '置顶（钉在列表最上面）';
-  return frag;
+  return item;
+}
+
+/**
+ * 「最近」组的显示裁剪。
+ *
+ * 规则只有一条，但它很要紧：**当前会话必须在列**。否则刷新之后（active 可能是个很老的
+ * 会话）你会看到自己正待着的那个会话不在左栏里 —— 像丢了。它在 6 条之外时补在末尾。
+ *
+ * 注意这里只决定**画哪几行**：会话总数、分组条数一律照真实值写。
+ */
+function trimRecentRows(rows, activeId) {
+  const head = rows.slice(0, RECENT_VISIBLE);
+  if (head.some((session) => session.id === activeId)) return head;
+  const current = rows.find((session) => session.id === activeId);
+  return current ? [...head, current] : head;
+}
+
+/**
+ * 「显示全部（还藏着 N 个）」/「只看最近 N 个」那一个按钮。
+ *
+ * 纯显示开关：数据一直全在内存里，展开只是多画几行 —— 没有加载状态，
+ * 也不存在「滚到底才加载」那套副作用。展开时按钮改口成收回，
+ * 免得它变成一个只能展开、没法还原的死胡同。
+ */
+function paintRecentMore() {
+  const button = els.groupRecent?.more;
+  if (!button) return;
+  const { total, shown } = recentMoreState;
+  const hidden = Math.max(0, total - shown);
+  button.dataset.hiddenCount = String(hidden);
+  // 没东西可藏（会话本来就不多）：这个按钮没有存在的理由 —— 展开着也一样
+  if (total <= RECENT_VISIBLE) {
+    button.hidden = true;
+    return;
+  }
+  // 搜索时列表是平铺的结果，这个按钮同样没有存在的理由
+  button.hidden = searchQuery !== '' || groupCollapsed.recent === true;
+  button.textContent = recentShowAll ? `只看最近 ${RECENT_VISIBLE} 个` : `显示全部（还藏着 ${hidden} 个）`;
+  button.title = recentShowAll
+    ? '把「最近」收回到默认的几个（一个会话都没删）'
+    : `「最近」还有 ${hidden} 个会话没显示出来`;
+}
+
+/**
+ * 按一段字找会话：**标题或正文**命中都算。
+ *
+ * 正文要连**每一版**一起看（编辑过的提问、重新生成的回答都躺在 `versions` 里）——
+ * 只看当前显示的那一版，就会出现「我明明写过这句话」却搜不到的情况。
+ * 大小写不敏感：中文没有大小写，但中英混排太常见了。
+ *
+ * 返回值有个讲究：`null` 表示「没在搜索」，`[]` 表示「搜了，但一个都没命中」——
+ * 这两件事在界面上长得完全不一样。
+ */
+function searchSessions(sessions, query) {
+  const needle = String(query ?? '').trim().toLowerCase();
+  if (!needle) return null;
+  return sessions.filter(
+    (session) =>
+      String(session.title ?? '').toLowerCase().includes(needle)
+      || session.messages.some((message) => messageTexts(message).some((text) => text.includes(needle))),
+  );
+}
+
+/** 一条消息的所有文字（当前这一版 + 每一版）都转成小写，供搜索比对 */
+function messageTexts(message) {
+  return [message.content, ...(message.versions ?? []).map((v) => v?.content)].map((text) =>
+    String(text ?? '').toLowerCase());
+}
+
+/**
+ * 命中的那一小段上下文，摆到结果行里当说明（不然「正文命中」看不出命中在哪儿）。
+ * 标题命中时返回空串 —— 那就照旧显示「时间 · 几轮 · 角色」。
+ */
+function searchExcerpt(session, query) {
+  const needle = String(query ?? '').trim().toLowerCase();
+  if (!needle) return '';
+  for (const message of session.messages) {
+    for (const text of [message.content, ...(message.versions ?? []).map((v) => v?.content)]) {
+      const body = String(text ?? '');
+      const at = body.toLowerCase().indexOf(needle);
+      if (at < 0) continue;
+      const from = Math.max(0, at - 8);
+      const snippet = body.slice(from, from + 30).replace(/\s+/g, ' ').trim();
+      return `${from > 0 ? '…' : ''}${snippet}${from + 30 < body.length ? '…' : ''}`;
+    }
+  }
+  return '';
+}
+
+/**
+ * 画「搜索结果」那一块。
+ * 没在搜索时整块藏起来（`hits === null`），两组照旧；在搜索时空结果是**一句话**，
+ * 不是一个空列表 —— 空列表看起来像坏了。
+ */
+function paintSearchResults(hits, activeId) {
+  const box = els.groupSearch;
+  if (!box?.section) return;
+  box.section.hidden = hits === null;
+  if (hits === null) {
+    box.list.replaceChildren();
+    if (box.empty) box.empty.hidden = true;
+    return;
+  }
+  box.count.textContent = String(hits.length);
+  box.list.replaceChildren(...hits.map((session) => sessionRow(session, activeId)));
+  if (box.empty) box.empty.hidden = hits.length > 0;
 }
 
 function renderSessionList() {
@@ -695,17 +886,28 @@ function renderSessionList() {
   els.sessionCount.textContent = String(sessions.length);
 
   const groups = groupSessions(sessions);
+  // null = 没在搜索；有内容时才切成平铺的「搜索结果」
+  const hits = searchSessions(sessions, searchQuery);
+  let recentShown = 0;
   for (const name of RAIL_GROUPS) {
     const group = RAIL_GROUP_ELS[name];
     if (!group?.list) continue;
     const rows = groups[name];
     // 空的那一组整块藏起来：没有置顶的会话时，不该摆一个空的「置顶」标题在那儿
-    group.section.hidden = rows.length === 0;
+    // （搜索时两组一起让位：这时候你要的是「找到它」，不是按最近使用一页页翻）
+    group.section.hidden = hits !== null || rows.length === 0;
+    // 条数徽标写的是**这一组真实有几条**，跟画出来几行无关（藏起来的那几个也算）
     group.count.textContent = String(rows.length);
-    group.list.replaceChildren(...rows.map((session) => sessionRow(session, activeId)));
+    // 「最近」默认只画前几个；「置顶」不裁 —— 置顶是用户明确说过重要的东西
+    const visible = name === 'recent' && !recentShowAll ? trimRecentRows(rows, activeId) : rows;
+    if (name === 'recent') recentShown = visible.length;
+    group.list.replaceChildren(...visible.map((session) => sessionRow(session, activeId)));
   }
 
   paintRailGroups();
+  recentMoreState = { total: (groups.recent ?? []).length, shown: recentShown };
+  paintRecentMore();
+  paintSearchResults(hits, activeId);
 
   // 只有一个会话时不允许删，按钮就别装作能点
   const deletable = sessions.length > 1;
@@ -1250,7 +1452,11 @@ function buildTurnNode(message, number) {
   const node = frag.querySelector('.exchange');
   node.dataset.id = message.id;
 
-  frag.querySelector('[data-field="number"]').textContent = String(number).padStart(2, '0');
+  // 编号写两份：正文里那份给人看，dataset 那份给「按编号找节点」的逻辑（测试也读它）。
+  // 都从 node 上取 —— 真实 DOM 里和从 frag 上取等价，但替身不解析 HTML，
+  // 只有挂在同一个元素上的查询才会回同一个占位节点。
+  node.dataset.turn = String(number);
+  node.querySelector('[data-field="number"]').textContent = String(number).padStart(2, '0');
 
   node.__assistant = frag.querySelector('[data-field="answer-turn"]');
   node.__answerBody = frag.querySelector('[data-field="answer"]');
@@ -1960,9 +2166,88 @@ els.referenceDrop?.addEventListener('click', () => {
   flashHint('已移除背景材料 —— 之后不再带上它，已经答过的轮次一个字没变', 4200);
 });
 
+// ---------------------------------------------------------------- 正文的渲染窗口
+//
+// 一条会话可以聊到几百轮，而 render() 是**全量重画**：给每条回答建一个完整节点
+// （评价、编辑、版本条、引用、页码都在里面），然后 replaceChildren() 一把换掉。
+// 会话越长，问题不只是「打开慢一下」，而是**每一次交互都慢** ——
+// 点个 👍、翻一页版本、切一次会话，那几百个节点都要重新建一遍。
+//
+// 所以正文只画最近 TRANSCRIPT_PAGE 轮，顶上留一个「更早的 N 轮」，
+// 另外滚到最上面也会自动往前补一段。
+//
+// 三条纪律（第一条最要紧）：
+//   · **只有 DOM 分层，数据一条都不许少**：请求历史、导出、压缩摘要、引用「原文」档、
+//     分支复制全都读 store.messages 的**全部**内容，跟画出来多少轮无关。
+//     分页只决定「画哪些」，绝不参与「有什么」。
+//   · 轮次编号用**全局序号**：第 41 轮就是第 41 轮，不因为窗口从哪儿开始而改口 ——
+//     引用面板里勾的、导出里写的都是这个号。
+//   · 展开状态**不持久化**：刷新、切走再回来都是最近 20 轮。少一份要跟会话对齐的状态，
+//     行为也可预期（换会话时窗口复位）。
+const TRANSCRIPT_PAGE = 20;
+
+/** 当前画最近多少轮（不持久化，见上） */
+let transcriptWindow = TRANSCRIPT_PAGE;
+/** 这个窗口是给哪个会话算的：会话一换就复位 */
+let transcriptSessionId = null;
+/** 离页面顶部多近就算「滚到顶了」，自动往前补一段 */
+const EARLIER_AT_TOP = 80;
+
+/** 上面还有多少轮没画出来 */
+function hiddenTurnCount() {
+  const turns = store.messages.reduce((n, m) => n + (m.role === 'assistant' ? 1 : 0), 0);
+  return Math.max(0, turns - transcriptWindow);
+}
+
+/** 「更早的 N 轮」那一行；没有更早的返回 null */
+function buildEarlierNode(hidden) {
+  const step = Math.min(TRANSCRIPT_PAGE, hidden);
+  const row = document.createElement('li');
+  row.className = 'exchange-earlier';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'ghost-button earlier-button';
+  button.dataset.action = 'earlier';
+  button.textContent = `更早的 ${step} 轮`;
+  button.title = `上面还有 ${hidden} 轮没画出来，一次往前补 ${TRANSCRIPT_PAGE} 轮`;
+  row.appendChild(button);
+  return row;
+}
+
+/**
+ * 往前补一段历史。
+ *
+ * **必须把视口锚住**：往上插内容会把正在看的那一行顶下去。补完按「文档变高了多少」
+ * 把视口往下挪同样多 —— 屏幕上的东西一动不动，这才是「凭空多出一段历史」该有的样子。
+ * （替身 DOM 没有 scrollBy，所以用可选调用；量不到高度就当没这回事。）
+ */
+function expandTranscript() {
+  const before = document.documentElement?.scrollHeight ?? 0;
+  transcriptWindow += TRANSCRIPT_PAGE;
+  render();
+  const delta = (document.documentElement?.scrollHeight ?? 0) - before;
+  if (Number.isFinite(delta) && delta > 0) window.scrollBy?.(0, delta);
+}
+
+/** 滚到最上面就自动往前补一段（上面确实还有没画出来的轮次时） */
+function maybeLoadEarlier() {
+  if (hiddenTurnCount() <= 0) return;
+  const y = Number(window.scrollY ?? 0);
+  if (y > EARLIER_AT_TOP) return;
+  expandTranscript();
+}
+
+window.addEventListener('scroll', maybeLoadEarlier, { passive: true });
+
 function render({ keepLive = false } = {}) {
   const assistants = store.messages.filter((m) => m.role === 'assistant');
   const isBlank = store.messages.length === 0;
+
+  // 换会话就把窗口复位（展开状态不持久化，见上面第三条纪律）
+  if (transcriptSessionId !== store.sessionId) {
+    transcriptSessionId = store.sessionId;
+    transcriptWindow = TRANSCRIPT_PAGE;
+  }
 
   els.blank.hidden = !isBlank;
   els.clear.disabled = isBlank;
@@ -1979,8 +2264,28 @@ function render({ keepLive = false } = {}) {
   const summary = store.session.summary;
   const covered = summary ? Math.min(summary.covers, store.messages.length) : 0;
 
-  assistants.forEach((message, index) => {
-    const { node } = buildTurnNode(message, index + 1);
+  // 只画最近这些轮；hidden 是窗口之上还有多少轮没画（编号仍按全局序号算）
+  const hidden = Math.max(0, assistants.length - transcriptWindow);
+  const visible = hidden > 0 ? assistants.slice(hidden) : assistants;
+  const boundary = covered > 0 ? store.messages[covered - 1] : null;
+
+  // 1) 窗口顶上那条「更早的 N 轮」
+  if (hidden > 0) {
+    const earlier = buildEarlierNode(hidden);
+    if (earlier) els.exchanges.appendChild(earlier);
+  }
+
+  // 2) 压缩界线落在窗口**之上**时，标记挂在窗口顶部：
+  //    上面确实都只有摘要了，这个位置说的还是实话。
+  //    （界线那一轮画得出来时，标记照旧插在它后面，见下面。）
+  if (boundary && hidden > 0 && !visible.includes(boundary)) {
+    const note = buildContextNote(summary);
+    if (note) els.exchanges.appendChild(note);
+  }
+
+  visible.forEach((message, index) => {
+    // 编号 = 全局第几轮（不是「窗口里第几条」）
+    const { node } = buildTurnNode(message, hidden + index + 1);
     els.exchanges.appendChild(node);
     paintTurn(node);
 
@@ -3197,6 +3502,13 @@ els.exchanges.addEventListener('click', (event) => {
 
   const action = event.target.closest('[data-action]');
   if (!action) return;
+
+  // 「更早的 N 轮」和压缩标记一样，不在任何一条 .exchange 里（它是窗口顶上独立一行），
+  // 所以也要赶在下面那句「找不到对应消息就 return」之前处理
+  if (action.dataset.action === 'earlier') {
+    expandTranscript();
+    return;
+  }
 
   // 压缩标记上的动作先处理：它不在任何一条 .exchange 里（它是插在中间的独立一行），
   // 所以不能等到下面那句「找不到对应消息就 return」之后

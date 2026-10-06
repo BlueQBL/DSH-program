@@ -356,6 +356,67 @@ body[data-resizing="true"] {
   padding: 0;
 }
 
+/* 搜索框：会话多了之后，这才是「找到某个老会话」的正路（不是往下滚） */
+.rail-search {
+  padding: 0 0 8px;
+}
+
+.rail-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--paper-lift);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  transition: border-color 0.15s ease;
+}
+
+.rail-search-input::placeholder {
+  color: color-mix(in srgb, var(--ink) 42%, transparent);
+}
+
+.rail-search-input:focus {
+  outline: none;
+  border-color: var(--ink);
+}
+
+/* 搜了但一个都没命中：给一句话，别给一个空列表 */
+.rail-search-empty {
+  margin: 6px 2px 0;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--ink) 55%, transparent);
+}
+
+/*
+ * 「显示全部（还藏着 N 个）」/「只看最近 N 个」。
+ * 它是纯显示开关（见 app.js 的 RECENT_VISIBLE），所以长得像个「还有更多」的条目，
+ * 而不是一个实心按钮 —— 它不改变任何状态，只是多画几行。
+ */
+.rail-group-more {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  border: 1px dashed var(--rule-strong);
+  border-radius: var(--radius);
+  background: transparent;
+  color: color-mix(in srgb, var(--ink) 62%, transparent);
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.rail-group-more:hover {
+  background: var(--wash);
+  border-color: var(--ink);
+  color: var(--ink);
+}
+
 .session-item {
   position: relative;
   display: flex;
@@ -1380,6 +1441,24 @@ body[data-resizing="true"] {
 .exchange:last-child::before {
   bottom: auto;
   height: calc(100% - 30px);
+}
+
+/*
+ * 正文窗口顶上那条「更早的 N 轮」。
+ * 和 .exchange 用同一套栅格（页边栏 / 正文栏），所以它落在正文栏里、
+ * 看起来是正文的一部分，而不是浮在整页中间的一个按钮。
+ * （正文只画最近 20 轮，见 app.js 里的 TRANSCRIPT_PAGE。）
+ */
+.exchange-earlier {
+  display: grid;
+  grid-template-columns: var(--margin-col) var(--text-col) 1fr;
+  column-gap: var(--gap-col);
+  padding: 0 0 26px;
+}
+
+.exchange-earlier .earlier-button {
+  grid-column: 2;
+  justify-self: start;
 }
 
 .gutter {

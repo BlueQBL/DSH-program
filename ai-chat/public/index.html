@@ -99,6 +99,21 @@
               title="把另一个会话的内容当背景材料，带进一个新话题"
             >引用会话</button>
           </div>
+          <!--
+            搜索：按**标题或正文**找会话。
+            一有内容，列表就切成平铺的「搜索结果」区 —— 分组和「最近只显示 6 个」都让位：
+            这时候你要的是「把它找出来」，不是「按最近使用一页页翻」。清空就恢复原样。
+          -->
+          <div class="rail-search">
+            <input
+              type="search"
+              id="session-search"
+              class="rail-search-input"
+              placeholder="搜索会话（标题或正文）"
+              aria-label="搜索会话（按标题或正文）"
+              autocomplete="off"
+            />
+          </div>
           <div class="rail-head">
             <span class="rail-title">会话</span>
             <span class="rail-count" id="session-count"></span>
@@ -149,6 +164,27 @@
                 </button>
               </div>
               <ol class="rail-group-list" id="recent-list"></ol>
+              <!--
+                「显示全部（还藏着 N 个）」：会话一多，「最近」这一组会把整栏撑得很长。
+                默认只画前几个，剩下的收在这一个按钮后面。
+
+                它是**纯显示开关**，不是「滚到底再加载」：数据一直全在内存里，
+                展开只是多画几行 —— 所以没有加载状态、也不影响分组标题上的条数。
+              -->
+              <button type="button" class="rail-group-more" id="recent-more" hidden></button>
+            </section>
+
+            <!--
+              搜索结果：平铺一层，不分组、不裁。
+              「没有匹配」时留一句话，而不是给一个空列表（空列表看起来像坏了）。
+            -->
+            <section class="rail-group" id="group-search" data-group="search" hidden>
+              <div class="rail-group-head">
+                <span class="rail-group-title">搜索结果</span>
+                <span class="rail-group-count" id="search-count"></span>
+              </div>
+              <ol class="rail-group-list" id="search-list"></ol>
+              <p class="rail-search-empty" id="search-empty" hidden>没有匹配的会话</p>
             </section>
           </div>
           <div class="rail-foot">
