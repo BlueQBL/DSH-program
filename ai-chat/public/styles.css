@@ -144,8 +144,21 @@ body::before {
 .page {
   position: relative;
   z-index: 1;
-  /* 会话栏 + 正文栏：会话栏是固定宽度，正文仍然保持原来的阅读宽度 */
-  width: min(100%, calc(292px + var(--margin-col) + var(--gap-col) + var(--text-col) + 64px));
+  /*
+   * 版心宽 = 会话栏 + 缝 + 页边栏 + 缝 + 正文栏 + 缝 + 两侧内边距。
+   *
+   * 会话栏那一项**必须**用 `var(--rail-w)`：以前这里写死 292px，于是「拖宽会话栏」等于
+   * 直接从正文身上割肉 —— 页宽不跟着涨，正文的固定轨道放不下就横向溢出到版心外面去
+   * （看起来就是「正文甩到报头那块区域外面」）。现在拖宽会话栏 = 整页跟着变宽，
+   * 视口不够时页面停在 100%，正文再按下面的 minmax 收窄换行。
+   */
+  width: min(
+    100%,
+    calc(
+      var(--rail-w, 292px) + 28px + var(--margin-col) + var(--gap-col) + var(--text-col) + var(--gap-col) +
+        48px
+    )
+  );
   margin: 0 auto;
   padding: 40px 24px 24px;
   display: flex;
@@ -1421,7 +1434,15 @@ body[data-resizing="true"] {
 
 .exchange {
   display: grid;
-  grid-template-columns: var(--margin-col) var(--text-col) 1fr;
+  /*
+   * 正文栏是「**有上限、可收窄**」的，不是固定宽度：
+   *   · 宽裕时它就是 var(--text-col)（760px 的阅读版心，一行 30 来个汉字）；
+   *   · 装不下时（会话栏拖宽、窗口变窄）按可用宽度收窄、文字换行 —— **绝不横向溢出**。
+   * 以前写成固定的 `var(--text-col)` 轨道 + 右边一个 1fr，容器一窄那两条轨道都不会缩，
+   * 内容就挤出容器、跑到版心外面（用户看到的是「正文甩出报头那块区域」）。
+   * 三轨都留着：第一道放「页边序号」，第二道是正文，第三道 1fr 是右侧留白。
+   */
+  grid-template-columns: var(--margin-col) minmax(0, var(--text-col)) 1fr;
   column-gap: var(--gap-col);
   position: relative;
   padding-bottom: 30px;
@@ -1451,7 +1472,8 @@ body[data-resizing="true"] {
  */
 .exchange-earlier {
   display: grid;
-  grid-template-columns: var(--margin-col) var(--text-col) 1fr;
+  /* 和 .exchange 同一套栅格（同样「有上限、可收窄」，见那里的说明） */
+  grid-template-columns: var(--margin-col) minmax(0, var(--text-col)) 1fr;
   column-gap: var(--gap-col);
   padding: 0 0 26px;
 }
@@ -1793,6 +1815,8 @@ body[data-resizing="true"] {
 
 .turn-body {
   min-width: 0;
+  /* 断不开的长串（URL、一长串英文/代码）按字符换行，别把版心撑破 */
+  overflow-wrap: break-word;
 }
 
 /* ------------------------------------------------------------ 引用回答
@@ -2318,6 +2342,22 @@ body[data-resizing="true"] {
   background: linear-gradient(to bottom, transparent, var(--paper) 22%);
 }
 
+/*
+ * 输入区的内容和正文**共用同一条版心**：左边对齐正文栏、宽度不超过正文栏。
+ *
+ * 主流那几家都是这么做的（ChatGPT / Claude 的输入框和消息流同宽、同一条中线），
+ * 理由很实在：输入框比正文宽一大截时，读的人和写的人眼睛要在两个宽度之间来回换。
+ * 我们之前只在正文上规定了版心，输入区没有 —— 于是收起会话栏之后输入框横着拉出去
+ * 比正文宽 300 多像素（用户原话：「输入框超过正文很多部分」）。
+ *
+ * 注意：偏移加在**子元素**上，不给 .composer 本身设宽度 —— 它是贴底的那层渐变背景，
+ * 得铺满整栏，否则正文会从左边那条缝里透出来。
+ */
+.composer > * {
+  margin-left: calc(var(--margin-col) + var(--gap-col));
+  max-width: var(--text-col);
+}
+
 .composer textarea {
   display: block;
   width: 100%;
@@ -2350,6 +2390,9 @@ body[data-resizing="true"] {
   display: flex;
   align-items: center;
   gap: 10px;
+  /* 这一行的按钮不少（加图片 / 语音 / 停止 / 压缩 / 清空 / 导出 + 一句提示）：
+     版心收窄时让它换行，别横向挤出去 */
+  flex-wrap: wrap;
   padding-top: 9px;
 }
 

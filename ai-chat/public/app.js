@@ -247,8 +247,15 @@ const RAIL_WIDTH_KEY = 'duitanlu.railWidth.v1';
 const RAIL_WIDTH_DEFAULT = 292;
 const RAIL_WIDTH_MIN = 200;
 const RAIL_WIDTH_MAX = 460;
-/** 正文（1fr 那一栏）至少留这么宽，否则拖宽会话栏会把对话挤成一条 */
-const RAIL_TRANSCRIPT_MIN = 320;
+/**
+ * 正文那一栏至少留这么宽，否则拖宽会话栏时最多只能拖到这儿。
+ *
+ * 320px 太小了：正文的阅读版心是 760px（styles.css 的 `--text-col`），
+ * 压到 320px 时一行只剩十来个汉字，读起来已经不是「正文」了。
+ * 主流那几家（ChatGPT / Claude）干脆不给拖 —— 视口不够就收侧栏，而不是把正文压窄；
+ * 我们保留拖拽（这是本项目的便利），但下限按**能读**来定：640px。
+ */
+const RAIL_TRANSCRIPT_MIN = 640;
 
 function railWidthMax() {
   const byViewport = Number(window.innerWidth) - RAIL_TRANSCRIPT_MIN;

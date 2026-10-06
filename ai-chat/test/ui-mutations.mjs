@@ -921,4 +921,49 @@ runner.run('搜索时「显示全部」还露着（这时候它没有意义）',
   ),
 );
 
+// ---- 宽度的账：正文「有上限、可收窄」+ 输入区跟正文同一条版心
+//
+// 用户报的两个现象（正文甩出版心、输入框比正文宽）都源于宽度没对齐，这里每一条各打掉一处。
+
+runner.run('正文轨道改回固定宽度（容器一窄就横向溢出，不再收窄换行）', CSS, (src) =>
+  src.replace(
+    '  grid-template-columns: var(--margin-col) minmax(0, var(--text-col)) 1fr;',
+    '  grid-template-columns: var(--margin-col) var(--text-col) 1fr;',
+  ),
+);
+
+runner.run('页宽公式又写死会话栏宽度（拖宽会话栏 = 从正文身上割肉）', CSS, (src) =>
+  src.replace('var(--rail-w, 292px) + 28px + var(--margin-col)', '292px + 28px + var(--margin-col)'),
+);
+
+runner.run('页宽公式漏掉一道缝（正文照样差 24px 装不下）', CSS, (src) =>
+  src.replace('var(--text-col) + var(--gap-col) +', 'var(--text-col) +'),
+);
+
+runner.run('输入区不跟正文同版心（收起会话栏就横着拉出去）', CSS, (src) =>
+  src.replace(
+    '.composer > * {\n  margin-left: calc(var(--margin-col) + var(--gap-col));\n  max-width: var(--text-col);\n}\n',
+    '',
+  ),
+);
+
+runner.run('输入区内容不左对齐（和正文栏错开一个页边栏）', CSS, (src) =>
+  src.replace(
+    '.composer > * {\n  margin-left: calc(var(--margin-col) + var(--gap-col));\n',
+    '.composer > * {\n',
+  ),
+);
+
+runner.run('输入区那一排按钮不换行（版心收窄时就横向挤出去）', CSS, (src) =>
+  src.replace('  flex-wrap: wrap;\n  padding-top: 9px;\n', '  padding-top: 9px;\n'),
+);
+
+runner.run('长串不按字符换行（URL 把版心撑破）', CSS, (src) =>
+  src.replace('  /* 断不开的长串（URL、一长串英文/代码）按字符换行，别把版心撑破 */\n  overflow-wrap: break-word;\n', ''),
+);
+
+runner.run('会话栏拖拽的下限又回到 320px（正文被压成一条）', APP, (src) =>
+  src.replace('const RAIL_TRANSCRIPT_MIN = 640;', 'const RAIL_TRANSCRIPT_MIN = 320;'),
+);
+
 runner.finish();

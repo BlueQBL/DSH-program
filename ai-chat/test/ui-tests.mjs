@@ -1623,6 +1623,18 @@ console.log('\n⑭ 布局：会话列表与聊天框各占各的列，互不干�
     check('双击回到默认 292px', vars()['--rail-w'] === '292px', String(vars()['--rail-w']));
     check('默认宽度也落盘', stored() === '292', String(stored()));
 
+    // 拖宽的上限跟「正文还能读」挂钩：视口 1040px 时最多给会话栏 400px（正文留 640px）。
+    // 以前这个下限是 320px —— 那时正文只剩十来个汉字一行，已经不算正文了。
+    // （视口 1000px 及以下走单列布局，拖拽本身就被拒了，所以这里取 1040。）
+    globalThis.window.innerWidth = 1040;
+    dispatch(resizer, 'pointerdown', { clientX: 0, pointerId: 1, preventDefault() {} });
+    dispatch(resizer, 'pointermove', { clientX: 9999, pointerId: 1, preventDefault() {} });
+    check('视口 1040px 时，会话栏最多拖到 400px（给正文留 640px）',
+      vars()['--rail-w'] === '400px', String(vars()['--rail-w']));
+    dispatch(resizer, 'pointerup', { clientX: 9999, pointerId: 1, preventDefault() {} });
+    globalThis.window.innerWidth = 1200;
+    dispatch(resizer, 'dblclick', {});
+
     // 窄屏：CSS 已经藏了柄，JS 也拒绝开工（两道防线）
     const wideWidth = vars()['--rail-w'];
     globalThis.window.innerWidth = 800;
@@ -1632,6 +1644,57 @@ console.log('\n⑭ 布局：会话列表与聊天框各占各的列，互不干�
       String(vars()['--rail-w']));
     dispatch(resizer, 'pointerup', { clientX: 500, pointerId: 1, preventDefault() {} });
     globalThis.window.innerWidth = 1200;
+  }
+
+  // ---- 宽度的账：正文「有上限、可收窄」+ 输入区跟正文同一条版心
+  //
+  // 这一段的由来：用户报「展开会话列表（或把会话栏拖宽）之后，正文滚起来会甩到报头那块
+  // 区域外面；收起会话列表，输入框又比正文宽一大截」。根子是宽度这件事有三处各说各的：
+  //   · 正文的版心写成**固定轨道** ⇒ 容器一窄就横向溢出，不会收窄；
+  //   · 页宽公式把会话栏写死成 292px ⇒ 拖宽会话栏等于从正文身上割肉（页宽不跟着涨）；
+  //   · 输入区压根没有版心 ⇒ 它跟着整栏走，收起会话栏就横着拉出去。
+  // 数字账（当初溢出的那 36px 就是这么来的）：
+  //   正文要 var(--margin-col) + var(--gap-col) + var(--text-col) + var(--gap-col) = 84+24+760+24 = 892px，
+  //   而默认宽度下页宽只给得起 1176 − 292 − 28 = 856px ⇒ 差 36px，正好是用户看到的那一截。
+  // 下面几条各守一处，都是「机制」而不是「现在正好对」。
+  {
+    // 选择器要先转义再拼正则：`.composer > *` 里那个 `*` 不转义会当成量词，
+    // 匹配不上任何东西（于是断言拿到空字符串，看起来像「样式没写」）
+    const ruleOf = (selector) => {
+      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return css.match(new RegExp(`^${escaped}\\s*\\{[\\s\\S]*?\\n\\}`, 'm'))?.[0] ?? '';
+    };
+    const exchangeRule = ruleOf('.exchange');
+    const earlierRule = ruleOf('.exchange-earlier');
+    const pageRule = ruleOf('.page');
+    const composerKids = ruleOf('.composer > *');
+
+    check('正文轨道是「有上限、可收窄」的（minmax(0, var(--text-col))），不是固定宽度',
+      /grid-template-columns:\s*var\(--margin-col\)\s+minmax\(0,\s*var\(--text-col\)\)/.test(exchangeRule),
+      exchangeRule.slice(0, 200));
+    check('「更早的 N 轮」用同一套栅格（同一条版心、同样可收窄）',
+      /minmax\(0,\s*var\(--text-col\)\)/.test(earlierRule), earlierRule.slice(0, 200));
+    check('页宽公式用 var(--rail-w)（拖宽会话栏 = 整页变宽，不是割正文的肉）',
+      /var\(--rail-w/.test(pageRule), pageRule.slice(0, 220));
+    check('页宽公式不再写死会话栏宽度',
+      !/calc\(\s*292px/.test(pageRule), pageRule.slice(0, 220));
+    check('页宽公式把五段都算上了（会话栏 + 缝 + 页边栏 + 缝 + 正文栏）',
+      ['var(--rail-w', '28px', 'var(--margin-col)', 'var(--gap-col)', 'var(--text-col)']
+        .every((piece) => pageRule.includes(piece)),
+      pageRule.slice(0, 220));
+    check('页宽公式把**两道**缝都算上了（漏一道就是 24px 的溢出）',
+      (pageRule.match(/var\(--gap-col\)/g) ?? []).length === 2,
+      String((pageRule.match(/var\(--gap-col\)/g) ?? []).length));
+    check('输入区的内容跟正文同一条版心（左边对齐 + 不超过正文栏）',
+      /margin-left:\s*calc\(var\(--margin-col\) \+ var\(--gap-col\)\)/.test(composerKids)
+        && /max-width:\s*var\(--text-col\)/.test(composerKids),
+      composerKids.slice(0, 200));
+    // 认规则内容一律用 `[^}]*`：`[\s\S]*?` 会跨过 `}` 跑到**后面别的规则**里去，
+    // 于是「把自己这条规则删掉」这种变异照样能匹配上（我这条断言第一版就是这么逃掉的）
+    check('输入区那一排按钮会换行（版心收窄时不许横向挤出去）',
+      /^\.composer-actions\s*\{[^}]*flex-wrap:\s*wrap/m.test(css));
+    check('正文里断不开的长串按字符换行（URL 不许把版心撑破）',
+      /^\.turn-body\s*\{[^}]*overflow-wrap:\s*break-word/m.test(css));
   }
 
   // 会话多了之后，新建/切换到的会话可能停在可视区外 —— 要主动滚一下。
