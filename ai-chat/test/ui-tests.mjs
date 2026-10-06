@@ -2048,7 +2048,16 @@ console.log('\n⑱ 会话引用：把另一个会话当背景材料带进新话�
   const source = active();
   check('先造出一个能引用的会话（两轮）', source.messages.filter((m) => m.role === 'user').length === 2);
 
-  // ---- 原文档：勾一轮，开新会话
+  // 再造一个「正在聊的会话」—— 也就是用户说的那个场景：
+  // 已经聊了几轮，这一轮突然要用另一个会话的内容。
+  dispatch(getEl('new-session-button'), 'click');
+  await sleep(60);
+  await say('我这边已经聊了一轮');
+  const talking = active();
+  check('造出一个「正在聊」的会话（1 轮）',
+    talking.messages.filter((m) => m.role === 'user').length === 1 && talking.id !== source.id);
+
+  // ---- 原文档：在**当前这个会话**里就地引用另一个会话的一轮
   dispatch(getEl('reference-new-button'), 'click');
   await sleep(30);
   check('点入口后面板露出来', getEl('reference-panel').hidden === false);
@@ -2074,6 +2083,35 @@ console.log('\n⑱ 会话引用：把另一个会话当背景材料带进新话�
   check('勾上之后状态里写明带第几轮',
     getEl('reference-status').textContent.includes('第 1 轮'), getEl('reference-status').textContent);
 
+  // 用户就是这么用的：**先打好这一轮的需求，再去引用**。所以引用的这一下
+  // 绝不能碰输入区（更不能走那条「换会话」的收尾 —— 它会顺手丢掉输入区挂着的「引用回答」）。
+  input.value = '我还没打完的这一轮需求';
+  const quoteFloat = getEl('quote-float');
+  const composerQuote = getEl('composer-quote');
+  const answerBody = makeElement('div');
+  answerBody.className = 'turn-body markdown';
+  const answerTurn = makeElement('div');
+  answerTurn.className = 'turn-assistant';
+  answerBody.parentElement = answerTurn;
+  const answerText = makeElement('span');
+  answerText.parentElement = answerBody;
+  activeSelection = {
+    isCollapsed: false,
+    rangeCount: 1,
+    anchorNode: answerText,
+    toString: () => '上一轮回答里的一段',
+    getRangeAt: () => ({
+      commonAncestorContainer: answerText,
+      getBoundingClientRect: () => ({ top: 300, left: 100, width: 200, height: 40, bottom: 340, right: 300 }),
+    }),
+    removeAllRanges: () => { activeSelection.isCollapsed = true; },
+  };
+  for (const h of documentHandlers.filter((x) => x.type === 'selectionchange')) h.fn({});
+  await sleep(200);
+  activeSelection = null;
+  dispatch(quoteFloat, 'click');
+  check('先在输入区挂上一段「引用回答」', composerQuote.hidden === false);
+
   // 这一条是用户报的那个缺陷的**本质**：选了「原文」就不该去调模型。
   // 上面那些断言查的是「界面说的一致」，这一条查「实际做的一致」。
   summarizePosts = [];
@@ -2082,16 +2120,23 @@ console.log('\n⑱ 会话引用：把另一个会话当背景材料带进新话�
   await sleep(80);
   check('「原文」档确认时没有去调模型（选了原文就该走原文，不该偷偷去压摘要）',
     summarizePosts.length === 0, `调了 ${summarizePosts.length} 次 /api/summarize`);
-  check('确认之后开出一个新会话', state().sessions.length === sessionsBefore + 1,
+  check('就地生效：没有多出会话', state().sessions.length === sessionsBefore,
     `${sessionsBefore} → ${state().sessions.length}`);
+  check('就地生效：还是这个会话（没被切走）', active().id === talking.id, String(active().id));
+  check('就地生效：正在打的这一轮需求还在', input.value === '我还没打完的这一轮需求', input.value);
+  check('就地生效：输入区挂着的那段「引用回答」也还在', composerQuote.hidden === false);
   check('原会话一条消息都没动', sessionById(source.id).messages.length === source.messages.length);
   const carrier = active();
-  check('材料挂在新会话上，不是原会话',
-    carrier.id !== source.id && Boolean(carrier.reference?.text));
+  check('材料挂在这个会话上', Boolean(carrier.reference?.text));
   check('材料标出了出处与轮次',
-    carrier.reference.sessionId === source.id && carrier.reference.turns.join(',') === '1');
-  check('材料的档位就是「原文」（界面显示的那一档）', carrier.reference.kind === 'turns',
-    String(carrier.reference.kind));
+    carrier.reference?.sessionId === source.id && carrier.reference?.turns?.join(',') === '1',
+    JSON.stringify(carrier.reference ?? null));
+  check('材料的档位就是「原文」（界面显示的那一档）', carrier.reference?.kind === 'turns',
+    String(carrier.reference?.kind));
+  check('材料**没有**变成这个会话的消息（它只是材料）',
+    carrier.messages.every((m) => !JSON.stringify(m).includes('【背景材料】')));
+  check('这个会话的消息一条没少', carrier.messages.length === talking.messages.length,
+    `${talking.messages.length} → ${carrier.messages.length}`);
   check('材料标注条显示出来了', getEl('reference-note').hidden === false);
   check('标注里写明来自哪个会话、第几轮',
     getEl('reference-note-text').textContent.includes(source.title) &&
@@ -2119,7 +2164,8 @@ console.log('\n⑱ 会话引用：把另一个会话当背景材料带进新话�
   check('请求仍然以一条 user 消息结尾', sent.at(-1)?.role === 'user', sent.map((m) => m.role).join(','));
   check('材料**没有**变成这个会话的消息（它只是材料，不是聊过的）',
     active().messages.every((m) => !JSON.stringify(m).includes('【背景材料】')));
-  check('这个会话里只有刚才那一问一答', active().messages.length === 2, String(active().messages.length));
+  check('就地生效：这一轮的问答接在原有对话后面', active().messages.length === 4,
+    String(active().messages.length));
 
   // ---- 移除材料
   dispatch(getEl('reference-drop'), 'click');
@@ -2130,10 +2176,10 @@ console.log('\n⑱ 会话引用：把另一个会话当背景材料带进新话�
   await say('移除之后再问一句');
   check('移除之后发出去的请求里没有材料',
     !JSON.stringify(lastChatBody?.messages ?? []).includes('【背景材料】'));
-  check('移除不影响已经答过的轮次（消息一条没少）', active().messages.length === 4,
+  check('移除不影响已经答过的轮次（消息一条没少）', active().messages.length === 6,
     String(active().messages.length));
 
-  // ---- 摘要档：失败时明确指路，成功时挂在会话上
+  // ---- 摘要档：失败时明确指路，成功时就地挂上
   summarizeReply = { ok: false, reason: 'offline', message: '离线模式起不了摘要' };
   dispatch(getEl('reference-new-button'), 'click');
   await sleep(30);
@@ -2145,20 +2191,24 @@ console.log('\n⑱ 会话引用：把另一个会话当背景材料带进新话�
   const beforeFail = state().sessions.length;
   dispatch(getEl('reference-confirm'), 'click');
   await sleep(80);
-  check('摘要档失败时不建会话（不能让用户以为带上了）', state().sessions.length === beforeFail,
+  check('摘要档失败时不建会话、也不挂半份材料（不能让用户以为带上了）',
+    state().sessions.length === beforeFail && active().reference === null,
     `${beforeFail} → ${state().sessions.length}`);
   check('失败时明确说可以改成「原文」档',
     getEl('reference-status').textContent.includes('原文'), getEl('reference-status').textContent);
 
   summarizeReply = { ok: true, summary: '那边聊了选题和结构，最后决定先做最小版本。', model: 'gpt-4o' };
   summarizePosts = [];
+  const beforeSummary = state().sessions.length;
   dispatch(getEl('reference-confirm'), 'click');
   await sleep(120);
-  check('摘要档成功时也建出新会话并挂上材料', Boolean(active().reference?.text));
+  check('摘要档成功时就地挂在这个会话上（不多开会话）',
+    state().sessions.length === beforeSummary && Boolean(active().reference?.text));
   check('摘要请求走的是同一个 /api/summarize', summarizePosts.length === 1,
     String(summarizePosts.length));
   check('材料里装的是模型给的摘要',
-    active().reference.text.includes('先做最小版本'), active().reference.text.slice(0, 80));
+    String(active().reference?.text ?? '').includes('先做最小版本'),
+    String(active().reference?.text ?? '').slice(0, 80));
   check('摘要档的标注写明是摘要', getEl('reference-note-text').textContent.includes('摘要'),
     getEl('reference-note-text').textContent);
 
@@ -2284,27 +2334,66 @@ console.log('\n⑱ 会话引用：把另一个会话当背景材料带进新话�
   check('「改选轮次」在「原文」档也还原出上次勾的那一轮', boxesOf()[0]?.checked === true);
   check('「原文」档还原后状态行说的是第 1 轮', statusOf().includes('第 1 轮'), statusOf());
 
+  // ---- 下面三块各自搭自己的存储。
+  //
+  // 为什么不接着用前面的会话：材料现在是**就地生效**的，「当前会话」和「源会话」很可能
+  // 就是同一个（在自己身上引用自己）—— 再拿「当前会话克隆一份当源会话」这种写法会失真，
+  // 断言就会验到别的东西上（我第一版就是这么写错的）。
+  const install = (sessions, activeId) => {
+    const payload = { activeId, sessions };
+    storage.set('duitanlu.sessions.v2', JSON.stringify(payload));
+    for (const h of windowHandlers.filter((x) => x.type === 'storage')) {
+      h.fn({ key: 'duitanlu.sessions.v2', newValue: JSON.stringify(payload) });
+    }
+  };
+  const clone = (x) => JSON.parse(JSON.stringify(x));
+  /** 一条消息：`total` 页（第 1..total-1 页是旧版，最后一页是 content） */
+  const msgOf = (id, role, content, total = 1) => ({
+    id,
+    role,
+    content,
+    versions: Array.from({ length: total }, (_, i) => ({
+      content: i === total - 1 ? content : `${content}（第 ${i + 1} 版）`,
+      attachments: [],
+      createdAt: 0,
+    })),
+  });
+  /** 造一个会话：turns 是 [问, 答] 的数组；pages 指定某一轮有几页（下标从 0 起） */
+  const fixture = (id, title, turns, pages = {}) => {
+    const messages = [];
+    turns.forEach(([q, a], i) => {
+      const total = pages[i] ?? 1;
+      messages.push(msgOf(`${id}_q${i}`, 'user', q, total));
+      messages.push(msgOf(`${id}_a${i}`, 'assistant', a, total));
+    });
+    return { id, title, createdAt: 1, updatedAt: 1, messages };
+  };
+
   // ---- 源会话被删掉之后点「改选轮次」：旧轮次号不能照勾到别的会话上
   //
   // 材料还在（它是快照），但源会话已经不在列表里了。这时面板会落到列表里第一个会话 ——
   // 关键是它**必须把之前勾的轮次一起清掉**：那些号码属于那个已经不在的会话，
   // 留着就会在新源会话上勾出几个「用户没勾过的轮次」，确认下去材料就对不上号了。
   {
-    const snapshot = state();
-    const carrier = JSON.parse(JSON.stringify(active()));
-    const oneTurn = JSON.parse(JSON.stringify(snapshot.sessions.find((s) => s.id === longSession.id)));
-    const single = oneTurn.messages.slice(0, 2); // 只留第一轮，让「勾了第几轮」这种断言说得清
-    oneTurn.messages = single;
-    // 幸存的**两个**会话都留一轮：列表是按最近使用排的，哪一个是「第一个」不能假设 ——
-    // 只给其中一个留内容的话，面板落到空会话上时这条断言会变成空转（变异就溜过去了）。
-    carrier.messages = single;
-    const next = { activeId: carrier.id, sessions: [oneTurn, carrier] }; // 源会话（twoTurn）不在里面 = 被删掉了
-    storage.set('duitanlu.sessions.v2', JSON.stringify(next));
-    for (const h of windowHandlers.filter((x) => x.type === 'storage')) {
-      h.fn({ key: 'duitanlu.sessions.v2', newValue: JSON.stringify(next) });
-    }
+    const gone = fixture('s_gone', '已删掉的来源', [['甲问', '甲答']]);
+    const holder = fixture('s_holder', '拿着材料的会话', []);
+    holder.reference = {
+      kind: 'turns',
+      sessionId: gone.id,
+      title: gone.title,
+      at: 1,
+      text: '【背景材料】以下是另一个会话里的内容：《已删掉的来源》第 1 轮的一问一答\n\n用户：甲问\n助手：甲答\n\n【背景材料结束】',
+      turns: [1],
+      covers: 0,
+    };
+    const oneTurn = fixture('s_one', '一轮会话', [['乙问', '乙答']]);
+    install([oneTurn, holder], holder.id);
     await sleep(60);
-    check('源会话没了：列表里确实找不到它了', !state().sessions.some((s) => s.id === twoTurn.id));
+    check('材料还在、源会话已经不在了（这正说明材料是快照）',
+      active().reference?.sessionId === gone.id && !state().sessions.some((s) => s.id === gone.id));
+    check('标注条如实写了「原会话已删除」',
+      getEl('reference-note-text').textContent.includes('原会话已删除'),
+      getEl('reference-note-text').textContent);
 
     dispatch(getEl('reference-change'), 'click');
     await sleep(30);
@@ -2316,6 +2405,9 @@ console.log('\n⑱ 会话引用：把另一个会话当背景材料带进新话�
     check('旧轮次号被清掉了（不会照勾到别的会话上）',
       boxesOf().every((box) => box.checked !== true), JSON.stringify(boxesOf().map((box) => box?.checked)));
     check('状态行不拿旧的轮次号说话', !statusOf().includes('第 1 轮'), statusOf());
+    check('面板的提示里也写明那份材料的原会话已经删了',
+      getEl('reference-replace-note').textContent.includes('原会话已删除'),
+      getEl('reference-replace-note').textContent);
     dispatch(getEl('reference-cancel'), 'click');
   }
 
@@ -2324,25 +2416,10 @@ console.log('\n⑱ 会话引用：把另一个会话当背景材料带进新话�
   // 取最后一页是**正常用法**（材料要的是这个会话现在的样子，旧页是留着对比的），
   // 但不能藏着 —— 页数标在轮次行上，材料里写一句「第 2 轮原先有 2 页，这里给的是最后一页」。
   {
-    // 上一步把存储换成了「只剩两个会话」，所以这里从当前会话克隆出一份两轮的源会话，
-    // 再把第 2 轮的提问和回答各加一页（= 那一轮被编辑重发过一次）。
-    const clone = (x) => JSON.parse(JSON.stringify(x));
-    const carrier = clone(active());
-    const multi = clone(carrier);
-    multi.id = 's_multi_pages';
-    multi.title = '多页会话';
-    delete multi.reference; // 这一份只是「被引用的源会话」
-    const [q1, a1] = multi.messages.slice(0, 2);
-    const q2 = { ...clone(q1), id: 'm_mp_q2' };
-    const a2 = { ...clone(a1), id: 'm_mp_a2' };
-    q2.versions = [clone(q1.versions[0]), { ...clone(q1.versions[0]), content: '第二轮提问的第二版' }];
-    a2.versions = [clone(a1.versions[0]), { ...clone(a1.versions[0]), content: '第二轮回答的第二版' }];
-    multi.messages = [q1, a1, q2, a2];
-    const next = { activeId: carrier.id, sessions: [multi, carrier] };
-    storage.set('duitanlu.sessions.v2', JSON.stringify(next));
-    for (const h of windowHandlers.filter((x) => x.type === 'storage')) {
-      h.fn({ key: 'duitanlu.sessions.v2', newValue: JSON.stringify(next) });
-    }
+    const multi = fixture('s_multi_pages', '多页会话',
+      [['第一问', '第一答'], ['第二轮提问的第二版', '第二轮回答的第二版']], { 1: 2 });
+    const blank = fixture('s_blank_pages', '新对话', []);
+    install([multi, blank], blank.id);
     await sleep(60);
 
     dispatch(getEl('reference-new-button'), 'click');
@@ -2355,6 +2432,8 @@ console.log('\n⑱ 会话引用：把另一个会话当背景材料带进新话�
       rowTextOf(1).indexOf('（2 页）') < rowTextOf(1).indexOf('第二轮提问'), rowTextOf(1));
     check('只有一页的轮次不标（不制造噪音）', !rowTextOf(0).includes('页'), rowTextOf(0));
     check('面板的说明里写清了「材料带的是最新那一页」', /材料带的是\*\*最新那一页\*\*/.test(html));
+    check('面板的说明里也写清了「确认后挂在当前这个会话上」（就地生效那条新路）',
+      /确认后它挂在\*\*当前这个会话\*\*上/.test(html));
 
     getEl('reference-kind').value = 'turns';
     dispatch(getEl('reference-kind'), 'change', { target: { value: 'turns' } });
@@ -2363,11 +2442,12 @@ console.log('\n⑱ 会话引用：把另一个会话当背景材料带进新话�
     dispatch(getEl('reference-turns'), 'change', { target: multiBox });
     dispatch(getEl('reference-confirm'), 'click');
     await sleep(80);
-    check('材料带的是最后一页', active().reference.text.includes('第二轮回答的第二版'),
-      active().reference.text.slice(0, 200));
+    check('材料带的是最后一页', String(active().reference?.text ?? '').includes('第二轮回答的第二版'),
+      String(active().reference?.text ?? '').slice(0, 200));
     check('材料里写明这一轮原先有几页、给的是哪一页',
-      active().reference.text.includes('第 2 轮原先有 2 页') && active().reference.text.includes('这里给的是最后一页'),
-      active().reference.text);
+      String(active().reference?.text ?? '').includes('第 2 轮原先有 2 页') &&
+        String(active().reference?.text ?? '').includes('这里给的是最后一页'),
+      String(active().reference?.text ?? ''));
 
     dispatch(getEl('reference-toggle'), 'click');
     check('「查看材料」里就能看到这句说明',
@@ -2379,6 +2459,98 @@ console.log('\n⑱ 会话引用：把另一个会话当背景材料带进新话�
     check('发出去的请求里也有这句说明（模型知道这是最后一页）',
       String(lastChatBody?.messages?.[0]?.content ?? '').includes('原先有 2 页'),
       String(lastChatBody?.messages?.[0]?.content ?? '').slice(0, 160));
+  }
+
+  // ---- 已有材料时再点「引用会话」：预填 + 说清是替换，不许静默覆盖
+  //
+  // 用户报的那一幕：引用完还没提问，再点一次「引用会话」，面板是**空白默认值**，
+  // 按下去就把第一份材料换掉了，全程没人告诉他这是替换。
+  //
+  // 规矩：一个会话一份材料 · 三个入口做同一件事（设置**这个会话**的材料）·
+  // 已有就预填出来改，并把后果写在按下去之前。
+  {
+    const srcA = fixture('s_src_a', '材料甲', [['甲的一问', '甲的一答']]);
+    const srcB = fixture('s_src_b', '材料乙', [['乙的一问', '乙的一答']]);
+    const blank = fixture('s_carrier_c', '新对话', []);
+    install([srcA, srcB, blank], blank.id);
+    await sleep(60);
+    check('造出一个空白会话（就是「刚引用完还没提问」的那个状态）', state().activeId === blank.id);
+
+    const notice = () => getEl('reference-replace-note');
+    const confirmLabel = () => getEl('reference-confirm').textContent;
+    const newSessionLink = () => getEl('reference-new-session-link');
+
+    // ---- 第一份材料：挂到空白会话上
+    dispatch(getEl('reference-new-button'), 'click');
+    await sleep(30);
+    check('还没有材料时：不出「替换」提示', notice().hidden === true, notice().textContent);
+    check('还没有材料时：主按钮说的是「在这个会话里生效」', confirmLabel() === '在这个会话里生效', confirmLabel());
+    check('空白会话里不给「带着它开一个新会话」这个次要入口（两条路是一回事）',
+      newSessionLink().hidden === true);
+    dispatch(getEl('reference-source'), 'change', { target: { value: srcA.id } });
+    getEl('reference-kind').value = 'turns';
+    dispatch(getEl('reference-kind'), 'change', { target: { value: 'turns' } });
+    const firstBox = boxesOf()[0];
+    firstBox.checked = true;
+    dispatch(getEl('reference-turns'), 'change', { target: firstBox });
+    dispatch(getEl('reference-confirm'), 'click');
+    await sleep(80);
+    check('第一份材料挂上了（来自《材料甲》）',
+      active().reference?.title === '材料甲' && active().reference?.turns?.join(',') === '1',
+      JSON.stringify({ title: active().reference?.title, turns: active().reference?.turns }));
+
+    // ---- 再点一次「引用会话」：面板要预填现有材料，并说明会替换
+    dispatch(getEl('reference-new-button'), 'click');
+    await sleep(30);
+    check('再次打开时：面板预填了现有材料的来源会话',
+      sourceOptionOf()?.value === srcA.id, String(sourceOptionOf()?.value));
+    check('再次打开时：预填了材料形式（原文）', kindOf() === 'turns', kindOf());
+    check('再次打开时：预填了上次勾的轮次', boxesOf()[0]?.checked === true);
+    check('再次打开时：明说这一按会替换（不是静默覆盖）',
+      notice().hidden === false && notice().textContent.includes('替换') === true,
+      notice().textContent);
+    check('再次打开时：按钮改口成「替换这份材料」', confirmLabel() === '替换这份材料', confirmLabel());
+
+    // ---- 换成另一个来源再确认：替换掉旧的，而且**只有一条**（C 与 A 的分界）
+    dispatch(getEl('reference-source'), 'change', { target: { value: srcB.id } });
+    const secondBox = boxesOf()[0];
+    secondBox.checked = true;
+    dispatch(getEl('reference-turns'), 'change', { target: secondBox });
+    dispatch(getEl('reference-confirm'), 'click');
+    await sleep(80);
+    const replaced = active();
+    check('替换之后材料只有一份，而且是新的那份（《材料乙》）',
+      replaced.reference?.title === '材料乙' && !String(replaced.reference?.text ?? '').includes('材料甲'),
+      JSON.stringify({ title: replaced.reference?.title }));
+    check('替换之后标注条也换成了新的', getEl('reference-note-text').textContent.includes('材料乙'),
+      getEl('reference-note-text').textContent);
+
+    // ---- 会话里已经聊过：这时才给出「带着它开一个新会话」这条次要入口
+    await say('带着材料问一句');
+    const talked = active();
+    dispatch(getEl('reference-new-button'), 'click');
+    await sleep(30);
+    check('已经聊过的会话：提示仍是同一条规矩（替换），不再有第二种说法',
+      notice().hidden === false && notice().textContent.includes('替换')
+        && !notice().textContent.includes('另开一个新会话'),
+      notice().textContent);
+    check('已经聊过的会话：主按钮仍说「替换这份材料」', confirmLabel() === '替换这份材料', confirmLabel());
+    check('已经聊过的会话：多出「带着它开一个新会话」这个次要入口',
+      newSessionLink().hidden === false);
+
+    const beforeSwitch = state().sessions.length;
+    dispatch(newSessionLink(), 'click');
+    await sleep(80);
+    check('次要入口：确实另开了一个新会话', state().sessions.length === beforeSwitch + 1,
+      `${beforeSwitch} → ${state().sessions.length}`);
+    check('次要入口：材料挂在新会话上，不是原会话',
+      active().id !== talked.id && Boolean(active().reference?.text));
+    const oldOne = state().sessions.find((s) => s.id === talked.id);
+    check('次要入口：老会话的材料和消息一条没动',
+      oldOne?.reference?.title === '材料乙' && oldOne.messages.length === talked.messages.length,
+      JSON.stringify({ title: oldOne?.reference?.title, messages: oldOne?.messages.length }));
+    check('次要入口：新会话是空的（带过去的只有材料）',
+      active().messages.length === 0, String(active().messages.length));
   }
 
   chatStreams = false;

@@ -194,9 +194,17 @@
             <p class="reference-panel-hint">
               材料是**背景知识**：模型会把它当成你给的参考资料，而不是「你们聊过」。
               它不算这个会话的消息，随时能查看、能移除。
-              某一轮被编辑重发过多次时，材料带的是**最新那一页**（轮次后面标着「N 页」），
-              想连旧页一起搬走就用「分出新会话」。
+              确认后它挂在**当前这个会话**上、从下一轮开始生效；已经聊过的会话里，
+              也可以带着它**另开一个新会话**（那是「材料跟过去」，和「分出新会话」不是一回事 ——
+              后者是把整段对话连旧页一起复制走）。
+              某一轮被编辑重发过多次时，材料带的是**最新那一页**（轮次后面标着「N 页」）。
             </p>
+            <!--
+              只有「这个会话已经有材料」时才出现：把这次确认的**后果**说在按下去之前。
+              没有这一条的话，「引用会话」打开的是空白默认值，用户以为在新建一份，
+              按下去才发现旧的那份被换掉了。
+            -->
+            <p class="reference-replace-note" id="reference-replace-note" hidden></p>
             <div class="control-row">
               <label class="control-field">
                 <span class="control-label">引用哪一个会话</span>
@@ -213,8 +221,13 @@
             <div class="reference-turns" id="reference-turns"></div>
             <p class="reference-panel-status" id="reference-status"></p>
             <div class="reference-actions">
-              <button type="button" class="solid-button" id="reference-confirm">用这份材料开新会话</button>
+              <button type="button" class="solid-button" id="reference-confirm">在这个会话里生效</button>
               <button type="button" class="ghost-button" id="reference-cancel">取消</button>
+              <!--
+                次要入口（只在会话里已经有对话时出现）：同样一份材料，另开一个会话带过去。
+                主按钮是「就地生效」—— 正在聊的会话突然需要另一个会话的内容时用它。
+              -->
+              <button type="button" class="link-button reference-new-session-link" id="reference-new-session-link" hidden>或者：带着它开一个新会话</button>
             </div>
           </section>
 

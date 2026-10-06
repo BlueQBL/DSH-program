@@ -526,6 +526,21 @@ body::before {
   color: var(--ink-soft);
 }
 
+/* 「这次确认会替换掉已有的那份材料」：只在已有材料时出现。
+   用的是**实线 + 深一点的底**，和材料条那条虚线标注分开 ——
+   一个是「即将发生的动作」，一个是「已经挂着的材料」，不该长成一个样子。 */
+.reference-replace-note {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--rule-strong);
+  border-left: 2px solid var(--ink);
+  border-radius: var(--radius);
+  background: var(--paper);
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--ink);
+}
+
 .reference-turns {
   display: flex;
   flex-wrap: wrap;

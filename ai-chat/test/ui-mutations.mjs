@@ -3,18 +3,21 @@
 //   node test/ui-mutations.mjs
 //
 // 骨架在 test/mutation-harness.mjs（快照、还原、崩溃判定、收尾都在那边）。
-// 这个脚本会改写 public/app.js 与 public/styles.css，所以必须在 ai-chat/ 下运行。
+// 这个脚本会改写 public/app.js、public/styles.css、public/index.html，
+// 另外还有一条会改写 public/lib/store.js（「一个会话一份材料」那条边界在存储层），
+// 所以必须在 ai-chat/ 下运行。
 
 import { createMutationRunner } from './mutation-harness.mjs';
 
 const APP = 'public/app.js';
 const CSS = 'public/styles.css';
 const HTML = 'public/index.html';
+const STORE = 'public/lib/store.js';
 
 const runner = createMutationRunner({
   label: '界面状态',
   suite: 'test/ui-tests.mjs',
-  files: [APP, CSS, HTML],
+  files: [APP, CSS, HTML, STORE],
 });
 
 // promptSave 现在分成三条分支（未改动 / 改过预设 / 自定义），每条各自收起面板。
@@ -312,10 +315,67 @@ runner.run('不给错误带上 HTTP 状态码（上面那条分支就永远走�
 
 // ---- 会话引用：面板、材料条、上限文案
 
-runner.run('引用确认之后不开新会话（材料挂到了原会话上）', APP, (src) =>
+// 已有材料时再点「引用会话」：这三条守着「不许静默覆盖」那条规矩 ——
+// 预填现有材料、把「会替换」写在按下去之前、确认按钮跟着改口。
+runner.run('「引用会话」在有材料时不预填（打开是空白表单，看着像新建、其实是替换）', APP, (src) =>
   src.replace(
-    "  if (store.session.messages.length === 0) {\n    // 当前就是个空白会话：直接用掉它，别再堆一个「新对话」\n    store.updateSessionSettings({ personaId: DEFAULT_PERSONA_ID, systemPrompt: '' });\n  } else {\n    store.createSession();\n  }\n  store.setReference(reference);",
-    '  store.setReference(reference);',
+    "    sourceId: sourceId || seed?.sessionId || others[0]?.id || store.sessionId,\n    kind: (kind || seed?.kind) === 'turns' ? 'turns' : 'summary',\n    // numbers 显式传了就用传的（包括空数组）；没传才接上现有材料记着的那几轮\n    numbers: Array.isArray(numbers) ? [...numbers] : (Array.isArray(seed?.turns) ? [...seed.turns] : []),",
+    "    sourceId: sourceId || others[0]?.id || store.sessionId,\n    kind: kind === 'turns' ? 'turns' : 'summary',\n    numbers: Array.isArray(numbers) ? [...numbers] : [],",
+  ),
+);
+
+runner.run('已有材料时不出「会替换」的提示（静默覆盖又回来了）', APP, (src) =>
+  src.replace('  const note = referenceReplaceNoteText();\n', "  const note = '';\n"),
+);
+
+runner.run('确认按钮一直写着「开新会话」（要替换的时候不改口）', APP, (src) =>
+  src.replace(
+    "  return existingReference() ? '替换这份材料' : '在这个会话里生效';",
+    "  return '用这份材料开新会话';",
+  ),
+);
+
+// C（明确替换）和 A（合并多条）的分界线：材料必须是**替换**，不是悄悄并排堆积。
+// 真要做成合并，那是存储 schema 级的改动（reference → references[]），得单独设计。
+runner.run('材料变成「合并」而不是替换（旧的那份悄悄留下，越积越长）', STORE, (src) =>
+  src.replace(
+    '      session.reference = clean;',
+    "      session.reference = { ...clean, text: `${session.reference?.text ?? ''}\\n\\n${clean.text}` };",
+  ),
+);
+
+runner.run('确认之后材料根本没挂上（界面看着像生效了）', APP, (src) =>
+  src.replace('  // 有消息 + 就地生效：什么都不用做 —— 材料本来就属于这个会话\n  store.setReference(reference);', ''),
+);
+
+// ---- 就地生效这条新路：三种打掉它的方式
+//
+// 「引用」现在既能在当前会话里就地生效，也能带着它另开一个会话。下面四条把这两条路
+// 和它们的差别各打掉一次 —— 少了任何一条，用户就会拿回一个错的（或者丢东西的）行为。
+
+runner.run('就地生效又变回「总是另开一个新会话」（后面聊的东西留在别处了）', APP, (src) =>
+  src.replace('function applyReference(reference, { newSession = false } = {}) {\n  if (newSession) {',
+    'function applyReference(reference, { newSession = false } = {}) {\n  if (true) {'),
+);
+
+runner.run('就地生效却走了「切会话」那套收尾（顺手丢掉输入区挂着的引用回答）', APP, (src) =>
+  src.replace(
+    '  const first = store.session.messages.length === 0;\n  paintReferenceNote();',
+    '  const first = store.session.messages.length === 0;\n  renderAfterSessionSwitch();\n  paintReferenceNote();',
+  ),
+);
+
+runner.run('空白会话里也塞一个「带着它开一个新会话」（两条路本来是同一件事）', APP, (src) =>
+  src.replace(
+    '    els.referenceNewSessionLink.hidden = store.session.messages.length === 0;',
+    '    els.referenceNewSessionLink.hidden = false;',
+  ),
+);
+
+runner.run('「带着它开一个新会话」点了却不开新会话（次要入口成了摆设）', APP, (src) =>
+  src.replace(
+    "els.referenceNewSessionLink?.addEventListener('click', () => void submitReference({ newSession: true }));",
+    "els.referenceNewSessionLink?.addEventListener('click', () => void submitReference());",
   ),
 );
 
@@ -382,9 +442,13 @@ runner.run('「原文」档也走摘要（选了原文却去调模型）', APP, 
 
 runner.run('面板说明里不提「带的是最新那一页」', HTML, (src) =>
   src.replace(
-    '\n              某一轮被编辑重发过多次时，材料带的是**最新那一页**（轮次后面标着「N 页」），\n              想连旧页一起搬走就用「分出新会话」。',
+    '\n              某一轮被编辑重发过多次时，材料带的是**最新那一页**（轮次后面标着「N 页」）。',
     '',
   ),
+);
+
+runner.run('面板说明里不提「确认后挂在当前这个会话上」（就地生效那条路没人知道）', HTML, (src) =>
+  src.replace('\n              确认后它挂在**当前这个会话**上、从下一轮开始生效；已经聊过的会话里，', ''),
 );
 
 // ---- 会话栏顶部的两个入口（新建 / 引用）：同一件事在两个地方要长得一样

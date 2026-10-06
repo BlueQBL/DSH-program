@@ -89,6 +89,8 @@ const els = {
   referenceSource: document.getElementById('reference-source'),
   referenceKind: document.getElementById('reference-kind'),
   referenceTurns: document.getElementById('reference-turns'),
+  referenceReplaceNote: document.getElementById('reference-replace-note'),
+  referenceNewSessionLink: document.getElementById('reference-new-session-link'),
   referenceStatus: document.getElementById('reference-status'),
   referenceConfirm: document.getElementById('reference-confirm'),
   referenceCancel: document.getElementById('reference-cancel'),
@@ -1430,6 +1432,38 @@ function paintReferenceTurns() {
   );
 }
 
+/**
+ * 这个会话已经挂着的那份材料（没有就返回 null）。
+ *
+ * 「一个会话一份背景材料」是这个功能的判据：它能被「改选轮次」改、被「移除材料」清。
+ * 所以「引用会话」= 设置**这个会话**的材料 —— 已经有就把现有的摆出来让你改，
+ * 而不是重开一份把旧的悄悄盖掉（那条路已经出过事）。
+ */
+function existingReference() {
+  const reference = store.session.reference;
+  return isValidReference(reference) ? reference : null;
+}
+
+/**
+ * 面板顶上那句「这次确认会发生什么」。
+ *
+ * 材料现在是**就地在当前会话上生效**（另一条路「带着它开一个新会话」写在旁边那个次要入口上），
+ * 所以规则只有一条：**一个会话一份材料，已有就是替换** —— 必须写在按下去之前。
+ */
+function referenceReplaceNoteText() {
+  const existing = existingReference();
+  if (!existing) return '';
+  const alive = store.sessions.some((s) => s.id === existing.sessionId);
+  const from = referenceLabel(existing).replace(/^背景材料：/, '') + (alive ? '' : '（原会话已删除）');
+  return `这个会话已经有一份背景材料（${from}）。一个会话只带一份材料，`
+    + '所以确认会替换它（旧的那份就没了）；不想带就点「移除材料」。';
+}
+
+/** 确认按钮该说什么：这个会话里已经有材料时，它做的是**替换**，不能还写着「用这份材料」 */
+function referenceConfirmLabel() {
+  return existingReference() ? '替换这份材料' : '在这个会话里生效';
+}
+
 function paintReferencePanel() {
   if (!runtime.referenceDraft) return;
   // 「材料形式」下拉框是**视图**，值必须跟着草稿走。
@@ -1441,18 +1475,40 @@ function paintReferencePanel() {
   paintReferenceSources();
   paintReferenceTurns();
   els.referenceStatus.textContent = referenceStatusText();
+
+  // 已有材料时：把后果和按钮文案都改口（少这两行就又变成「静默替换」）
+  const note = referenceReplaceNoteText();
+  if (els.referenceReplaceNote) {
+    els.referenceReplaceNote.textContent = note;
+    els.referenceReplaceNote.hidden = !note;
+  }
+  if (els.referenceConfirm) els.referenceConfirm.textContent = referenceConfirmLabel();
+
+  // 「带着它开一个新会话」只在**已经聊过**的会话里才给：空会话里这两条路是同一件事
+  //（空会话上就地生效 = 直接用掉它），摆两个按钮只会让人犹豫。
+  if (els.referenceNewSessionLink) {
+    els.referenceNewSessionLink.hidden = store.session.messages.length === 0;
+  }
 }
 
 /**
  * 打开引用面板。
- * 默认引「最近用过的另一个会话」——没有别的会话时引自己（列表里总得有一个）。
+ *
+ * 三个入口（左栏「引用会话」、报头备用入口、材料条上的「改选轮次」）做的是**同一件事**：
+ * 设置这个会话的背景材料。所以只要这个会话已经有一份，面板就**预填现有的那一份**
+ * （来源会话 / 材料形式 / 勾选的轮次）—— 打开就是「改这份材料」，而不是一份空白表单
+ * 让你以为在新建、结果把旧的盖掉。
+ *
+ * 没有材料时：默认引「最近用过的另一个会话」（没有别的会话时引自己，列表里总得有一个）。
  */
-function openReferencePanel({ sourceId = '', kind = 'summary', numbers = [] } = {}) {
+function openReferencePanel({ sourceId = '', kind = '', numbers = null } = {}) {
+  const seed = existingReference();
   const others = store.sessions.filter((s) => s.id !== store.sessionId);
   runtime.referenceDraft = {
-    sourceId: sourceId || others[0]?.id || store.sessionId,
-    kind: kind === 'turns' ? 'turns' : 'summary',
-    numbers: Array.isArray(numbers) ? [...numbers] : [],
+    sourceId: sourceId || seed?.sessionId || others[0]?.id || store.sessionId,
+    kind: (kind || seed?.kind) === 'turns' ? 'turns' : 'summary',
+    // numbers 显式传了就用传的（包括空数组）；没传才接上现有材料记着的那几轮
+    numbers: Array.isArray(numbers) ? [...numbers] : (Array.isArray(seed?.turns) ? [...seed.turns] : []),
   };
   els.referencePanel.hidden = false;
   paintReferencePanel();
@@ -1463,30 +1519,54 @@ function closeReferencePanel() {
   els.referencePanel.hidden = true;
 }
 
-/** 材料挂到一个新会话上：这就是「带着背景开新话题」 */
-function applyReference(reference) {
-  if (store.session.messages.length === 0) {
+/**
+ * 把材料挂上去。两种用法，判据是同一条：**材料是「这个会话」的背景**。
+ *
+ *   · **就地生效**（默认）：挂在当前会话上，从**下一轮**开始带上。正在聊的会话里
+ *     突然需要另一个会话的内容时用这条 —— 前面对话照旧在上下文里，材料从这一轮起生效；
+ *   · **带着它开一个新会话**（`newSession: true`）：复制一份材料到新会话，当前会话一个字不动。
+ *     想开个新话题、只是手边要有那个会话的内容时用这条。
+ */
+function applyReference(reference, { newSession = false } = {}) {
+  if (newSession) {
+    store.createSession();
+  } else if (store.session.messages.length === 0) {
     // 当前就是个空白会话：直接用掉它，别再堆一个「新对话」
     store.updateSessionSettings({ personaId: DEFAULT_PERSONA_ID, systemPrompt: '' });
-  } else {
-    store.createSession();
   }
+  // 有消息 + 就地生效：什么都不用做 —— 材料本来就属于这个会话
   store.setReference(reference);
 
   closeReferencePanel();
   runtime.referenceOpen = false;
-  runtime.pinned = true;
-  runtime.liveTurn = null;
-  runtime.renderNode = null;
-  railRevealPending = true;
-  renderAfterSessionSwitch();
-  scrollToBottom();
-  els.input.focus();
-  flashHint(`已带上《${reference.title}》的材料，可以开始新话题了`, 3600);
+
+  if (newSession) {
+    runtime.pinned = true;
+    runtime.liveTurn = null;
+    runtime.renderNode = null;
+    railRevealPending = true;
+    renderAfterSessionSwitch();
+    scrollToBottom();
+    els.input.focus();
+    flashHint(`已带着《${reference.title}》的材料开了一个新会话`, 3600);
+    return;
+  }
+
+  // ---- 就地生效：**不切会话**，所以这条路不能走 renderAfterSessionSwitch ——
+  // 它会顺手丢掉输入区挂着的那段「引用回答」（那句注释写的是「换会话后它已经没有出处了」，
+  // 可这里根本没换会话），也会把用户正在打的需求冲掉。只重画材料条就够了。
+  const first = store.session.messages.length === 0;
+  paintReferenceNote();
+  flashHint(
+    first
+      ? `已带上《${reference.title}》的材料，可以开始聊了`
+      : `已带上《${reference.title}》的材料，从下一轮开始生效（随时能改选轮次或移除）`,
+    3600,
+  );
 }
 
 /** 确认：原文档本地就能拼；摘要档要问模型要一段摘要 */
-async function submitReference() {
+async function submitReference({ newSession = false } = {}) {
   const draft = runtime.referenceDraft;
   if (!draft) return;
   const source = store.sessions.find((s) => s.id === draft.sourceId);
@@ -1499,7 +1579,7 @@ async function submitReference() {
       flashHint(referenceFailureText(plan.reason), 4400);
       return;
     }
-    applyReference(plan.reference);
+    applyReference(plan.reference, { newSession });
     return;
   }
 
@@ -1529,7 +1609,7 @@ async function submitReference() {
       els.referenceStatus.textContent = referenceFailureText(plan.reason);
       return;
     }
-    applyReference(plan.reference);
+    applyReference(plan.reference, { newSession });
   } catch (err) {
     const text = `${err.message} —— 可以改成「原文」档（它不需要模型）`;
     els.referenceStatus.textContent = text;
@@ -1569,6 +1649,9 @@ els.referenceCompact?.addEventListener('click', () => openReferencePanel());
 els.referencePanelClose?.addEventListener('click', () => closeReferencePanel());
 els.referenceCancel?.addEventListener('click', () => closeReferencePanel());
 els.referenceConfirm?.addEventListener('click', () => void submitReference());
+// 次要入口：同样一份材料，但**另开一个会话**带去（新会话引用那条老路）。
+// 和主按钮共用一条确认流程，只有「挂到哪儿」不同。
+els.referenceNewSessionLink?.addEventListener('click', () => void submitReference({ newSession: true }));
 els.referenceSource?.addEventListener('change', (event) => {
   if (!runtime.referenceDraft) return;
   runtime.referenceDraft.sourceId = event.target.value;
