@@ -1950,9 +1950,34 @@ console.log('\n⑯ 会话标题太长：两行 + 悬停看全文');
 
     check('行里有一个「⋯」按钮', moreAt > -1 && /aria-haspopup="menu"/.test(tpl));
     check('「⋯」初始 aria-expanded=false', /data-action="more"[\s\S]*?aria-expanded="false"/.test(tpl));
-    check('四个功能（置顶/改名/起名/删除）都在菜单里',
+    check('四个功能（置顶/重命名/自动命名/删除）都在菜单里',
       ['pin', 'rename', 'retitle', 'delete'].every((a) => menuInner.includes(`data-action="${a}"`)),
       menuInner);
+
+    // 菜单上的措辞是**定过的**，不是随手写的：
+    //   「重命名」= 你自己敲一个名字；「自动命名」= 让模型按现在的对话重新起一个。
+    // 旧的两个词都换掉了 ——「改名」太家常，而「起名」是给小孩 / 宠物起名字的说法，
+    // 摆在「重命名」旁边也不成对（一个「命名」一个「起名」，读起来像两回事）。
+    const appSource = readFileSync(path.resolve(PUBLIC, 'app.js'), 'utf8');
+    // 只看用户看得见的字：注释里留着的「自动改名」说的是**后台**那条路，不算。
+    const appCode = appSource.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+
+    check('菜单上的字是「重命名」和「自动命名」',
+      menuInner.includes('>重命名</button>') && menuInner.includes('>自动命名</button>'), menuInner);
+    check('「⋯」上的 title 里那四个功能也换了新词',
+      /title="更多操作（置顶 \/ 重命名 \/ 自动命名 \/ 删除）"/.test(tpl),
+      tpl.slice(moreAt, moreAt + 220));
+    check('用户看得见的地方不再出现「改名」「起名」（菜单 / 气泡提示 / 对话框标题）',
+      !/改名|起名/.test(menuInner) && !/改名|起名/.test(appCode) && !/改名|起名/.test(tpl),
+      [
+        ...appCode.split('\n').filter((line) => /改名|起名/.test(line)),
+        ...tpl.split('\n').filter((line) => /改名|起名/.test(line)),
+      ].join('\n') || '（没有，但断言还是失败了，去看 menuInner）');
+    // 「重命名」弹出来的那个对话框也用同一套词（「换个名字」）。
+    // 光靠上面那条「不许出现改名叫起名」是抓不住的：旧文案写的是「起个名字」，不带「起名」两个字。
+    check('「重命名」的对话框说「给这个会话换个名字」',
+      /window\.prompt\('给这个会话换个名字'/.test(appCode),
+      appCode.split('\n').find((line) => line.includes('window.prompt(')) ?? '（找不到 window.prompt）');
     check('菜单默认藏着（不占行里的宽度）', /class="session-menu"[^>]*hidden/.test(tpl));
     check('行里除「⋯」之外没有别的常驻按钮（这才是标题能显示 19–20 个字的原因）',
       tpl.slice(0, menuAt).includes('data-action="more"')
@@ -2042,6 +2067,94 @@ console.log('\n⑯ 会话标题太长：两行 + 悬停看全文');
     await new Promise((r) => setTimeout(r, 80));
     check('列表重画之后收起（菜单里的按钮已经换成新节点了）', rowB.menu.hidden === true);
   }
+
+  // ---- 行尾那个「多久没动了」：平时显示时间，鼠标停上去原地换成「⋯」
+  {
+    const slotRule = css.match(/^\.session-slot\s*\{[\s\S]*?\n\}/m)?.[0] ?? '';
+    // 取规则一律**锚定行首**（`^` + m 标志）：`.session-age` 也出现在后面的悬停选择器里
+    //（`.session-more[...] ~ .session-age {`），不锚定就会取到那一条 —— 我这个坑踩过三次了。
+    const ageRule = css.match(/^\.session-age\s*\{[\s\S]*?\n\}/m)?.[0] ?? '';
+
+    // 取某条规则里某个属性的**最后一条**声明的值。
+    // 两个坑都吃过：① CSS 后者生效，只看"出现过"会被追加式变异骗过；
+    // ② `opacity:\s*0` 会把 `transition: opacity 0.15s ease` 也算上（前缀匹配）——
+    // 所以统一走这个函数，不再手写正则。
+    const cssDecl = (rule, prop) => {
+      const found = [...String(rule).matchAll(new RegExp(`(?:^|[;{\\s])${prop}\\s*:\\s*([^;]+);`, 'g'))];
+      return found.length ? found[found.length - 1][1].trim() : '';
+    };
+
+    check('行尾有一个槽位，里面同时放着「⋯」和「多久了」',
+      /class="session-slot"/.test(html) && /data-field="age"/.test(html)
+        && /class="session-slot"[\s\S]*data-action="more"[\s\S]*data-field="age"/.test(html));
+    check('槽位宽度**固定**（不然悬停切换那一下标题会重新截断）',
+      /^\d+px$/.test(cssDecl(slotRule, 'width')), `${cssDecl(slotRule, 'width')} ← ${slotRule.slice(0, 120)}`);
+    check('时间（不是「⋯」）是默认露出来的那一个',
+      // 两块重叠摆在同一个位置（合并选择器里给定位），而且时间**自己那条规则**里没把自己藏起来
+      /\.session-age,\s*\.session-more\s*\{[^}]*position:\s*absolute[^}]*right:\s*0/.test(css)
+        && cssDecl(ageRule, 'opacity') === '',
+      `${cssDecl(ageRule, 'opacity')} ← ${ageRule.slice(0, 120)}`);
+    // 这两块是**重叠**的，而时间在后面 ⇒ 画在上层。悬停时它只是 opacity: 0，
+    // 而**透明度不影响点击命中** —— 不写 pointer-events: none 的话，那层看不见的时间
+    // 会把「⋯」的点击全吃掉（真人点三个点没反应）。替身不做命中测试，所以只能这样守。
+    check('时间不参与点击（否则它会盖住「⋯」，点三个点没反应）',
+      cssDecl(ageRule, 'pointer-events') === 'none', ageRule.slice(0, 160));
+    check('悬停/聚焦/菜单开着时，时间让位给「⋯」',
+      /\.session-item:hover \.session-age[\s\S]*opacity:\s*0/.test(css)
+        && /\.session-more\[aria-expanded="true"\] ~ \.session-age/.test(css));
+    check('触摸屏没 hover：「⋯」常显、时间藏起来（两个都露会叠在一起）',
+      /@media \(hover: none\)\s*\{[\s\S]*?\.session-age\s*\{\s*opacity:\s*0/.test(css));
+
+    // 时间怎么算：给几种 updatedAt，看渲染出来的文字
+    const MIN = 60_000;
+    const HOUR = 60 * MIN;
+    const DAY = 24 * HOUR;
+    const now = Date.now();
+    const cases = [
+      ['十分钟前建的', now - 10_000, '刚刚'],
+      ['五分钟前动过', now - 5 * MIN, '5 分钟前'],
+      ['三小时前动过', now - 3 * HOUR, '3 小时前'],
+      ['昨天动过', now - 26 * HOUR, '昨天'],
+      ['四天前动过', now - 4 * DAY, '4 天前'],
+      ['三周前动过', now - 21 * DAY, '3 周前'],
+      ['五个月前动过', now - 150 * DAY, '5 个月前'],
+      ['两年前动过', now - 800 * DAY, '2 年前'],
+    ];
+    // 这些会话的**创建时间故意都设在两年前**，只有 updatedAt 各不相同 ——
+    // 这样「按创建时间算」的实现会全部渲染成「2 年前」，上面每一条断言都会失败。
+    // （我第一版把两个时间设成一样，结果那条变异完全看不出来。）
+    const payload = {
+      activeId: 's_age_first',
+      sessions: cases.map(([title, updatedAt], i) => ({
+        id: i === 0 ? 's_age_first' : `s_age_${i}`,
+        title,
+        createdAt: now - 800 * DAY,
+        updatedAt,
+        messages: [],
+      })),
+    };
+    storage.set('duitanlu.sessions.v2', JSON.stringify(payload));
+    for (const h of windowHandlers.filter((x) => x.type === 'storage')) {
+      h.fn({ key: 'duitanlu.sessions.v2', newValue: JSON.stringify(payload) });
+    }
+    await new Promise((r) => setTimeout(r, 60));
+
+    const ages = new Map();
+    for (const listId of ['pinned-list', 'recent-list']) {
+      for (const row of getEl(listId).children) {
+        const title = row.querySelector('[data-field="name"]')?.textContent ?? '';
+        ages.set(title, row.querySelector('[data-field="age"]')?.textContent ?? '（没渲染出来）');
+      }
+    }
+    for (const [title, , expected] of cases) {
+      check(`「${title}」的行尾显示「${expected}」`, ages.get(title) === expected, String(ages.get(title)));
+    }
+    // 八行的创建时间都一样，但显示出来必须**各不相同** ——
+    // 这一条是「按 updatedAt 算」的直接证据（按创建时间算的话八行会一模一样）。
+    const distinct = new Set([...ages.values()]);
+    check('同一批会话行尾显示的是各自的最后活动时间（不是统一的创建时间）',
+      distinct.size >= 6, `${distinct.size} 种：${[...distinct].join(' / ')}`);
+  }
 }
 
 console.log('\n⑰ 会话分支：从这一轮分出一个新会话');
@@ -2109,7 +2222,7 @@ console.log('\n⑰ 会话分支：从这一轮分出一个新会话');
   check('标题是「原标题-分支1」', branch?.title === `${source.title}-分支1`, branch?.title);
   check('新会话成了当前会话', state().activeId === branch?.id);
   check('内容复制过来了', branch?.messages.length === source.messages.length, String(branch?.messages.length));
-  check('标题来源标成手动（「AI 起名」不许覆盖分支名）', branch?.titleSource === 'manual');
+  check('标题来源标成手动（「自动命名」不许覆盖分支名）', branch?.titleSource === 'manual');
   check('新会话不置顶', branch?.pinned === false);
   check('出处记下来了（哪个会话、从哪一条分的）',
     branch?.branchOf?.id === source.id && branch?.branchOf?.messageId === answer.id,

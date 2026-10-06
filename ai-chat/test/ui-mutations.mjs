@@ -617,7 +617,25 @@ runner.run('菜单塞在行里（absolute 会被列表的 overflow 裁掉）', C
 );
 
 runner.run('「⋯」做成四个文字按钮那么宽（又把行宽吃回去了）', CSS, (src) =>
-  src.replace('  width: 26px;\n  height: 26px;\n  margin-right: 4px;', '  width: 145px;\n  height: 26px;\n  margin-right: 4px;'),
+  // 靶点跟过两次：先是 .session-tools 那一组，后来 margin-right 挪到了 .session-slot 上
+  src.replace('  width: 26px;\n  height: 26px;\n  padding: 0;', '  width: 145px;\n  height: 26px;\n  padding: 0;'),
+);
+
+// 措辞是用户定过的（「重命名」/「自动命名」），改回去也得被抓住 ——
+// 这两条守的不是功能，是「菜单上写的那几个字不许自己漂回去」。
+runner.run('菜单上的措辞改回「改名」「AI 起名」', HTML, (src) =>
+  src
+    .replace('>重命名</button>', '>改名</button>')
+    .replace('>自动命名</button>', '>AI 起名</button>'),
+);
+
+runner.run('气泡提示里又把这件事叫「起名」', APP, (src) =>
+  src.replace("flashHint('正在自动命名…', 1600);", "flashHint('正在让 AI 起名…', 1600);"),
+);
+
+runner.run('「重命名」的对话框又写回「起个名字」', APP, (src) =>
+  // 这条专门盯「不许出现改名叫起名」那条断言抓不住的说法：旧文案里没有「起名」两个字
+  src.replace("window.prompt('给这个会话换个名字'", "window.prompt('给这个对话起个名字'"),
 );
 
 // ---- 会话栏宽度可拖（写 --rail-w，两处栅格共用）
@@ -669,6 +687,46 @@ runner.run('值没变也照写 CSS 变量（每拖一下都写一遍 DOM）', AP
 
 runner.run('窄屏上还显示拖拽手柄（那边拖它没有意义）', CSS, (src) =>
   src.replace('  .rail-resizer {\n    display: none;\n  }\n', ''),
+);
+
+// ---- 行尾那个「多久没动了」：平时显示时间，悬停原地换成「⋯」
+
+runner.run('行尾不显示时间（槽位空着）', HTML, (src) =>
+  src.replace('          <span class="session-age" data-field="age"></span>\n', ''),
+);
+
+runner.run('悬停时不换成「⋯」（时间和三个点叠在一起）', CSS, (src) =>
+  src.replace(
+    '.session-item:hover .session-age,\n.session-item:focus-within .session-age,\n.session-more[aria-expanded="true"] ~ .session-age {\n  opacity: 0;\n}\n',
+    '',
+  ),
+);
+
+runner.run('槽位宽度不固定（悬停那一下标题会重新截断）', CSS, (src) =>
+  // 必须**改写**那句声明：插一句 width: auto 在前面没用（CSS 后者生效，变异等于没生效 —— 我第一版就是这么写的）
+  src.replace('  width: 52px;\n  height: 26px;\n  margin: 5px 4px 0 0;', '  width: auto;\n  height: 26px;\n  margin: 5px 4px 0 0;'),
+);
+
+runner.run('触摸屏上时间和「⋯」叠在一起', CSS, (src) =>
+  src.replace(
+    '@media (hover: none) {\n  .session-more {\n    opacity: 1;\n  }\n  .session-age {\n    opacity: 0;\n  }\n}',
+    '@media (hover: none) {\n  .session-more {\n    opacity: 1;\n  }\n}',
+  ),
+);
+
+runner.run('时间那块挡住「⋯」（真人点三个点没反应）', CSS, (src) =>
+  src.replace(
+    '  transition: opacity 0.15s ease;\n  pointer-events: none; /* 为什么必须有这一行，见下 */\n',
+    '  transition: opacity 0.15s ease;\n',
+  ),
+);
+
+runner.run('「多久了」算错档（把分钟当成小时）', APP, (src) =>
+  src.replace('  const hours = Math.floor(minutes / 60);', '  const hours = Math.floor(minutes / 6000);'),
+);
+
+runner.run('时间用创建时间而不是最后活动时间（刚发过消息的会话还显示「3 天前」）', APP, (src) =>
+  src.replace("  if (age) age.textContent = formatAge(session.updatedAt);", "  if (age) age.textContent = formatAge(session.createdAt);"),
 );
 
 runner.finish();

@@ -954,14 +954,20 @@ group('服务端日志 · 出事要留痕');
     check('日志里写的是它真正监听的端口',
       dump.includes(`端口 ${Number(started.base.split(':').pop())}`), dump.slice(0, 120));
 
+    // 这个日志文件是**同一次测试里多次尝试共用**的：随机端口偶尔会撞上系统保留的端口段
+    // （Windows 上表现为 `listen EACCES`，被 hypervisor 之类占掉一批），那次尝试会留下
+    // 「未捕获异常 + 进程结束」两条记录。它跟下面这条断言要看的「硬终止不留痕」无关 ——
+    // 所以只从**成功那次启动之后**往后算。
+    const mark = readLog().length;
+
     started.stop();
     await new Promise((r) => setTimeout(r, 400));
-    const after = readLog();
+    const after = readLog().slice(mark);
     // Windows 上 child.kill() 是硬终止：子进程收不到信号、也没有退出回调 ——
     // 所以这里**不该**出现「收到 SIG…」或「进程结束」。这条断言守的正是那个读法：
     // 日志里干干净净（只有启动行）＝ 进程是被外部直接干掉的。
     check('硬终止不会在日志里留下结束记录（这正是「日志干净＝被外部结束」的判断依据）',
-      !after.includes('收到 SIG') && !after.includes('进程结束'), after.slice(-160));
+      !after.includes('收到 SIG') && !after.includes('进程结束'), after.slice(-160) || '（硬终止之后没有新增记录）');
   }
 }
 

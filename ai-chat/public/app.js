@@ -342,6 +342,53 @@ function formatClock(ts) {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/**
+ * 「这个会话多久没动了」—— 会话列表行尾那个小时间。
+ *
+ * 用**相对时间**而不是绝对时刻：在列表里扫一眼想知道的是「新不新」，
+ * 而不是「几点几分」。绝对时刻在下面那行 meta 里已经有了，这里不重复它的职责。
+ *
+ * 分档到「月 / 年」为止，**不用日期**：日期形式（`2026/10/6`）会把行尾那块撑宽，
+ * 而宽度是固定的（悬停要换成「⋯」，两块必须一样宽）。
+ *
+ * @param {number} ts 会话最后活动时间
+ * @param {number} [now] 便于测试注入的「现在」
+ */
+function formatAge(ts, now = Date.now()) {
+  const value = Number(ts);
+  const diff = now - value;
+  if (!Number.isFinite(value) || !Number.isFinite(diff)) return '';
+  if (diff < 60_000) return '刚刚'; // 含「未来时间」这种脏数据（负数也落这里）
+
+  const minutes = Math.floor(diff / 60_000);
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  if (days === 1) return '昨天';
+  if (days < 7) return `${days} 天前`;
+  if (days < 30) return `${Math.floor(days / 7)} 周前`;
+  if (days < 365) return `${Math.floor(days / 30)} 个月前`;
+  return `${Math.floor(days / 365)} 年前`;
+}
+
+/**
+ * 只刷新行尾那几个时间（不重建列表）。
+ * 时间会随时间变（`刚刚` → `5 分钟前`），页面挂久了不刷新就一直显示旧的。
+ * 只在文字真的变了才写 DOM —— 和这一页其他地方的规矩一致。
+ */
+function refreshSessionAges() {
+  if (!els.sessionList) return;
+  const now = Date.now();
+  for (const item of els.sessionList.querySelectorAll('.session-item')) {
+    const session = store.sessions.find((s) => s.id === item.dataset.id);
+    const age = item.querySelector?.('[data-field="age"]');
+    if (!session || !age) continue;
+    const next = formatAge(session.updatedAt, now);
+    if (age.textContent !== next) age.textContent = next;
+  }
+}
+
 function formatDuration(ms) {
   if (!Number.isFinite(ms) || ms < 0) return '';
   if (ms < 1000) return `${ms}ms`;
@@ -628,6 +675,9 @@ function sessionRow(session, activeId) {
   item.dataset.turns = String(turns);
   frag.querySelector('[data-field="meta"]').textContent =
     `${formatClock(session.updatedAt)} · ${turns} 轮 · ${personaLabel(session.personaId)}`;
+  // 行尾那个「多久了」：平时显示它，鼠标停在行上时换成「⋯」（见 styles.css 的 .session-slot）
+  const age = frag.querySelector('[data-field="age"]');
+  if (age) age.textContent = formatAge(session.updatedAt);
 
   const pin = frag.querySelector('[data-action="pin"]');
   const pinned = session.pinned === true;
@@ -718,7 +768,7 @@ els.sessionList.addEventListener('click', (event) => {
 
   if (action === 'rename') {
     const session = store.sessions.find((s) => s.id === id);
-    const next = window.prompt('给这个对话起个名字', session?.title ?? '');
+    const next = window.prompt('给这个会话换个名字', session?.title ?? '');
     if (next !== null) {
       store.renameSession(id, next);
       renderAll();
@@ -729,16 +779,16 @@ els.sessionList.addEventListener('click', (event) => {
   if (action === 'retitle') {
     const session = store.sessions.find((s) => s.id === id);
     if (!session?.messages.length) {
-      flashHint('这个会话还没有内容，起不了名', 2400);
+      flashHint('这个会话还没有内容，没法命名', 2400);
       return;
     }
     if (runtime.config.mode === 'mock') {
-      flashHint('离线模式的名字是本地算的；接上模型后可以让 AI 起名', 3600);
+      flashHint('离线模式的名字是本地算的；接上模型后点「自动命名」才行', 3600);
       return;
     }
-    flashHint('正在让 AI 起名…', 1600);
+    flashHint('正在自动命名…', 1600);
     void requestTitle(id, { force: true }).then((ok) => {
-      if (!ok) flashHint('这次没起出新名字，稍后再试', 2600);
+      if (!ok) flashHint('这次没命名成功，稍后再试', 2600);
     });
     return;
   }
@@ -751,7 +801,7 @@ els.sessionList.addEventListener('click', (event) => {
 
 // ---------------------------------------------------------------- 会话行的「⋯」菜单
 //
-// 置顶 / 改名 / 起名 / 删除都收进这个菜单，行尾只留一个「⋯」。
+// 置顶 / 重命名 / 自动命名 / 删除都收进这个菜单，行尾只留一个「⋯」。
 // 为什么：那四个文字按钮以前是**常驻**排着的（只做了 `opacity: 0`，宽度照占），
 // 292px 的行里被吃掉约 145px，标题只剩六七个字。收进菜单之后整行宽度都归标题。
 //
@@ -893,6 +943,17 @@ els.sessionList.addEventListener('scroll', closeSessionMenu, true);
 window.addEventListener('resize', hideTitleFloat);
 window.addEventListener('resize', closeSessionMenu);
 
+// 行尾那几个「多久了」会随时间变（`刚刚` → `5 分钟前`）：
+// 每 30 秒刷一次，页面不可见时不干活（后台标签页不该占 CPU）。
+// 另外回到这个页面时也刷一次 —— 离开了半小时再切回来，时间该是准的。
+setInterval(() => {
+  if (!document.hidden) refreshSessionAges();
+}, 30_000);
+window.addEventListener('focus', refreshSessionAges);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) refreshSessionAges();
+});
+
 // ---------------------------------------------------------------- 会话标题
 //
 // 标题分两步走，和 ChatGPT 的做法一致：
@@ -902,7 +963,7 @@ window.addEventListener('resize', closeSessionMenu);
 //
 // 三个约束：
 //   · **只替换兜底标题**。用户自己改过的名字永远不动（titleSource === 'manual'）；
-//     只有他明确点「起名」时才允许覆盖 —— 那一次传 force。
+//     只有他明确点「自动命名」时才允许覆盖 —— 那一次传 force。
 //   · **绝不挡正文**。这是后台小请求，失败、超时、离线都只是「标题保持兜底那版」，
 //     不弹错误、不影响对话。
 //   · 不重试、不换模型：上游挂了就让它挂着，反正标题已经有一个能用的了。

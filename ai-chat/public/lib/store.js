@@ -571,7 +571,7 @@ export function createStore() {
      * 带过去：角色、系统提示词、模型、压缩摘要（覆盖范围越界就丢掉，见 branchPlan）。
      * 不带：图片（一律不带）、👍/👎 评价（那是对原会话那几页的评价）。
      * 标题 `原标题-分支N`，并标成 `manual` —— 用户明确要的分支名，
-     * 不许被「AI 起名」自动覆盖（那是另一条规则，别串）。
+     * 不许被后台的自动命名覆盖（那是另一条规则，别串）。
      *
      * @param {string} id 源会话 id
      * @param {string} messageId 分叉点（那一条回答的 id）
@@ -644,10 +644,10 @@ export function createStore() {
     },
 
     /**
-     * 用户手动改名。
+     * 用户重命名（菜单里的「重命名」）。
      *
-     * 改完把 titleSource 标成 `manual` —— 从此**任何自动改名都不许再动它**。
-     * 这是「AI 起的标题」和「我自己起的名字」之间唯一的界线，别绕过去。
+     * 改完把 titleSource 标成 `manual` —— 从此**任何后台自动命名都不许再动它**。
+     * 这是「模型起的标题」和「你自己起的名字」之间唯一的界线，别绕过去。
      */
     renameSession(id, title) {
       const session = sessions.find((s) => s.id === id);
@@ -665,7 +665,7 @@ export function createStore() {
      *
      * 规则：`fallback`（本地兜底）可以被替换；`auto` 不重复替换；
      * `manual`（用户改过）只有 `force: true` 才能动 —— 那对应界面上
-     * 用户自己点了「起名」，是他明确要求才换的。
+     * 用户自己点了「自动命名」，是他明确要求才换的。
      */
     applyTitle(id, title, { force = false } = {}) {
       const session = sessions.find((s) => s.id === id);

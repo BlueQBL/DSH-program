@@ -1411,7 +1411,7 @@ group('会话分支 · 从某一轮分出一个新会话');
   check('分出了一个新会话', Boolean(branch) && branch.id !== sourceId);
   check('它成了当前会话', store.sessionId === branch.id);
   check('标题是「原标题-分支1」', branch.title === '闭包那点事-分支1', branch.title);
-  check('标题来源标成手动（「AI 起名」不许覆盖分支名）', branch.titleSource === 'manual', branch.titleSource);
+  check('标题来源标成手动（「自动命名」不许覆盖分支名）', branch.titleSource === 'manual', branch.titleSource);
   check('内容复制过来了', branch.messages.length === sourceMessages, String(branch.messages.length));
   check('拿到的是副本，不是原会话那批对象', branch.messages[0] !== sourceNow.messages[0]);
   check('角色跟着走', branch.personaId === 'coding', branch.personaId);

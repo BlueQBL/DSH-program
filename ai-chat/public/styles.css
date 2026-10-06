@@ -403,7 +403,7 @@ body[data-resizing="true"] {
 }
 
 /* 分支会话：行首一个小箭头，一眼看出它是从别处岔出来的。
-   用 ::before 而不是往标题文本里塞字符 —— 标题要留给导出和改名用，得保持干净。 */
+   用 ::before 而不是往标题文本里塞字符 —— 标题要留给导出和重命名用，得保持干净。 */
 .session-item[data-branch="true"] .session-name::before {
   content: '↳ ';
   color: color-mix(in srgb, var(--ink) 45%, transparent);
@@ -422,18 +422,51 @@ body[data-resizing="true"] {
 }
 
 /*
- * 行尾的「⋯」：四个功能（置顶 / 改名 / 起名 / 删除）收进菜单，行里只留这一个小按钮。
+ * 行尾那一小块：**平时显示「多久没动了」，悬停原地换成「⋯」**。
  *
- * 以前这里是四个文字按钮直接排着（`.session-tools`），而且只做了 `opacity: 0` ——
- * 视觉上藏起来了，**宽度一直占着**：292px 的行里被吃掉约 145px，标题只剩六七个字。
- * 现在整行宽度都归标题（约 19–20 个汉字）。
+ * - 宽度**固定**（52px）：两块在同一个槽位里重叠摆放、都右对齐。
+ *   如果让它们各占各的宽度，鼠标一停上去标题的可视宽度就会变、省略号位置跟着跳一下 ——
+ *   很扎眼，所以宁可留一点固定宽度。
+ * - `align-self: flex-start` + `margin-top` 让它和**标题那一行**对齐（不是整行居中）。
+ * - 时间用等宽字体、颜色更淡：它是旁注，不该和标题抢注意力。
  */
-.session-more {
-  align-self: center;
+.session-slot {
+  position: relative;
   flex: none;
+  align-self: flex-start;
+  width: 52px;
+  height: 26px;
+  margin: 5px 4px 0 0;
+}
+
+.session-age,
+.session-more {
+  position: absolute;
+  top: 0;
+  right: 0;
+}
+
+.session-age {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 26px;
+  letter-spacing: 0.02em;
+  color: color-mix(in srgb, var(--ink) 38%, transparent);
+  white-space: nowrap;
+  transition: opacity 0.15s ease;
+  pointer-events: none; /* 为什么必须有这一行，见下 */
+  /*
+   * 它和「⋯」是**重叠**的两块，而它在 DOM 里排在后面 ⇒ 画在上层。
+   * 悬停时它只是 `opacity: 0` —— 透明度**不影响点击命中**，所以那层看不见的时间会把
+   * 「⋯」的点击全吃掉：点三个点没反应、置顶 / 重命名都点不出来。
+   * （这个是真人用出来的：测试替身不做命中测试，直接往按钮上派发事件，所以照不出来。）
+   */
+}
+
+/* 「⋯」：菜单入口。平时藏着，鼠标停在行上 / 键盘聚焦 / 菜单开着时露出来 */
+.session-more {
   width: 26px;
   height: 26px;
-  margin-right: 4px;
   padding: 0;
   font-size: 15px;
   line-height: 1;
@@ -446,9 +479,21 @@ body[data-resizing="true"] {
 .session-more[aria-expanded="true"] {
   opacity: 1;
 }
+
+/* 时间和「⋯」是**同一个位置的两副面孔**：谁露出来，另一个就藏起来 */
+.session-item:hover .session-age,
+.session-item:focus-within .session-age,
+.session-more[aria-expanded="true"] ~ .session-age {
+  opacity: 0;
+}
+
+/* 触摸屏没有 hover：「⋯」常显，时间就藏起来（两个都在会叠在一起） */
 @media (hover: none) {
   .session-more {
     opacity: 1;
+  }
+  .session-age {
+    opacity: 0;
   }
 }
 
