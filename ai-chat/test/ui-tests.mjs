@@ -39,7 +39,24 @@ function makeElement(tag = 'div', attrs = {}) {
     tagName: String(tag).toUpperCase(),
     id: attrs.id ?? `el${++idSeq}`,
     dataset: {},
-    style: {},
+    /*
+     * 真实的 `style` 既能直接赋值（`style.left = '5px'`）也有 setProperty/getPropertyValue。
+     * 替身两者都要有：前者是既有断言在用的写法，后者是 CSS 变量（--rail-w）唯一能用的写法。
+     */
+    style: {
+      _vars: {},
+      setProperty(name, value) {
+        this._vars[name] = String(value);
+        this[name] = String(value);
+      },
+      getPropertyValue(name) {
+        return this._vars[name] ?? '';
+      },
+      removeProperty(name) {
+        delete this._vars[name];
+        delete this[name];
+      },
+    },
     children: [],
     className: attrs.className ?? '',
     parentElement: null,
@@ -764,6 +781,8 @@ console.log('\n⑧ 报头固定：滚到任何位置都能开新会话 / 切会�
   // 留着它，检查 transition 的规则就会被自己的注释绊倒。
   const css = readFileSync(path.resolve(PUBLIC, 'styles.css'), 'utf8')
     .replace(/\/\*[\s\S]*?\*\//g, '');
+  // app.js 也要读一份：有些断言是「这段代码不该再存在」（比如滚动收窄那套阈值）
+  const appJs = readFileSync(path.resolve(PUBLIC, 'app.js'), 'utf8');
 
   // 这条是用户要求的核心：报头不跟着正文滚走
   const mastheadRule = css.match(/\.masthead\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
@@ -782,11 +801,18 @@ console.log('\n⑧ 报头固定：滚到任何位置都能开新会话 / 切会�
   check('报头层级高于输入区', zMasthead > zComposer, `报头 ${zMasthead} vs 输入区 ${zComposer}`);
   check('导出弹层高于报头（否则会被遮挡）', zPopup > zMasthead, `弹层 ${zPopup} vs 报头 ${zMasthead}`);
 
-  // 紧凑态：滚动后收窄，但按钮必须还在
-  check('定义了紧凑态样式', /\.masthead\[data-compact="true"\]/.test(css));
-  const compactRule = css.match(/\.masthead\[data-compact="true"\]\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
-  check('紧凑态只缩小留白（不动按钮）', /padding/.test(compactRule), compactRule.slice(0, 100));
-  check('紧凑态不隐藏 masthead-tools', !/masthead-tools[^}]*display:\s*none/.test(css));
+  // ---- 报头恒定：不做「滚下去自动收窄」
+  //
+  // 收窄那版曾经是对的（把空间让给正文），但它有两个用户明确否掉的后果：
+  //   · 会话列表的吸顶偏移和高度上限都按 `--masthead-h` 算 —— 报头一矮，列表就往上跳、还变高；
+  //   · 报头是半透明 + 模糊的，正文的字会从标题下面**透出来**。
+  // 现在：高度恒定、不透明。这两条断言就是钉这两件事。
+  check('没有「紧凑态」这套样式了（报头高度恒定）', !/data-compact/.test(css), '样式表里还有 data-compact');
+  check('代码里没有「按滚动改报头状态」这回事了', !/dataset\.compact/.test(appJs));
+  check('没有滚动收窄的阈值了（高度不随滚动变）', !/COMPACT_ENTER_AT|COMPACT_EXIT_AT/.test(appJs));
+  check('报头是**不透明**的（正文不许从标题下面透出来）',
+    /background:\s*var\(--paper\)/.test(mastheadRule) && !/backdrop-filter/.test(mastheadRule),
+    mastheadRule.slice(-160));
 
   // 会话栏的 sticky 偏移跟着报头高度走，否则它的表头会被压在报头下面
   const railRule = css.match(/\.rail\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
@@ -795,110 +821,39 @@ console.log('\n⑧ 报头固定：滚到任何位置都能开新会话 / 切会�
   // ---- 运行期行为
   check('滚动监听已注册', scrollHandlers.length > 0, `${scrollHandlers.length} 个`);
 
-  // 首屏：不紧凑，并且把实测高度写给 CSS
-  window.scrollY = 0;
-  // 快照一份再遍历：处理器执行时若又注册了监听，直接遍历原数组会越跑越多
-  for (const fn of [...scrollHandlers]) fn();
-  check('首屏不是紧凑态', mastheadEl.dataset.compact === 'false', String(mastheadEl.dataset.compact));
-  check('报头高度写进了 CSS 变量（供会话栏用）',
-    document.documentElement._vars['--masthead-h'] === '116px',
-    String(document.documentElement._vars['--masthead-h']));
-
-  // 往下滚：切换成紧凑态
-  window.scrollY = 400;
-  for (const fn of [...scrollHandlers]) fn();
-  check('往下滚之后切换成紧凑态', mastheadEl.dataset.compact === 'true', String(mastheadEl.dataset.compact));
-
-  // 滚回顶部：恢复
-  window.scrollY = 0;
-  for (const fn of [...scrollHandlers]) fn();
-  check('滚回顶部后恢复非紧凑', mastheadEl.dataset.compact === 'false', String(mastheadEl.dataset.compact));
-
-  // ---- 抖动缺陷（用户报的「快到顶时整页一直抖」）
-  //
-  // 复现条件是个跨帧的反馈循环，不是同一帧里的重入：
-  //   滚动越过阈值 → 报头收窄 → 文档矮了 30 多像素 → 浏览器的滚动锚定把 scrollY 拉回来
-  //   → 又回到阈值另一侧 → 状态翻回去 → 文档又长回来 → …
-  // 阈值那一带就会一直上下跳。所以光靠「本帧重入守卫」是挡不住的，
-  // 必须让状态**只跟方向有关**：进入和退出用两个不同的阈值，中间留缓冲带。
-  //
-  // 断言不写死 48/8 这两个数字，而是从外部行为把两个阈值量出来 ——
-  // 这样调参数不会弄坏测试，但「两个阈值退化成同一个」一定会被抓住。
-
   const callHandlers = () => {
     for (const fn of [...scrollHandlers]) fn();
   };
   const goTo = (y) => {
     window.scrollY = y;
     callHandlers();
-    return mastheadEl.dataset.compact;
   };
 
-  // 从完整态出发往下走，量出「进入紧凑」的位置
+  // 首屏：把实测高度写给 CSS（会话栏按它算吸顶偏移）
   goTo(0);
-  let enterAt = -1;
-  for (let y = 1; y <= 200; y += 1) {
-    if (goTo(y) === 'true') {
-      enterAt = y;
-      break;
-    }
-  }
+  check('报头高度写进了 CSS 变量（供会话栏用）',
+    document.documentElement._vars['--masthead-h'] === '116px',
+    String(document.documentElement._vars['--masthead-h']));
 
-  // 从紧凑态出发往上走，量出「退出紧凑」的位置
+  // 滚到任何位置，这个变量都不能变 —— 会话列表就是按它定位的，
+  // 它一变，列表就跟着上下跳（这正是用户报的那个问题）。
+  const heightBefore = document.documentElement._vars['--masthead-h'];
   goTo(400);
-  let exitAt = -1;
-  for (let y = 199; y >= 0; y -= 1) {
-    if (goTo(y) === 'false') {
-      exitAt = y;
-      break;
-    }
-  }
-
-  check('能滚进紧凑态', enterAt > 0, `进入阈值 ≈ ${enterAt}`);
-  check('能滚回完整态', exitAt >= 0, `退出阈值 ≈ ${exitAt}`);
-  // 缓冲带要「足够宽」，不能只是比 0 大一点点：报头收窄一步会让文档高度少 60px 左右，
-  // 缓冲带比这个台阶还窄的话，一次扰动就能把 scrollY 推过对岸那条线，循环照样成立。
-  check('缓冲带比报头的高度台阶更宽（这是防抖的关键）',
-    enterAt - exitAt >= 40, `进入 ${enterAt} − 退出 ${exitAt} = ${enterAt - exitAt}，需 ≥ 40`);
-
-  // 缓冲带内必须「记住方向」：同一个 scrollY 得到的状态取决于从哪边来，
-  // 这正是滞回的定义。单阈值实现会在这里露馅 —— 它会两次都返回同一个值。
+  goTo(1200);
+  goTo(40); // 老实现的阈值就在 80 附近，这里专门走一遍那一带
   goTo(0);
-  goTo(300);
-  const fromBelowInBand = goTo(Math.round((enterAt + exitAt) / 2)); // 从紧凑态退回缓冲带
-  goTo(0);
-  const fromTopInBand = goTo(Math.round((enterAt + exitAt) / 2)); // 从顶部走进缓冲带
-  check('缓冲带内保持来向的状态（滞回生效）',
-    fromBelowInBand === 'true' && fromTopInBand === 'false',
-    `从下往上 ${fromBelowInBand} / 从上往下 ${fromTopInBand}`);
+  check('滚到哪儿报头高度都不变（会话列表因此纹丝不动）',
+    document.documentElement._vars['--masthead-h'] === heightBefore,
+    `${heightBefore} → ${document.documentElement._vars['--masthead-h']}`);
 
-  // 抖动之所以看得见，是因为写入次数跟着滚动次数跑：
-  // 位置没变也写一遍，样式就一帧帧重算。现在只有状态真的变了才写。
-  goTo(600); // 先滚到位，后面那三十次才真的算「位置没变」
-  const writesBefore = compactWrites.length;
-  for (let i = 0; i < 30; i += 1) goTo(600);
-  check('同一个位置反复滚动不再重复写 DOM',
-    compactWrites.length === writesBefore,
-    `30 次滚动写了 ${compactWrites.length - writesBefore} 次`);
-
-  // 并且写入的值必须是交替的，不能出现 true/true 或来回翻的轨迹
-  const sweep = [];
-  goTo(0);
-  for (let y = 0; y <= 120; y += 3) sweep.push(goTo(y));
-  for (let y = 120; y >= 0; y -= 3) sweep.push(goTo(y));
-  const flips = sweep.filter((v, i) => i > 0 && v !== sweep[i - 1]).length;
-  check('来回滚一遍只翻两次状态（下→上各一次，没有抖动）',
-    flips === 2, `翻了 ${flips} 次：${sweep.join('').slice(0, 60)}`);
-
-  // --masthead-h 同理：高度没变就不该重写，否则会话栏每帧都要重算 max-height
+  // 高度没变就不该重写 CSS 变量，否则会话栏每帧都要重算 max-height
   const varWritesBefore = document.documentElement._varWrites.length;
   for (let i = 0; i < 20; i += 1) goTo(700 + i);
   check('报头高度没变时不重写 CSS 变量',
     document.documentElement._varWrites.length === varWritesBefore,
     `20 次滚动写了 ${document.documentElement._varWrites.length - varWritesBefore} 次`);
 
-  // 布局过渡会让「文档高度」在 180ms 里一帧帧地变，等于把抖动的燃料留在页面里。
-  // 报头里任何影响盒子高度的属性都不该有 transition。
+  // 布局过渡会让「文档高度」一帧帧地变 —— 报头里任何影响盒子高度的属性都不该有 transition
   check('报头本身没有过渡（高度变化必须瞬时完成）',
     !/transition:/.test(mastheadRule), mastheadRule.slice(-80));
   check('标题字号没有过渡（字号会带动行高、行高会带动报头高度）',
@@ -1531,7 +1486,8 @@ console.log('\n⑭ 布局：会话列表与聊天框各占各的列，互不干�
   const composerRule = css.match(/\.composer\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
 
   check('会话栏与右栏是两列（互不重叠的前提）',
-    /grid-template-columns:\s*\d+px\s+minmax\(0,\s*1fr\)/.test(boardRule), boardRule.slice(0, 80));
+    /grid-template-columns:\s*(?:\d+px|var\(--rail-w[^)]*\))\s+minmax\(0,\s*1fr\)/.test(boardRule),
+    boardRule.slice(0, 80));
   check('会话栏有高度上限（会话再多也不撑高页面）', /max-height:\s*calc\(100dvh/.test(railRule), railRule);
   check('列表在自己那一格里滚动', /overflow-y:\s*auto/.test(listRule), listRule.slice(0, 60));
   check('聊天框仍然吸底，滚到哪儿都能打字',
@@ -1553,15 +1509,27 @@ console.log('\n⑭ 布局：会话列表与聊天框各占各的列，互不干�
   check('开关脱离文档流（标题进紧凑态、字号变小也推不动它）',
     !/position:\s*static/.test(brandToggleRule), brandToggleRule);
 
-  // 报头第一行和 .board 一样是两格：列宽和缝必须逐字一致，
+  // 报头第一行和 .board 一样是两格：列宽和缝必须**逐字一致**，
   // 否则开关就落不到「正文左边缘的左边一点」那个位置上了。
-  const mastheadCols = css.match(/\.masthead\s*\{[\s\S]*?\n\}/)?.[0].match(/grid-template-columns:[^;]+;/)?.[0] ?? '';
+  //
+  // 这条在有拖拽之后变了写法：两处不再各自写死 292px，而是共用 `var(--rail-w)` ——
+  // 于是"改一处忘一处"这个隐患从根上没了（拖一下两处一起动）。所以这里断言的是
+  // **两边用的是同一个变量**，比"两边字面量相同"更强。
+  const mastheadRule = css.match(/\.masthead\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+  const mastheadCols = mastheadRule.match(/grid-template-columns:[^;]+;/)?.[0] ?? '';
   const boardCols = boardRule.match(/grid-template-columns:[^;]+;/)?.[0] ?? '';
   check('报头第一行也是两格（会话栏一格 + 正文一格）',
-    /grid-template-columns:\s*292px\s+minmax\(0,\s*1fr\)/.test(mastheadCols), mastheadCols);
+    /grid-template-columns:\s*var\(--rail-w[^)]*\)\s+minmax\(0,\s*1fr\)/.test(mastheadCols), mastheadCols);
   check('报头两格的列宽和 .board 逐字一致（改一处就得改另一处）',
     mastheadCols === boardCols && mastheadCols !== '', `${mastheadCols} / ${boardCols}`);
-  check('两处的缝也一样宽', /column-gap:\s*28px/.test(css.match(/\.masthead\s*\{[\s\S]*?\n\}/)?.[0] ?? ''));
+  check('两处都用同一个变量 --rail-w（拖会话栏时不会只动一边）',
+    /var\(--rail-w/.test(mastheadCols) && /var\(--rail-w/.test(boardCols),
+    `${mastheadCols} / ${boardCols}`);
+  check('--rail-w 有默认值（JS 没跑起来之前也是 292px）',
+    /:root\s*\{[\s\S]*?--rail-w:\s*292px/.test(css));
+  check('两处都不再写死 292px（否则拖了之后报头和正文会错位）',
+    !/grid-template-columns:\s*292px/.test(css));
+  check('两处的缝也一样宽', /column-gap:\s*28px/.test(mastheadRule));
   check('右格贴右边缘（模型框还在页面最右边，不是停在正文左边）',
     /justify-content:\s*flex-end/.test(css.match(/\.masthead-tools\s*\{[\s\S]*?\n\}/)?.[0] ?? ''));
   check('副标题不换行（换行会把报头顶高，整页跟着跳）',
@@ -1580,6 +1548,81 @@ console.log('\n⑭ 布局：会话列表与聊天框各占各的列，互不干�
     railButtonRule.slice(0, 100));
   check('「引用会话」也是按钮，不是一行小字（同一件事在两个地方长得一样）',
     /class="ghost-button rail-reference"[^>]*id="reference-new-button"/s.test(railBlock));
+
+  // ---- 会话栏宽度可以拖（写 --rail-w 一个变量，两处栅格共用）
+  {
+    const resizerRule = css.match(/\.rail-resizer\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+    const resizer = getEl('rail-resizer');
+    const vars = () => document.documentElement._vars;
+    const stored = () => storage.get('duitanlu.railWidth.v1');
+
+    check('会话栏里有拖拽手柄（role=separator，是个按钮所以键盘也能聚焦）',
+      railBlock.includes('id="rail-resizer"') && /role="separator"/.test(railBlock)
+        && /aria-orientation="vertical"/.test(railBlock));
+    check('手柄在会话栏里、不在报头那一层（免得和收起/展开开关抢点击）',
+      html.indexOf('id="rail-resizer"') > html.indexOf('class="rail"')
+        && html.indexOf('id="rail-resizer"') < html.indexOf('class="stage"'));
+    check('手柄的鼠标样式是左右拖', /cursor:\s*col-resize/.test(resizerRule), resizerRule.slice(0, 80));
+    check('窄屏（单列）里手柄藏起来 —— 那边没有「缝」可拖',
+      /@media \(max-width: 1000px\)[\s\S]*?\.rail-resizer\s*\{\s*display:\s*none/.test(css));
+
+    // 启动时就套用记住的宽度（没存过就是默认 292）
+    check('启动时把宽度写进 --rail-w', vars()['--rail-w'] === '292px', String(vars()['--rail-w']));
+    check('手柄上的无障碍数值跟着写', resizer.attributes['aria-valuenow'] === '292',
+      resizer.attributes['aria-valuenow']);
+
+    // 拖：按下 → 移动 → 松开
+    const before = document.documentElement._varWrites.length;
+    dispatch(resizer, 'pointerdown', { clientX: 300, pointerId: 1, preventDefault() {} });
+    dispatch(resizer, 'pointermove', { clientX: 360, pointerId: 1, preventDefault() {} });
+    check('往右拖 60px：会话栏宽 292 → 352', vars()['--rail-w'] === '352px', String(vars()['--rail-w']));
+    check('拖动中给整页上锁（不然会顺手选中文字）',
+      document.body.dataset.resizing === 'true', String(document.body.dataset.resizing));
+    dispatch(resizer, 'pointerup', { clientX: 360, pointerId: 1, preventDefault() {} });
+    check('松开之后解锁', document.body.dataset.resizing === undefined);
+    check('拖动结果记住了', stored() === '352', String(stored()));
+
+    // 上下限：拖过头停在边界上（而且不许把正文挤成一条）
+    dispatch(resizer, 'pointerdown', { clientX: 0, pointerId: 1, preventDefault() {} });
+    dispatch(resizer, 'pointermove', { clientX: 9999, pointerId: 1, preventDefault() {} });
+    check('拖到天边也停在 460px', vars()['--rail-w'] === '460px', String(vars()['--rail-w']));
+    dispatch(resizer, 'pointermove', { clientX: -9999, pointerId: 1, preventDefault() {} });
+    check('拖到最左也停在 200px', vars()['--rail-w'] === '200px', String(vars()['--rail-w']));
+    dispatch(resizer, 'pointerup', { clientX: -9999, pointerId: 1, preventDefault() {} });
+
+    // 值没变就不写 DOM（和报头高度那条规矩一致：不制造无谓的写入）
+    const writesBefore = document.documentElement._varWrites.length;
+    dispatch(resizer, 'keydown', { key: 'ArrowLeft', shiftKey: false, preventDefault() {} });
+    check('已经在最小宽度上再按 ← 不会重写变量（值没变）',
+      document.documentElement._varWrites.length === writesBefore,
+      `写了 ${document.documentElement._varWrites.length - writesBefore} 次`);
+
+    // 键盘：← → 各 8px，Home / End 到两端
+    dispatch(resizer, 'keydown', { key: 'ArrowRight', shiftKey: false, preventDefault() {} });
+    check('按 → 加 8px', vars()['--rail-w'] === '208px', String(vars()['--rail-w']));
+    dispatch(resizer, 'keydown', { key: 'ArrowRight', shiftKey: true, preventDefault() {} });
+    check('Shift + → 加 24px', vars()['--rail-w'] === '232px', String(vars()['--rail-w']));
+    dispatch(resizer, 'keydown', { key: 'End', preventDefault() {} });
+    check('End 到最大', vars()['--rail-w'] === '460px', String(vars()['--rail-w']));
+    dispatch(resizer, 'keydown', { key: 'Home', preventDefault() {} });
+    check('Home 到最小', vars()['--rail-w'] === '200px', String(vars()['--rail-w']));
+    check('键盘调整也记住了', stored() === '200', String(stored()));
+
+    // 双击回默认
+    dispatch(resizer, 'dblclick', {});
+    check('双击回到默认 292px', vars()['--rail-w'] === '292px', String(vars()['--rail-w']));
+    check('默认宽度也落盘', stored() === '292', String(stored()));
+
+    // 窄屏：CSS 已经藏了柄，JS 也拒绝开工（两道防线）
+    const wideWidth = vars()['--rail-w'];
+    globalThis.window.innerWidth = 800;
+    dispatch(resizer, 'pointerdown', { clientX: 300, pointerId: 1, preventDefault() {} });
+    dispatch(resizer, 'pointermove', { clientX: 500, pointerId: 1, preventDefault() {} });
+    check('窄屏上拖不动（单列布局里没有「缝」）', vars()['--rail-w'] === wideWidth,
+      String(vars()['--rail-w']));
+    dispatch(resizer, 'pointerup', { clientX: 500, pointerId: 1, preventDefault() {} });
+    globalThis.window.innerWidth = 1200;
+  }
 
   // 会话多了之后，新建/切换到的会话可能停在可视区外 —— 要主动滚一下。
   // 替身里「列表元素」就是按选择器缓存的那个占位元素，app 对谁调了 scrollIntoView，
@@ -1795,7 +1838,213 @@ console.log('\n⑮ 会话列表：置顶 / 最近 两组，各自收放');
     idsIn(recentList).every((id) => rowsById.get(id)?.pinned !== true), idsIn(recentList).join(','));
 }
 
-console.log('\n⑯ 会话分支：从这一轮分出一个新会话');
+console.log('\n⑯ 会话标题太长：两行 + 悬停看全文');
+//
+// 会话栏 292px、标题上限 60 字（store.js 的 normalizeSession），一行只放得下约 20 个汉字 ——
+// 所以标题必须有个看全的出口：先靠 CSS 放宽到两行，再由这里的浮层补长尾。
+//
+// 编号放在最后：前面几段的编号在 README 里被引用过（比如「⑯ 的最后两条断言」），
+// 中间插一段会把那些引用指错地方。
+{
+  const css = readFileSync(path.resolve(PUBLIC, 'styles.css'), 'utf8');
+  const html = readFileSync(path.join(PUBLIC, 'index.html'), 'utf8');
+
+  // 标题**只占一行**：两行那版试过，行高参差不齐、列表被撑高，用户明确否掉了。
+  //
+  // 匹配必须**限定在这条规则的花括号内**（`[^}]*`）：用 `[\s\S]*?` 会跨过规则边界，
+  // 撞上文件后面别的 `-webkit-line-clamp`（比如 .turn-quote-text 的 6 行）——
+  // 我第一版就是这么写的，结果在干净代码上误报。
+  const nameRule = /\.session-name\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
+  check('标题只占一行（改成两行会参差不齐，用户明确否掉）',
+    /white-space:\s*nowrap/.test(nameRule) && !/line-clamp/.test(nameRule), nameRule);
+  check('放不下的部分在末尾收成省略号（不是硬切、也不是溢出）',
+    /text-overflow:\s*ellipsis/.test(nameRule) && /overflow:\s*hidden/.test(nameRule), nameRule);
+  check('完整标题的浮层默认藏着', /id="title-float"[^>]*hidden/.test(html));
+  check('浮层是 tooltip 语义', /id="title-float"[^>]*role="tooltip"/.test(html));
+  check('浮层挂在页面级（fixed 定位）—— 塞进会话行会被 overflow 裁掉',
+    /\.title-float\s*\{[\s\S]*?position:\s*fixed/.test(css));
+
+  // 造一行「标题被截断」的会话行：替身不排版，所以宽度得自己给
+  const floatEl = getEl('title-float');
+  const fullTitle = '这是一条特别长的会话标题，长到会话栏一行根本放不下，必须能看全';
+
+  // 列表里**真正渲染出来的**那一行：标题要带原生 title（屏幕阅读器/触摸屏的兜底出口）
+  const renderedRow = getEl('recent-list').children[0] ?? getEl('pinned-list').children[0];
+  const renderedName = renderedRow?.querySelector?.('[data-field="name"]');
+  check('列表里的标题带着原生 title（触摸屏、屏幕阅读器也有出口）',
+    Boolean(renderedName?.title) && renderedName.title === renderedName.textContent,
+    `title=${JSON.stringify(renderedName?.title)} 文本=${JSON.stringify(renderedName?.textContent)}`);
+
+  const rowEl = makeElement('li');
+  rowEl.className = 'session-item';
+  const nameEl = makeElement('span');
+  nameEl.className = 'session-name';
+  nameEl.textContent = fullTitle;
+  nameEl.parentElement = rowEl;
+  rowEl.querySelector = () => nameEl;
+  const setClipped = (clipped) => {
+    nameEl.scrollWidth = clipped ? 420 : 180;
+    nameEl.clientWidth = 180;
+    nameEl.scrollHeight = clipped ? 60 : 20;
+    nameEl.clientHeight = 20;
+  };
+
+  // ---- 长标题：悬停浮出全文
+  setClipped(true);
+  dispatch(getEl('session-list'), 'mouseover', { target: nameEl });
+  check('悬停被截断的标题：浮层出现', floatEl.hidden === false, String(floatEl.hidden));
+  check('浮层里是**完整**标题（不是截断那半截）', floatEl.textContent === fullTitle, floatEl.textContent);
+
+  // ---- 鼠标离开：不是立刻收，而是留 160ms —— 够把鼠标移进浮层里选中文字
+  dispatch(getEl('session-list'), 'mouseout', { target: nameEl, relatedTarget: null });
+  await new Promise((r) => setTimeout(r, 40));
+  check('刚离开那一下浮层**还留着**（有延迟，不是立刻消失）', floatEl.hidden === false);
+  await new Promise((r) => setTimeout(r, 260));
+  check('离开之后浮层收起', floatEl.hidden === true);
+
+  // ---- 鼠标移进浮层：取消收起（这就是那 160ms 延迟存在的理由 —— 文字要能选中复制）
+  dispatch(getEl('session-list'), 'mouseover', { target: nameEl });
+  dispatch(getEl('session-list'), 'mouseout', { target: nameEl, relatedTarget: null });
+  dispatch(floatEl, 'mouseenter');
+  await new Promise((r) => setTimeout(r, 260));
+  check('鼠标移进浮层之后不再收起（文字可以选中复制）', floatEl.hidden === false);
+  dispatch(floatEl, 'mouseleave');
+  check('移出浮层就收起', floatEl.hidden === true);
+
+  // ---- 键盘聚焦也浮出来（鼠标不是唯一的读法）
+  dispatch(getEl('session-list'), 'focusin', { target: nameEl });
+  check('键盘聚焦到某一行时也浮出全文', floatEl.hidden === false);
+  dispatch(getEl('session-list'), 'focusout', { target: nameEl });
+
+  // ---- 没被截断的标题不弹：弹一张写着同样内容的卡片是噪音
+  dispatch(getEl('session-list'), 'mouseover', { target: nameEl });
+  floatEl.hidden = true;
+  setClipped(false);
+  dispatch(getEl('session-list'), 'mouseover', { target: nameEl });
+  check('标题没被截断时**不**弹浮层（不制造噪音）', floatEl.hidden === true);
+
+  // ---- 位置变了就得收起来，否则指到别的地方去
+  setClipped(true);
+  dispatch(getEl('session-list'), 'mouseover', { target: nameEl });
+  dispatch(getEl('session-list'), 'scroll', {});
+  check('列表一滚动，浮层立刻收起（位置变了，留着会指错）', floatEl.hidden === true);
+
+  dispatch(getEl('session-list'), 'mouseover', { target: nameEl });
+  check('再悬停又出来（不是一次性）', floatEl.hidden === false);
+  dispatch(getEl('session-list'), 'mouseout', { target: nameEl, relatedTarget: null });
+  dispatch(getEl('new-session-button'), 'click');
+  await new Promise((r) => setTimeout(r, 80));
+  check('列表重画之后浮层收起（那一行可能已经不在了）', floatEl.hidden === true);
+
+  // ---- 行尾只留一个「⋯」，四个功能收进菜单
+  //
+  // 这一段是**同一个问题的另一半**：那四个文字按钮以前常驻行尾（只做了 opacity: 0，
+  // 宽度照占），292px 的行里被吃掉约 145px —— 标题只剩六七个字。
+  {
+    const rowAt = html.indexOf('id="session-template"');
+    const tpl = html.slice(rowAt, html.indexOf('</template>', rowAt));
+    const menuAt = tpl.indexOf('class="session-menu"');
+    const menuEnd = tpl.indexOf('</span>', menuAt);
+    const menuInner = menuAt >= 0 && menuEnd > menuAt ? tpl.slice(menuAt, menuEnd) : '';
+    const moreAt = tpl.indexOf('data-action="more"');
+
+    check('行里有一个「⋯」按钮', moreAt > -1 && /aria-haspopup="menu"/.test(tpl));
+    check('「⋯」初始 aria-expanded=false', /data-action="more"[\s\S]*?aria-expanded="false"/.test(tpl));
+    check('四个功能（置顶/改名/起名/删除）都在菜单里',
+      ['pin', 'rename', 'retitle', 'delete'].every((a) => menuInner.includes(`data-action="${a}"`)),
+      menuInner);
+    check('菜单默认藏着（不占行里的宽度）', /class="session-menu"[^>]*hidden/.test(tpl));
+    check('行里除「⋯」之外没有别的常驻按钮（这才是标题能显示 19–20 个字的原因）',
+      tpl.slice(0, menuAt).includes('data-action="more"')
+        && !/data-action="(pin|rename|retitle|delete)"/.test(tpl.slice(0, menuAt)),
+      tpl.slice(0, menuAt));
+    check('旧的「四个文字按钮常驻」那套样式已经不在样式表里',
+      !/\.session-tools\s*\{/.test(css) && !/class="session-tools"/.test(html));
+    check('「⋯」是个小按钮（26px 宽，不是四个文字按钮）',
+      /\.session-more\s*\{[^}]*width:\s*26px/.test(css));
+    check('菜单用 fixed 定位（会话列表 overflow: auto，absolute 会被裁掉）',
+      /\.session-menu\s*\{[^}]*position:\s*fixed/.test(css));
+    check('触摸屏上「⋯」常显（没有 hover 可言）',
+      /@media \(hover: none\)\s*\{\s*\.session-more\s*\{[^}]*opacity:\s*1/.test(css));
+
+    // 造两行带「⋯」的会话行（替身不解析模板，所以手工搭结构）
+    // 这一段自己读一次存储（和别处一样叫 state，块作用域里互不影响）
+    const state = () => JSON.parse(storage.get('duitanlu.sessions.v2') ?? '{}');
+    const realId = state().sessions[0].id;
+    const buildRow = (id, top) => {
+      const row = makeElement('li');
+      row.className = 'session-item';
+      row.dataset.id = id;
+      const more = makeElement('button');
+      more.className = 'session-more';
+      more.dataset.action = 'more';
+      more.parentElement = row;
+      const menu = makeElement('span');
+      menu.className = 'session-menu';
+      menu.hidden = true;
+      menu.parentElement = row;
+      const deleteItem = makeElement('button');
+      deleteItem.dataset.action = 'delete';
+      deleteItem.parentElement = row;
+      more.getBoundingClientRect = () => ({ top, bottom: top + 26, left: 240, right: 266, width: 26, height: 26 });
+      menu.offsetWidth = 150;
+      menu.offsetHeight = 120;
+      row.querySelector = (sel) => (sel === '.session-menu' ? menu : null);
+      return { row, more, menu, deleteItem };
+    };
+    const rowA = buildRow(realId, 100);
+    const rowB = buildRow(realId, 400);
+
+    dispatch(getEl('session-list'), 'click', { target: rowA.more });
+    check('点「⋯」弹出菜单', rowA.menu.hidden === false);
+    check('弹出后 aria-expanded 变成 true',
+      rowA.more.attributes['aria-expanded'] === 'true', rowA.more.attributes['aria-expanded']);
+    check('菜单摆在「⋯」旁边（fixed 定位，算出了坐标）',
+      /px$/.test(rowA.menu.style.left) && /px$/.test(rowA.menu.style.top),
+      `${rowA.menu.style.left} / ${rowA.menu.style.top}`);
+
+    dispatch(getEl('session-list'), 'click', { target: rowB.more });
+    check('同一时刻只开一个：点另一行的「⋯」，前一个收起',
+      rowA.menu.hidden === true && rowB.menu.hidden === false);
+
+    // 点菜单里的条目：事情真的做了，而且菜单收起
+    const pinnedBefore = state().sessions.find((s) => s.id === realId)?.pinned === true;
+    dispatch(getEl('session-list'), 'click', { target: rowA.menu });
+    dispatch(getEl('session-list'), 'click', { target: rowA.more });
+    const pinItem = makeElement('button');
+    pinItem.dataset.action = 'pin';
+    pinItem.parentElement = rowA.row;
+    dispatch(getEl('session-list'), 'click', { target: pinItem });
+    check('点菜单里的「置顶」真的置顶了（菜单不只是个装饰）',
+      state().sessions.find((s) => s.id === realId)?.pinned === !pinnedBefore,
+      `pinned ${pinnedBefore} → ${state().sessions.find((s) => s.id === realId)?.pinned}`);
+    check('做过动作之后菜单收起', rowA.menu.hidden === true);
+
+    // 关闭纪律：点外面 / Esc / 滚动 / 列表重画
+    dispatch(getEl('session-list'), 'click', { target: rowB.more });
+    for (const h of documentHandlers.filter((x) => x.type === 'click')) {
+      h.fn({ target: makeElement('div'), preventDefault() {} });
+    }
+    check('点菜单外面就收起', rowB.menu.hidden === true);
+
+    dispatch(getEl('session-list'), 'click', { target: rowB.more });
+    for (const h of documentHandlers.filter((x) => x.type === 'keydown')) {
+      h.fn({ key: 'Escape', preventDefault() {} });
+    }
+    check('按 Esc 收起', rowB.menu.hidden === true);
+
+    dispatch(getEl('session-list'), 'click', { target: rowB.more });
+    dispatch(getEl('session-list'), 'scroll', {});
+    check('列表一滚动就收起（位置变了，留着会指错）', rowB.menu.hidden === true);
+
+    dispatch(getEl('session-list'), 'click', { target: rowB.more });
+    dispatch(getEl('new-session-button'), 'click');
+    await new Promise((r) => setTimeout(r, 80));
+    check('列表重画之后收起（菜单里的按钮已经换成新节点了）', rowB.menu.hidden === true);
+  }
+}
+
+console.log('\n⑰ 会话分支：从这一轮分出一个新会话');
 
 {
   const input = getEl('composer-input');
@@ -1969,7 +2218,7 @@ console.log('\n⑯ 会话分支：从这一轮分出一个新会话');
   await new Promise((r) => setTimeout(r, 80));
 }
 
-console.log('\n⑰ 错误文案：服务端拒绝 ≠ 连不上服务端');
+console.log('\n⑱ 错误文案：服务端拒绝 ≠ 连不上服务端');
 
 {
   // 真事：服务端好好活着，只是用 400 拒了一个请求，
@@ -2005,7 +2254,7 @@ console.log('\n⑰ 错误文案：服务端拒绝 ≠ 连不上服务端');
   chatStreams = false;
 }
 
-console.log('\n⑱ 会话引用：把另一个会话当背景材料带进新话题');
+console.log('\n⑲ 会话引用：把另一个会话当背景材料带进新话题');
 
 {
   const input = getEl('composer-input');
@@ -2016,6 +2265,8 @@ console.log('\n⑱ 会话引用：把另一个会话当背景材料带进新话�
   const stageAt = html.indexOf('<div class="stage">');
   const panelAt = html.indexOf('id="reference-panel"');
   const noteAt = html.indexOf('id="reference-note"');
+  const exchangesAt = html.indexOf('id="exchanges"');
+  const composerAt = html.indexOf('<form class="composer"');
   check('会话列表里有「引用别的会话…」入口', /id="reference-new-button"/.test(html));
   check('引用面板默认藏着', /id="reference-panel" hidden/.test(html));
   check('材料标注条默认藏着', /id="reference-note" hidden/.test(html));
@@ -2024,8 +2275,18 @@ console.log('\n⑱ 会话引用：把另一个会话当背景材料带进新话�
       .every((id) => html.includes(`id="${id}"`)));
   check('材料标注条用虚线边，和分支那条实线标注区分开（两件事别混）',
     /\.reference-note\s*\{[\s\S]*?border-left:\s*2px dashed/.test(css));
-  check('面板和标注条都在正文区里（不在对话流里）',
-    stageAt >= 0 && panelAt > stageAt && noteAt > stageAt);
+  // 位置：材料条和面板都在**对话流后面**，贴着输入区 ——
+  // 之前它们挂在正文最上面，存量会话聊长了，用户得翻回开头才看得见（点开面板甚至像没反应）。
+  check('材料标注条在对话流后面、就在输入区里（存量会话不用翻回开头）',
+    exchangesAt >= 0 && composerAt >= 0 && noteAt > exchangesAt && noteAt > composerAt,
+    `exchanges=${exchangesAt} composer=${composerAt} note=${noteAt}`);
+  check('引用面板在对话流后面、输入区正上方（打字的那个位置就能看见）',
+    panelAt > exchangesAt && panelAt < composerAt,
+    `exchanges=${exchangesAt} panel=${panelAt} composer=${composerAt}`);
+  check('输入区是贴底的（材料条在里面才叫「永远在眼前」）',
+    /\.composer\s*\{[\s\S]*?position:\s*sticky[\s\S]*?bottom:\s*0/.test(css));
+  check('分支出处**没有**跟着搬（它说的是这条线从哪儿来，属于正文开头）',
+    html.indexOf('id="branch-note"') < exchangesAt);
 
   // ---- 造一个「被引用」的会话
   chatStreams = true;
@@ -2058,9 +2319,12 @@ console.log('\n⑱ 会话引用：把另一个会话当背景材料带进新话�
     talking.messages.filter((m) => m.role === 'user').length === 1 && talking.id !== source.id);
 
   // ---- 原文档：在**当前这个会话**里就地引用另一个会话的一轮
+  getEl('reference-panel').__scrolledIntoView = false; // 先清掉，好验「打开时会滚进可视区」
   dispatch(getEl('reference-new-button'), 'click');
   await sleep(30);
   check('点入口后面板露出来', getEl('reference-panel').hidden === false);
+  check('打开面板时会把它滚进可视区（长会话里点了不至于像没反应）',
+    getEl('reference-panel').__scrolledIntoView === true);
   check('会话下拉框里灌进了可选会话', getEl('reference-source').children.length >= 1,
     String(getEl('reference-source').children.length));
   const selectedOption = () => getEl('reference-source').children.find((option) => option.selected);

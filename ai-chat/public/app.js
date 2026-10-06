@@ -75,6 +75,8 @@ const els = {
   board: document.getElementById('board'),
   sidebarToggle: document.getElementById('sidebar-toggle'),
   sessionList: document.getElementById('session-list'),
+  titleFloat: document.getElementById('title-float'),
+  railResizer: document.getElementById('rail-resizer'),
   sessionCount: document.getElementById('session-count'),
   sessionTemplate: document.getElementById('session-template'),
   // 「这条会话是从哪儿分出来的」那条说明（只有分支会话显示）
@@ -219,6 +221,75 @@ function writeRailPreference(visible) {
   } catch {
     /* 隐私模式下忽略 */
   }
+}
+
+// ---------------------------------------------------------------- 会话栏宽度
+//
+// 会话栏能拖宽拖窄（ChatGPT 那种）。几个约定：
+//   · 宽度**只写一个 CSS 变量** `--rail-w`，报头和正文两处栅格都用它 ——
+//     否则拖完报头那一格不跟着动，收起/展开开关就会和那道缝错位；
+//   · 有上下限（200–460px，且不把正文挤到 320px 以下），拖过头就停在边界上；
+//   · 双击回到默认 292px；键盘 ← → 各 8px、Home / End 到最小 / 最大；
+//   · 窄屏（≤1000px 是单列）没有「那道缝」可拖：CSS 把柄藏掉，这里也拒绝开工；
+//   · 宽度记在本地，刷新之后还是你拖的那个宽度。
+
+const RAIL_WIDTH_KEY = 'duitanlu.railWidth.v1';
+const RAIL_WIDTH_DEFAULT = 292;
+const RAIL_WIDTH_MIN = 200;
+const RAIL_WIDTH_MAX = 460;
+/** 正文（1fr 那一栏）至少留这么宽，否则拖宽会话栏会把对话挤成一条 */
+const RAIL_TRANSCRIPT_MIN = 320;
+
+function railWidthMax() {
+  const byViewport = Number(window.innerWidth) - RAIL_TRANSCRIPT_MIN;
+  return Math.max(RAIL_WIDTH_MIN, Math.min(RAIL_WIDTH_MAX, byViewport));
+}
+
+function clampRailWidth(value) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n)) return RAIL_WIDTH_DEFAULT;
+  return Math.min(railWidthMax(), Math.max(RAIL_WIDTH_MIN, n));
+}
+
+function readRailWidth() {
+  try {
+    const saved = Number(localStorage.getItem(RAIL_WIDTH_KEY));
+    return Number.isFinite(saved) && saved > 0 ? clampRailWidth(saved) : RAIL_WIDTH_DEFAULT;
+  } catch {
+    return RAIL_WIDTH_DEFAULT;
+  }
+}
+
+function writeRailWidth(width) {
+  try {
+    localStorage.setItem(RAIL_WIDTH_KEY, String(width));
+  } catch {
+    /* 隐私模式下忽略 */
+  }
+}
+
+/** 上一次真正写进 CSS 变量的宽度（值没变就不写 DOM —— 和报头高度那条规矩一致） */
+let lastRailWidth = null;
+
+/** 把宽度写进 CSS 变量（两个栅格共用它），并同步手柄上的无障碍数值 */
+function applyRailWidth(width) {
+  const w = clampRailWidth(width);
+  if (w !== lastRailWidth) {
+    lastRailWidth = w;
+    document.documentElement.style.setProperty('--rail-w', `${w}px`);
+  }
+  if (els.railResizer) {
+    els.railResizer.setAttribute('aria-valuenow', String(w));
+    els.railResizer.setAttribute('aria-valuemin', String(RAIL_WIDTH_MIN));
+    els.railResizer.setAttribute('aria-valuemax', String(railWidthMax()));
+  }
+  return w;
+}
+
+function setRailWidth(width, { persist = true } = {}) {
+  const w = applyRailWidth(width);
+  if (persist) writeRailWidth(w);
+  return w;
 }
 
 /** 运行期状态（不落盘） */
@@ -382,67 +453,43 @@ function updatePinned() {
 }
 
 /**
- * 固定报头的紧凑态。
+ * 量报头高度，写进 `--masthead-h`（会话列表的吸顶偏移和高度上限都按它算）。
  *
- * 报头固定在顶部之后会一直占着一段垂直空间，所以在往下滚之后把它收窄：
- * 标题字号减半、副标题隐藏，但**三个按钮一个都不动** ——
- * 那正是固定住它的意义（滚到任何位置都能开新会话、切会话）。
+ * ── 为什么这里**不再**做「滚下去自动收窄」──
  *
- * ── 关于「滚到顶部附近整页抖动」这个缺陷 ──
- *
- * 原因是个反馈循环：报头从完整切到紧凑，高度少掉 60 像素左右，**整页内容高度也跟着少那么多**；
- * 而报头固定在顶部时，它悬在 scrollY ≈ 40 的位置，于是：
+ * 那个功能有过，而且为它写过一整套防抖机制（滞回阈值、只在状态变化时写 DOM、
+ * 故意不给过渡）。原因是它有个反馈循环：报头从完整切到紧凑少掉 60 像素左右，
+ * **整页内容高度也跟着少那么多**，而报头固定在顶部、悬在 scrollY ≈ 40 的位置，于是：
  *
  *     scrollY 越过阈值 → 变紧凑 → 文档变矮 → 浏览器为了稳住画面把 scrollY 往下修正
  *     → 落到阈值另一侧 → 变回完整 → 文档长回来 → scrollY 又被修回去 → …
  *
- * 在阈值那一带无限来回跳。只加「同一帧内的重入守卫」挡不住它 —— 那是跨帧的循环。
+ * 在阈值那一带无限来回跳。滞回能压住它，但压不住另一个更直接的毛病：
+ * **会话列表的吸顶偏移（`top: var(--masthead-h)`）和高度上限都是按报头高度算的**，
+ * 报头一收窄，会话列表就跟着往上跳、还变高 —— 用户看到的"正文一滚，会话列表也跟着动"。
  *
- * 修法四条：
- *   1. **滞回**：进入和退出用两个不同的阈值，中间留一段缓冲带，状态在缓冲带里保持不变。
- *   2. **阈值方向不能反**：进入用的必须是**高**阈值、退出用的必须是**低**阈值。
- *      「变紧凑」让文档变矮，浏览器把 scrollY 往**大**的方向修正 —— 此时状态已经是紧凑，
- *      往大修正等于离退出线更远，安全；「变完整」让 scrollY 往**小**的方向修正，离进入线更远，
- *      同样安全。两次扰动都朝着「刚进入的那个状态」的容忍方向推，循环才断得掉。
- *      若把两条线对调（低阈值进入、高阈值退出），扰动恰好把 scrollY 推过另一条线，
- *      那缓冲带留多宽都没用。
- *   3. **只在状态真的变化时才写 DOM**：以前每次 scroll 都写数据属性 + CSS 变量，
- *      即使值没变也会造成样式重算。现在变了才写。
- *   4. **缓冲带要比高度台阶更宽**：报头收窄前是 40+71+14+2 ≈ 127px，收窄后 24+34+8+2 ≈ 68px，
- *      一步差 60px 左右。缓冲带留到 72px，任何「一步之内」的扰动都跨不过对岸那条线。
+ * 用户的判断是对的：**正文滚，会话列表不该动；标题那一块也不该变。**
+ * 所以收窄整个去掉了：报头高度从头到尾一样，`--masthead-h` 在滚动中不会变，
+ * 会话列表纹丝不动，"在阈值附近抖"这件事也从根上不可能再发生。
+ * 想要更多正文空间，拖会话栏那条缝改宽度就行。
+ *
+ * 剩下的职责只有一件：**量高度**（字体、系统缩放、窄屏换行都会让实测值不同，
+ * 写死数字会失准）。而且只在实测值真的变了才写 DOM。
  */
-const COMPACT_ENTER_AT = 80; // 往下滚过这里 → 变紧凑（必须是两条线里高的那条）
-const COMPACT_EXIT_AT = 8; // 滚回这里以内 → 恢复完整（必须是低的那条）。两者之间就是缓冲带
-
-// null 表示「还没往 DOM 上写过」：第一次调用一定会写一次，
-// 这样页面上的状态始终是显式的（data-compact 缺席虽然也等于完整态，
-// 但在开发者工具里看不出「没写过」和「写过 false」的区别）。
-let mastheadCompact = null;
-let mastheadHeight = 0;
-
 function updateMastheadHeight() {
   // 这里每次滚动都会跑：取不到元素就直接跳过，绝不能让它抛错 ——
   // 那会让整个页面在滚动时不断报错，比样式不对严重得多。
   if (!els.masthead) return;
 
-  // 已经是紧凑态时用低阈值判断「该不该退出」，否则用高阈值判断「该不该进入」。
-  // 两者不同，就是滞回；同一个 scrollY 只会得到同一个状态，不会来回翻。
-  const y = window.scrollY;
-  const next = mastheadCompact === true ? y > COMPACT_EXIT_AT : y > COMPACT_ENTER_AT;
-
-  if (next !== mastheadCompact) {
-    mastheadCompact = next;
-    els.masthead.dataset.compact = next ? 'true' : 'false';
-  }
-
-  // 实测高度（含补齐的上内边距），交给 CSS 变量给会话栏算 sticky 偏移：
-  // 写死数字会在字体、系统缩放、窄屏换行时失准，量一下最稳。
   const height = Math.round(els.masthead.offsetHeight) || 108;
   if (height !== mastheadHeight) {
     mastheadHeight = height;
     document.documentElement.style.setProperty('--masthead-h', `${height}px`);
   }
 }
+
+/** 上一次实测到的报头高度（0 = 还没量过） */
+let mastheadHeight = 0;
 
 /**
  * 一次滚动回调里把两件事都做完，省一次布局抖动。
@@ -573,7 +620,10 @@ function sessionRow(session, activeId) {
   item.dataset.pinned = String(session.pinned === true);
   item.dataset.branch = String(Boolean(session.branchOf));
 
-  frag.querySelector('[data-field="name"]').textContent = session.title || '新对话';
+  const fullTitle = session.title || '新对话';
+  frag.querySelector('[data-field="name"]').textContent = fullTitle;
+  // 原生 title 是最底层兜底（屏幕阅读器、触摸屏、以及我们的浮层没跑起来的任何情况）
+  frag.querySelector('[data-field="name"]').title = fullTitle;
   const turns = session.messages.filter((m) => m.role === 'user').length;
   item.dataset.turns = String(turns);
   frag.querySelector('[data-field="meta"]').textContent =
@@ -590,6 +640,8 @@ function renderSessionList() {
   const sessions = store.sessions;
   const activeId = store.sessionId;
 
+  hideTitleFloat(); // 列表要重画了，浮出来的完整标题立刻失去意义
+  closeSessionMenu(); // 菜单里的按钮也一起被重画，留着就是指向已消失的节点
   els.sessionCount.textContent = String(sessions.length);
 
   const groups = groupSessions(sessions);
@@ -634,6 +686,13 @@ els.sessionList.addEventListener('click', (event) => {
   if (!item) return;
   const id = item.dataset.id;
   const action = event.target.closest('[data-action]')?.dataset.action;
+
+  // 点「⋯」：开菜单（这是唯一不关菜单的动作，其余动作都要先把菜单收掉）
+  if (action === 'more') {
+    openSessionMenuFor(item, event.target.closest('[data-action="more"]'));
+    return;
+  }
+  closeSessionMenu();
 
   if (action === 'pin') {
     const session = store.sessions.find((s) => s.id === id);
@@ -689,6 +748,150 @@ els.sessionList.addEventListener('click', (event) => {
   // 注意 keepId：如果点的那个会话本身是空的（也是新建的），要留着它。
   switchToSession(id);
 });
+
+// ---------------------------------------------------------------- 会话行的「⋯」菜单
+//
+// 置顶 / 改名 / 起名 / 删除都收进这个菜单，行尾只留一个「⋯」。
+// 为什么：那四个文字按钮以前是**常驻**排着的（只做了 `opacity: 0`，宽度照占），
+// 292px 的行里被吃掉约 145px，标题只剩六七个字。收进菜单之后整行宽度都归标题。
+//
+// 三个纪律，和标题浮层一致：
+//   · 菜单是 `position: fixed`（会话列表 `overflow-y: auto`，absolute 会被裁掉），
+//     位置按「⋯」的 rect 算，贴到视口下边就翻到上面；
+//   · 同一时刻只开一个；开菜单时把标题浮层收掉（两个浮层不叠着出现）；
+//   · 点条目 / 点外面 / Esc / 列表滚动 / 窗口缩放 / 列表重画 —— 一律收起。
+
+let openSessionMenu = null;
+
+function closeSessionMenu() {
+  if (!openSessionMenu) return;
+  openSessionMenu.menu.hidden = true;
+  openSessionMenu.button.setAttribute('aria-expanded', 'false');
+  openSessionMenu = null;
+}
+
+function openSessionMenuFor(row, button) {
+  const menu = row?.querySelector?.('.session-menu');
+  if (!menu) return;
+  closeSessionMenu();
+  hideTitleFloat(); // 两个浮层不叠着出现
+
+  menu.hidden = false;
+  button.setAttribute('aria-expanded', 'true');
+  openSessionMenu = { row, menu, button };
+
+  const rect = button.getBoundingClientRect();
+  const width = menu.offsetWidth || 150;
+  const height = menu.offsetHeight || 150;
+  // 右对齐到「⋯」，但不许跑出屏幕
+  const left = Math.min(rect.right - width, Math.max(8, window.innerWidth - width - 8));
+  // 默认挂在下面；下面放不下就翻到上面
+  const below = rect.bottom + 6;
+  const top = below + height > window.innerHeight - 8
+    ? Math.max(8, rect.top - height - 6)
+    : below;
+  menu.style.left = `${Math.round(Math.max(8, left))}px`;
+  menu.style.top = `${Math.round(top)}px`;
+}
+
+// ---------------------------------------------------------------- 会话标题的完整版
+//
+// 会话栏 292px 宽、标题上限 60 字：一行只放得下约 20 个汉字，所以标题**必须**有个看全的出口。
+// 两条一起给：
+//   · CSS 那边先把标题放宽到**两行**（约 40 字直接看得见，多数标题到此就够了）；
+//   · 这里再补一个浮层：悬停 / 键盘聚焦时浮出完整标题。
+//
+// 三个细节，都是踩过才知道的：
+//   · **只在真的被截断时才弹**。没截断也弹一张写着一模一样内容的卡片，那是噪音。
+//   · 浮层挂在页面级（`position: fixed`）而不是塞在会话行里 —— 列表是 `overflow-y: auto`
+//     的一格，放在行内会被裁掉。
+//   · 鼠标移进浮层会让那一行收到 `mouseleave`，所以收起用 160ms 延迟兜一下：
+//     这样**浮层里的文字能选中复制**（长标题经常就是要复制走的）。
+// 触摸屏没有 hover（CSS 那边有 `@media (hover: none)`）—— 那条路径上靠两行 + 原生 title 兜底。
+
+let titleFloatTimer = null;
+
+function hideTitleFloat() {
+  if (titleFloatTimer) {
+    clearTimeout(titleFloatTimer);
+    titleFloatTimer = null;
+  }
+  if (els.titleFloat) els.titleFloat.hidden = true;
+}
+
+/** 延迟收起：给鼠标从会话行移到浮层上留出时间（否则一移过去就消失，文字没法选中） */
+function scheduleHideTitleFloat() {
+  if (titleFloatTimer) clearTimeout(titleFloatTimer);
+  titleFloatTimer = setTimeout(() => {
+    titleFloatTimer = null;
+    if (els.titleFloat) els.titleFloat.hidden = true;
+  }, 160);
+}
+
+/** 标题真的被截断了吗（没截断就别弹） */
+function isTitleClipped(name) {
+  return name.scrollWidth > name.clientWidth + 1 || name.scrollHeight > name.clientHeight + 1;
+}
+
+function showTitleFloat(row) {
+  const name = row?.querySelector?.('[data-field="name"]');
+  const text = name?.textContent ?? '';
+  if (!name || !text || !isTitleClipped(name)) {
+    hideTitleFloat();
+    return;
+  }
+  if (titleFloatTimer) {
+    clearTimeout(titleFloatTimer);
+    titleFloatTimer = null;
+  }
+  const float = els.titleFloat;
+  if (!float) return;
+  float.textContent = text;
+  float.hidden = false;
+
+  // 摆在那一行右边（会话栏和正文之间那道缝的位置），上下跟行对齐；
+  // 贴到视口下边或右边就翻回来，别跑出屏幕。
+  const rect = row.getBoundingClientRect();
+  const width = float.offsetWidth || 220;
+  const height = float.offsetHeight || 40;
+  const left = Math.min(rect.right + 8, Math.max(8, window.innerWidth - width - 8));
+  const top = Math.min(rect.top, Math.max(8, window.innerHeight - height - 8));
+  float.style.left = `${Math.round(left)}px`;
+  float.style.top = `${Math.round(top)}px`;
+}
+
+els.titleFloat?.addEventListener('mouseenter', () => {
+  // 鼠标进到浮层上：取消收起（文字可以选中复制）
+  if (titleFloatTimer) {
+    clearTimeout(titleFloatTimer);
+    titleFloatTimer = null;
+  }
+});
+els.titleFloat?.addEventListener('mouseleave', hideTitleFloat);
+
+els.sessionList.addEventListener('mouseover', (event) => {
+  const row = event.target.closest?.('.session-item');
+  if (row) showTitleFloat(row);
+});
+els.sessionList.addEventListener('mouseout', (event) => {
+  const row = event.target.closest?.('.session-item');
+  if (!row) return;
+  // 在同一行内部移动（行 → 标题 → 元信息）不算离开
+  const to = event.relatedTarget;
+  if (to && row.contains?.(to)) return;
+  scheduleHideTitleFloat();
+});
+// 键盘 Tab 到某一行的按钮上时也浮出来（鼠标不是唯一的读法）
+els.sessionList.addEventListener('focusin', (event) => {
+  const row = event.target.closest?.('.session-item');
+  if (row) showTitleFloat(row);
+});
+els.sessionList.addEventListener('focusout', scheduleHideTitleFloat);
+// 列表滚动（或窗口缩放）之后那一行的位置就变了，浮层跟着滚会指错地方
+els.sessionList.addEventListener('scroll', hideTitleFloat, true);
+els.sessionList.addEventListener('scroll', closeSessionMenu, true);
+window.addEventListener('resize', hideTitleFloat);
+window.addEventListener('resize', closeSessionMenu);
 
 // ---------------------------------------------------------------- 会话标题
 //
@@ -1512,6 +1715,11 @@ function openReferencePanel({ sourceId = '', kind = '', numbers = null } = {}) {
   };
   els.referencePanel.hidden = false;
   paintReferencePanel();
+  // 面板挨着输入区（见 index.html 里那段注释），但存量会话的正文可能很长：
+  // 用户在底部打字、往上翻着看旧消息时点开面板，它照样可能在屏幕外 ——
+  // 那样看起来就是「点了没反应」。所以打开时把它滚进可视区（`block: 'nearest'`：
+  // 已经在视野里就什么都不做，只有看不见时才最小的滚动过去）。
+  els.referencePanel.scrollIntoView?.({ block: 'nearest' });
 }
 
 function closeReferencePanel() {
@@ -2718,11 +2926,19 @@ document.addEventListener('click', (event) => {
     els.exportPopup.hidden = true;
     els.exportButton.setAttribute('aria-expanded', 'false');
   }
+  // 点菜单外面（也包括点另一个「⋯」）就收起会话菜单。
+  // 注意要放过「⋯」本身：它下面的 click 处理器会开新菜单，
+  // 这里先关掉再开，顺序上没问题（同一个事件里，关了之后那边又开）。
+  if (!event.target.closest('.session-menu') && !event.target.closest('[data-action="more"]')) {
+    closeSessionMenu();
+  }
 });
 
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
   if (!els.quoteFloat.hidden) hideQuoteFloat();
+  closeSessionMenu();
+  hideTitleFloat();
   if (!els.exportPopup.hidden) {
     els.exportPopup.hidden = true;
     els.exportButton.setAttribute('aria-expanded', 'false');
@@ -2802,6 +3018,66 @@ function setRailVisible(visible) {
 
 els.sidebarToggle.addEventListener('click', () => {
   setRailVisible(els.board.dataset.rail === 'hidden');
+});
+
+// ---------------------------------------------------------------- 会话栏宽度：拖 / 键盘 / 双击
+
+if (els.railResizer) {
+  /** 拖动时记住起点：按下那一刻的宽度和鼠标位置（用差值算，跟手） */
+  let drag = null;
+
+  els.railResizer.addEventListener('pointerdown', (event) => {
+    // 窄屏（单列）没有那道缝可拖；CSS 已经把柄藏了，这里再挡一次
+    if (Number(window.innerWidth) <= 1000) return;
+    drag = { startX: event.clientX, startWidth: readRailWidth() };
+    document.body.dataset.resizing = 'true';
+    els.railResizer.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  });
+
+  els.railResizer.addEventListener('pointermove', (event) => {
+    if (!drag) return;
+    setRailWidth(drag.startWidth + (event.clientX - drag.startX));
+  });
+
+  const endDrag = () => {
+    if (!drag) return;
+    drag = null;
+    delete document.body.dataset.resizing;
+    // 落盘的时机放在拖动结束：拖的过程中每帧都写一次 localStorage 没必要
+    writeRailWidth(clampRailWidth(readRailWidth()));
+  };
+  els.railResizer.addEventListener('pointerup', endDrag);
+  els.railResizer.addEventListener('pointercancel', endDrag);
+
+  // 双击回到默认宽度（拖窄了想一键恢复）
+  els.railResizer.addEventListener('dblclick', () => {
+    setRailWidth(RAIL_WIDTH_DEFAULT);
+    flashHint(`会话栏宽度已回到默认（${RAIL_WIDTH_DEFAULT}px）`, 2200);
+  });
+
+  // 键盘也能调：← → 各 8px（Shift 加大到 24px），Home / End 到最小 / 最大
+  els.railResizer.addEventListener('keydown', (event) => {
+    const step = event.shiftKey ? 24 : 8;
+    const current = readRailWidth();
+    let next = null;
+    if (event.key === 'ArrowLeft') next = current - step;
+    else if (event.key === 'ArrowRight') next = current + step;
+    else if (event.key === 'Home') next = RAIL_WIDTH_MIN;
+    else if (event.key === 'End') next = railWidthMax();
+    if (next === null) return;
+    event.preventDefault();
+    setRailWidth(next);
+  });
+
+  // 启动时套用记住的宽度（顺便把手柄上的 aria 数值写上）
+  applyRailWidth(readRailWidth());
+}
+
+// 窗口变窄时重新夹一次：视口小了，之前拖的宽度可能已经把正文挤没了
+window.addEventListener('resize', () => {
+  if (!els.railResizer) return;
+  applyRailWidth(readRailWidth());
 });
 
 /**

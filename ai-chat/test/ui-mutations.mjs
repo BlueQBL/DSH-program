@@ -66,26 +66,30 @@ runner.run('让顶部标签永远显示服务端默认模型（不顾所选）',
   src.replace('  const model = currentModelForRequest();', '  const model = runtime.serverDefaultModel;'),
 );
 
-// ---- 报头抖动（用户反馈：正文往上滚、快到顶的时候整页一直抖）
+// ---- 报头：高度恒定 + 不透明
 //
-// 这一块的断言要防住三件事：滞回不能退化成单阈值、状态没变不能写 DOM、
-// 报头高度不能带过渡。下面每条分别打掉一件。
+// 这两条是用户明确提的：正文滚动时**会话列表不能跟着动**（它的吸顶偏移按报头高度算），
+// 而且**正文不许从标题下面透出来**。以前那套「滚下去自动收窄」就是为了这个被去掉的 ——
+// 下面这些变异把「偷偷把收窄/半透明加回来」和「高度又被滚动改」各打掉一次。
 
-runner.run('滞回退化成单阈值（抖动缺陷的原样）', APP, (src) =>
+runner.run('把滚动收窄那套样式加回来（报头高度又会随滚动变）', CSS, (src) =>
   src.replace(
-    'const next = mastheadCompact === true ? y > COMPACT_EXIT_AT : y > COMPACT_ENTER_AT;',
-    'const next = y > COMPACT_ENTER_AT;',
+    '  overflow-anchor: none;\n}',
+    '  overflow-anchor: none;\n}\n\n.masthead[data-compact="true"] {\n  padding-bottom: 8px;\n}',
   ),
 );
 
-runner.run('进入/退出用同一个阈值（缓冲带塌掉）', APP, (src) =>
-  src.replace('const COMPACT_EXIT_AT = 8;', 'const COMPACT_EXIT_AT = 48;'),
+runner.run('代码里又去按滚动改报头状态（会话列表跟着跳）', APP, (src) =>
+  src.replace(
+    '  const height = Math.round(els.masthead.offsetHeight) || 108;',
+    "  els.masthead.dataset.compact = window.scrollY > 80 ? 'true' : 'false';\n  const height = Math.round(els.masthead.offsetHeight) || 108;",
+  ),
 );
 
-runner.run('每次滚动都重写 data-compact（值没变也写）', APP, (src) =>
+runner.run('报头改回半透明 + 模糊（正文的字从标题下面透出来）', CSS, (src) =>
   src.replace(
-    "  if (next !== mastheadCompact) {\n    mastheadCompact = next;\n    els.masthead.dataset.compact = next ? 'true' : 'false';\n  }",
-    "  mastheadCompact = next;\n  els.masthead.dataset.compact = next ? 'true' : 'false';",
+    '  background: var(--paper);\n  /*\n   * 报头**高度恒定**',
+    '  background: color-mix(in srgb, var(--paper) 88%, transparent);\n  backdrop-filter: blur(8px);\n  /*\n   * 报头**高度恒定**',
   ),
 );
 
@@ -150,7 +154,11 @@ runner.run('改动落在已压缩的部分里也不作废摘要', APP, (src) =>
 // 它们同样能造出「列表盖住输入区」：把两栏并成一栏、或者让列表不再自己滚。
 
 runner.run('把两栏并成一栏（会话栏和输入区又处在同一条水平带上）', CSS, (src) =>
-  src.replace('  grid-template-columns: 292px minmax(0, 1fr);', '  grid-template-columns: minmax(0, 1fr);'),
+  // 列宽现在走 var(--rail-w)（这里是 .board 那处，第一处），并成一栏 = 只留 1fr
+  src.replace(
+    '  grid-template-columns: var(--rail-w, 292px) minmax(0, 1fr);',
+    '  grid-template-columns: minmax(0, 1fr);',
+  ),
 );
 
 runner.run('会话列表不再自己滚（会话一多就把页面撑高、压到输入区）', CSS, (src) =>
@@ -201,8 +209,9 @@ runner.run('把开关放回右格（和备用入口、模型框挤在一起，�
 );
 
 runner.run('报头左格改窄（开关不再对准会话栏和正文之间那道缝）', CSS, (src) =>
+  // 列宽现在走 var(--rail-w)：改窄 = 这一处写死成别的值（两处就错位了）
   src.replace(
-    '  grid-template-columns: 292px minmax(0, 1fr);\n  column-gap: 28px;\n  align-items: end;',
+    '  grid-template-columns: var(--rail-w, 292px) minmax(0, 1fr);\n  column-gap: 28px;\n  align-items: end;',
     '  grid-template-columns: 260px minmax(0, 1fr);\n  column-gap: 28px;\n  align-items: end;',
   ),
 );
@@ -440,6 +449,47 @@ runner.run('「原文」档也走摘要（选了原文却去调模型）', APP, 
   ),
 );
 
+// ---- 引用面板 / 材料条的位置：贴在输入区那一边，不是正文最上面
+//
+// 「搬回正文最上面」这种事没法用一个 replace 表达，所以写了个小工具：把 [from, to)
+// 这一段原样搬到 <div class="stage"> 的后面 —— 也就是它以前待的地方。
+
+function moveBackToTop(src, from, to) {
+  const start = src.indexOf(from);
+  if (start < 0) return src;
+  const end = src.indexOf(to, start);
+  if (end < 0) return src;
+  const block = src.slice(start, end + to.length);
+  const marker = '        <div class="stage">\n';
+  return src
+    .replace(block, () => '')
+    .replace(marker, () => `${marker}${block}\n`);
+}
+
+runner.run('材料条又搬回正文最上面（存量会话里得翻回开头才看得见）', HTML, (src) =>
+  moveBackToTop(
+    src,
+    '            <p class="reference-note" id="reference-note" hidden>',
+    'id="reference-note-body" hidden></pre>',
+  ),
+);
+
+runner.run('引用面板又搬回正文最上面（长会话里点开像没反应）', HTML, (src) =>
+  moveBackToTop(
+    src,
+    '          <section class="reference-panel" id="reference-panel" hidden',
+    '</section>',
+  ),
+);
+
+runner.run('打开引用面板不滚进可视区（长会话里点了就是没反应）', APP, (src) =>
+  src.replace("  els.referencePanel.scrollIntoView?.({ block: 'nearest' });\n", ''),
+);
+
+runner.run('输入区不再贴底（材料条跟着滚走，「永远在眼前」就没了）', CSS, (src) =>
+  src.replace('.composer {\n  position: sticky;\n  bottom: 0;', '.composer {\n  position: static;'),
+);
+
 runner.run('面板说明里不提「带的是最新那一页」', HTML, (src) =>
   src.replace(
     '\n              某一轮被编辑重发过多次时，材料带的是**最新那一页**（轮次后面标着「N 页」）。',
@@ -463,6 +513,162 @@ runner.run('「引用会话」改回一行小字（同一件事两个地方两�
 
 runner.run('两个入口不再并排（新对话自己占满一行）', CSS, (src) =>
   src.replace('.rail-actions {\n  display: flex;', '.rail-actions {\n  display: block;'),
+);
+
+// ---- 会话标题太长：两行 + 悬停看全文
+//
+// 会话栏 292px、标题上限 60 字，一行只放得下约 20 个汉字 —— 这 8 条把「看全标题」的
+// 每一环各打掉一次：两行、悬停、只在截断时弹、延迟收起、移进浮层取消收起、
+// 滚动与重画时收起、原生 title 兜底。
+
+runner.run('标题改成两行（行高参差不齐、列表被撑高，用户明确否掉）', CSS, (src) =>
+  src.replace(
+    '.session-name {\n  display: block;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;',
+    '.session-name {\n  display: -webkit-box;\n  -webkit-line-clamp: 2;\n  -webkit-box-orient: vertical;\n  overflow: hidden;\n  white-space: nowrap;',
+  ),
+);
+
+runner.run('长标题末尾不给省略号（硬切一刀，看不出还有内容）', CSS, (src) =>
+  src.replace(
+    '.session-name {\n  display: block;\n  overflow: hidden;\n  text-overflow: ellipsis;',
+    '.session-name {\n  display: block;\n  overflow: hidden;',
+  ),
+);
+
+runner.run('悬停不给完整标题（长标题还是看不全）', APP, (src) =>
+  src.replace(
+    "els.sessionList.addEventListener('mouseover', (event) => {\n  const row = event.target.closest?.('.session-item');\n  if (row) showTitleFloat(row);\n});\n",
+    '',
+  ),
+);
+
+runner.run('不看是否被截断，一律弹卡片（没截断也弹 = 噪音）', APP, (src) =>
+  src.replace('  if (!name || !text || !isTitleClipped(name)) {', '  if (!name || !text) {'),
+);
+
+runner.run('离开那一行不收起（浮层赖着不走）', APP, (src) =>
+  src.replace(
+    "els.sessionList.addEventListener('mouseout', (event) => {\n  const row = event.target.closest?.('.session-item');\n  if (!row) return;\n  // 在同一行内部移动（行 → 标题 → 元信息）不算离开\n  const to = event.relatedTarget;\n  if (to && row.contains?.(to)) return;\n  scheduleHideTitleFloat();\n});\n",
+    '',
+  ),
+);
+
+runner.run('一离开就立刻收起（没时间把鼠标移进浮层，文字就选不中了）', APP, (src) =>
+  src.replace(
+    '  titleFloatTimer = setTimeout(() => {\n    titleFloatTimer = null;\n    if (els.titleFloat) els.titleFloat.hidden = true;\n  }, 160);',
+    '  titleFloatTimer = null;\n  if (els.titleFloat) els.titleFloat.hidden = true;',
+  ),
+);
+
+runner.run('滚动时浮层不收（位置变了还留在原地指错）', APP, (src) =>
+  src.replace("els.sessionList.addEventListener('scroll', hideTitleFloat, true);\n", ''),
+);
+
+runner.run('列表重画时浮层不收（那一行可能已经不在了）', APP, (src) =>
+  src.replace('  hideTitleFloat(); // 列表要重画了，浮出来的完整标题立刻失去意义\n', ''),
+);
+
+runner.run('不给原生 title 兜底（触摸屏和屏幕阅读器就没有出口了）', APP, (src) =>
+  src.replace("  // 原生 title 是最底层兜底（屏幕阅读器、触摸屏、以及我们的浮层没跑起来的任何情况）\n  frag.querySelector('[data-field=\"name\"]').title = fullTitle;\n", ''),
+);
+
+// ---- 会话行尾的「⋯」菜单
+//
+// 那四个文字按钮**常驻行尾**时（只做了 opacity: 0，宽度照占），292px 的行被吃掉约 145px，
+// 标题只剩六七个字。下面这些把「收进菜单」这件事的每一环各打掉一次。
+
+runner.run('四个功能又搬回行里常驻（标题只剩六个字）', HTML, (src) => {
+  // 把四个条目从菜单里拿出来，直接挂在行里 —— 回到"常驻"那种写法
+  const open = '<span class="session-menu" role="menu" hidden>\n';
+  const at = src.indexOf(open);
+  if (at < 0) return src;
+  const close = src.indexOf('</span>', at);
+  if (close < 0) return src;
+  const inner = src.slice(at + open.length, close);
+  return `${src.slice(0, at)}${inner}${src.slice(close + '</span>\n'.length)}`;
+});
+
+runner.run('点「⋯」不弹菜单（四个功能没有入口了）', APP, (src) =>
+  src.replace(
+    "  if (action === 'more') {\n    openSessionMenuFor(item, event.target.closest('[data-action=\"more\"]'));\n    return;\n  }\n",
+    '',
+  ),
+);
+
+runner.run('点菜单外面不收起（菜单赖着不走）', APP, (src) =>
+  src.replace(
+    "  if (!event.target.closest('.session-menu') && !event.target.closest('[data-action=\"more\"]')) {\n    closeSessionMenu();\n  }\n",
+    '',
+  ),
+);
+
+runner.run('按 Esc 不收起菜单', APP, (src) => src.replace('  closeSessionMenu();\n  hideTitleFloat();\n', '  hideTitleFloat();\n'));
+
+runner.run('列表滚动时菜单不收（位置变了还留在原地指错）', APP, (src) =>
+  src.replace("els.sessionList.addEventListener('scroll', closeSessionMenu, true);\n", ''),
+);
+
+runner.run('列表重画时菜单不收（里面的按钮已经换成新节点了）', APP, (src) =>
+  src.replace('  closeSessionMenu(); // 菜单里的按钮也一起被重画，留着就是指向已消失的节点\n', ''),
+);
+
+runner.run('菜单塞在行里（absolute 会被列表的 overflow 裁掉）', CSS, (src) =>
+  src.replace('.session-menu {\n  position: fixed;', '.session-menu {\n  position: absolute;'),
+);
+
+runner.run('「⋯」做成四个文字按钮那么宽（又把行宽吃回去了）', CSS, (src) =>
+  src.replace('  width: 26px;\n  height: 26px;\n  margin-right: 4px;', '  width: 145px;\n  height: 26px;\n  margin-right: 4px;'),
+);
+
+// ---- 会话栏宽度可拖（写 --rail-w，两处栅格共用）
+
+runner.run('拖了没反应（pointermove 不处理）', APP, (src) =>
+  src.replace(
+    "  els.railResizer.addEventListener('pointermove', (event) => {\n    if (!drag) return;\n    setRailWidth(drag.startWidth + (event.clientX - drag.startX));\n  });\n",
+    '',
+  ),
+);
+
+runner.run('宽度不夹上下限（能拖到 20px 或 2000px）', APP, (src) =>
+  src.replace('  return Math.min(railWidthMax(), Math.max(RAIL_WIDTH_MIN, n));', '  return n;'),
+);
+
+runner.run('宽度不记住（刷新又回 292）', APP, (src) => src.replace('  if (persist) writeRailWidth(w);\n', ''));
+
+runner.run('双击不回默认宽度', APP, (src) =>
+  src.replace(
+    "  els.railResizer.addEventListener('dblclick', () => {\n    setRailWidth(RAIL_WIDTH_DEFAULT);\n    flashHint(`会话栏宽度已回到默认（${RAIL_WIDTH_DEFAULT}px）`, 2200);\n  });\n",
+    '',
+  ),
+);
+
+runner.run('键盘调不了宽度（只能用鼠标）', APP, (src) =>
+  src.replace(
+    "  els.railResizer.addEventListener('keydown', (event) => {\n    const step = event.shiftKey ? 24 : 8;",
+    "  els.railResizer.addEventListener('keydown', (event) => {\n    if (true) return;\n    const step = event.shiftKey ? 24 : 8;",
+  ),
+);
+
+runner.run('窄屏也允许拖（单列布局里没有「缝」可拖）', APP, (src) =>
+  src.replace('    if (Number(window.innerWidth) <= 1000) return;\n', ''),
+);
+
+runner.run('报头那格没跟着用 --rail-w（拖了之后报头和正文错位）', CSS, (src) =>
+  src.replace(
+    '  grid-template-columns: var(--rail-w, 292px) minmax(0, 1fr);\n  column-gap: 28px;\n  align-items: end;',
+    '  grid-template-columns: 292px minmax(0, 1fr);\n  column-gap: 28px;\n  align-items: end;',
+  ),
+);
+
+runner.run('值没变也照写 CSS 变量（每拖一下都写一遍 DOM）', APP, (src) =>
+  src.replace(
+    "  if (w !== lastRailWidth) {\n    lastRailWidth = w;\n    document.documentElement.style.setProperty('--rail-w', `${w}px`);\n  }",
+    "  lastRailWidth = w;\n  document.documentElement.style.setProperty('--rail-w', `${w}px`);",
+  ),
+);
+
+runner.run('窄屏上还显示拖拽手柄（那边拖它没有意义）', CSS, (src) =>
+  src.replace('  .rail-resizer {\n    display: none;\n  }\n', ''),
 );
 
 runner.finish();

@@ -88,6 +88,20 @@ export function createMutationRunner({ label, suite, files, tempDir = TEMP }) {
   });
 
   let allCaught = true;
+  let seen = 0;
+
+  /*
+   * 分段运行：`MUT_FROM=1 MUT_TO=20 node test/ui-mutations.mjs` 只跑前 20 条。
+   *
+   * 为什么需要它：整套 80 多条要十几分钟，而这个环境里长时间的后台任务**被外力杀掉过三次**
+   * （杀掉时 finally 不执行，源码里会留下一处被改坏的写法 —— 已经因此出过三回残留）。
+   * 分成小段跑，每段两三分钟，跑完就落地，比押在一个长任务上稳得多。
+   * 不设这两个环境变量时行为完全不变（全跑）。
+   */
+  const sliceFrom = Math.max(1, Number(process.env.MUT_FROM) || 1);
+  const sliceTo = Number(process.env.MUT_TO) || Number.POSITIVE_INFINITY;
+  const sliced = sliceFrom > 1 || Number.isFinite(sliceTo);
+  if (sliced) console.log(`（分段运行：第 ${sliceFrom}–${Number.isFinite(sliceTo) ? sliceTo : '末'} 条）\n`);
 
   console.log(`${label}变异测试（每个变异都必须被抓到）\n`);
 
@@ -99,6 +113,8 @@ export function createMutationRunner({ label, suite, files, tempDir = TEMP }) {
      * @param {(source: string) => string} mutate 替换函数；没改动源码就报告失配
      */
     run(title, file, mutate) {
+      seen += 1;
+      if (seen < sliceFrom || seen > sliceTo) return; // 不在这一段里，跳过
       const original = pristine.get(file);
       if (original === undefined) {
         console.log(`  ? 变异指向了未纳入快照的文件：${title}（${file}）`);
@@ -166,6 +182,7 @@ export function createMutationRunner({ label, suite, files, tempDir = TEMP }) {
 
       console.log('');
       console.log(restored ? '已还原源码（内容与开工时快照一致）' : '⚠ 还原后内容与快照不一致，请手动检查');
+      if (sliced) console.log(`本段：第 ${sliceFrom}–${Number.isFinite(sliceTo) ? sliceTo : '末'} 条（一共登记了 ${seen} 条）`);
       console.log(allCaught ? `结论：全部变异都被抓到，${label}的断言有效。` : '结论：有变异逃过测试，断言需要加强。');
       process.exit(allCaught && restored ? 0 : 1);
     },

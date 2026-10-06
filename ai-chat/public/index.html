@@ -154,6 +154,23 @@
           <div class="rail-foot">
             <button type="button" class="link-button" id="export-all-button">导出全部</button>
           </div>
+
+          <!--
+            会话栏右边缘的拖拽手柄：左右拖 = 改这一栏的宽度（写 --rail-w 一个变量，
+            报头和正文两处栅格都用它，所以不会错位）。
+            它钉在会话栏里、从报头**下面**开始 —— 报头那一行左格的右端已经钉着
+            「收起/展开」开关了，两个东西压在同一条缝上会抢点击。
+            键盘也能调：← → 各 8px，Home / End 到最小 / 最大，双击回到默认宽度。
+          -->
+          <button
+            type="button"
+            class="rail-resizer"
+            id="rail-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="左右拖动调整会话栏宽度（键盘用左右方向键）"
+            title="拖动调整会话栏宽度（双击回到默认，键盘 ← → 可调）"
+          ></button>
         </aside>
 
         <div class="stage">
@@ -169,67 +186,12 @@
           </p>
 
           <!--
-            挂着的**背景材料**（会话引用，见 lib/reference.js）。
-            它不进这个会话的消息：只在构造请求时拼在最前面一条 system 里，
-            所以导出正文、压缩下标、消息数都不受影响 —— 随时能换能删。
+            背景材料那条标注（`#reference-note`）和引用面板（`#reference-panel`）
+            都搬到**输入区那边**去了 —— 见下面 .composer 那一段的注释：
+            它们管的是「下一轮要带什么」，摆在正文最上面的话，存量会话里得翻上去才看得见。
+            分支出处（上面那条 branch-note）留在原地：它说的是**这条线从哪儿来**，
+            属于正文的开头，不是「下一轮要用的东西」。
           -->
-          <p class="reference-note" id="reference-note" hidden>
-            <span class="reference-note-mark" aria-hidden="true">参</span>
-            <span class="reference-note-text" id="reference-note-text"></span>
-            <button type="button" class="link-button" id="reference-toggle" aria-expanded="false">查看材料</button>
-            <button type="button" class="link-button" id="reference-change">改选轮次</button>
-            <button type="button" class="link-button" id="reference-drop">移除材料</button>
-          </p>
-          <pre class="reference-note-body" id="reference-note-body" hidden></pre>
-
-          <!--
-            引用面板：选一个会话、选材料形式、勾选轮次，然后开一个新会话。
-            「原文」档最多 3 轮 —— 超过就该用「分出新会话」（那是把整段搬过去继续聊）。
-          -->
-          <section class="reference-panel" id="reference-panel" hidden aria-label="引用另一个会话">
-            <div class="reference-panel-head">
-              <span class="reference-panel-title">引用另一个会话当背景材料</span>
-              <button type="button" class="link-button" id="reference-panel-close">收起</button>
-            </div>
-            <p class="reference-panel-hint">
-              材料是**背景知识**：模型会把它当成你给的参考资料，而不是「你们聊过」。
-              它不算这个会话的消息，随时能查看、能移除。
-              确认后它挂在**当前这个会话**上、从下一轮开始生效；已经聊过的会话里，
-              也可以带着它**另开一个新会话**（那是「材料跟过去」，和「分出新会话」不是一回事 ——
-              后者是把整段对话连旧页一起复制走）。
-              某一轮被编辑重发过多次时，材料带的是**最新那一页**（轮次后面标着「N 页」）。
-            </p>
-            <!--
-              只有「这个会话已经有材料」时才出现：把这次确认的**后果**说在按下去之前。
-              没有这一条的话，「引用会话」打开的是空白默认值，用户以为在新建一份，
-              按下去才发现旧的那份被换掉了。
-            -->
-            <p class="reference-replace-note" id="reference-replace-note" hidden></p>
-            <div class="control-row">
-              <label class="control-field">
-                <span class="control-label">引用哪一个会话</span>
-                <select id="reference-source"></select>
-              </label>
-              <label class="control-field">
-                <span class="control-label">材料形式</span>
-                <select id="reference-kind">
-                  <option value="summary">摘要（整段压成一段，不限轮数）</option>
-                  <option value="turns">原文（一问一答照搬，最多 3 轮）</option>
-                </select>
-              </label>
-            </div>
-            <div class="reference-turns" id="reference-turns"></div>
-            <p class="reference-panel-status" id="reference-status"></p>
-            <div class="reference-actions">
-              <button type="button" class="solid-button" id="reference-confirm">在这个会话里生效</button>
-              <button type="button" class="ghost-button" id="reference-cancel">取消</button>
-              <!--
-                次要入口（只在会话里已经有对话时出现）：同样一份材料，另开一个会话带过去。
-                主按钮是「就地生效」—— 正在聊的会话突然需要另一个会话的内容时用它。
-              -->
-              <button type="button" class="link-button reference-new-session-link" id="reference-new-session-link" hidden>或者：带着它开一个新会话</button>
-            </div>
-          </section>
 
           <!-- 角色 / 模型 / 提示词 -->
           <section class="controls" aria-label="角色与模型设置">
@@ -303,7 +265,81 @@
             <button type="button" class="ghost-button" id="cancel-clear">返回</button>
           </div>
 
+          <!--
+            引用面板：选一个会话、选材料形式、勾选轮次。
+            **就挨在输入区上面**：它管的是「下一轮要带什么」，而存量会话里正文可能很长 ——
+            摆在正文最上面的话，用户在底部打字，点开面板什么也看不见（看着像点了没反应）。
+            打开时 app.js 还会把它滚进可视区。
+          -->
+          <!--
+            引用面板：选一个会话、选材料形式、勾选轮次。
+            它**就挨在输入区上面**：这个面板管的是「下一轮要带什么」，而存量会话的正文可能很长 ——
+            摆在正文最上面的话，用户在底部打字，点开面板什么也看不见（看着像点了没反应）。
+            app.js 打开它时还会 scrollIntoView，把它滚进可视区。
+            「原文」档最多 3 轮 —— 超过就该用「分出新会话」（那是把整段搬过去继续聊）。
+          -->
+          <section class="reference-panel" id="reference-panel" hidden aria-label="引用另一个会话">
+            <div class="reference-panel-head">
+              <span class="reference-panel-title">引用另一个会话当背景材料</span>
+              <button type="button" class="link-button" id="reference-panel-close">收起</button>
+            </div>
+            <p class="reference-panel-hint">
+              材料是**背景知识**：模型会把它当成你给的参考资料，而不是「你们聊过」。
+              它不算这个会话的消息，随时能查看、能移除。
+              确认后它挂在**当前这个会话**上、从下一轮开始生效；已经聊过的会话里，
+              也可以带着它**另开一个新会话**（那是「材料跟过去」，和「分出新会话」不是一回事 ——
+              后者是把整段对话连旧页一起复制走）。
+              某一轮被编辑重发过多次时，材料带的是**最新那一页**（轮次后面标着「N 页」）。
+            </p>
+            <!--
+              只有「这个会话已经有材料」时才出现：把这次确认的**后果**说在按下去之前。
+              没有这一条的话，「引用会话」打开的是空白默认值，用户以为在新建一份，
+              按下去才发现旧的那份被换掉了。
+            -->
+            <p class="reference-replace-note" id="reference-replace-note" hidden></p>
+            <div class="control-row">
+              <label class="control-field">
+                <span class="control-label">引用哪一个会话</span>
+                <select id="reference-source"></select>
+              </label>
+              <label class="control-field">
+                <span class="control-label">材料形式</span>
+                <select id="reference-kind">
+                  <option value="summary">摘要（整段压成一段，不限轮数）</option>
+                  <option value="turns">原文（一问一答照搬，最多 3 轮）</option>
+                </select>
+              </label>
+            </div>
+            <div class="reference-turns" id="reference-turns"></div>
+            <p class="reference-panel-status" id="reference-status"></p>
+            <div class="reference-actions">
+              <button type="button" class="solid-button" id="reference-confirm">在这个会话里生效</button>
+              <button type="button" class="ghost-button" id="reference-cancel">取消</button>
+              <!--
+                次要入口（只在会话里已经有对话时出现）：同样一份材料，另开一个会话带过去。
+                主按钮是「就地生效」—— 正在聊的会话突然需要另一个会话的内容时用它。
+              -->
+              <button type="button" class="link-button reference-new-session-link" id="reference-new-session-link" hidden>或者：带着它开一个新会话</button>
+            </div>
+          </section>
+
           <form class="composer" id="composer" autocomplete="off">
+            <!--
+              挂着的**背景材料**（会话引用，见 lib/reference.js）就摆在输入区里 ——
+              输入区是 sticky 贴底的，所以它**永远在眼前**：存量会话聊了几十轮也不用手动翻回开头。
+              它和下面两条一样，说的都是「下一轮会带上什么」。
+              材料不进这个会话的消息：只在构造请求时拼在最前面一条 system 里，
+              所以导出正文、压缩下标、消息数都不受影响 —— 随时能换能删。
+            -->
+            <p class="reference-note" id="reference-note" hidden>
+              <span class="reference-note-mark" aria-hidden="true">参</span>
+              <span class="reference-note-text" id="reference-note-text"></span>
+              <button type="button" class="link-button" id="reference-toggle" aria-expanded="false">查看材料</button>
+              <button type="button" class="link-button" id="reference-change">改选轮次</button>
+              <button type="button" class="link-button" id="reference-drop">移除材料</button>
+            </p>
+            <pre class="reference-note-body" id="reference-note-body" hidden></pre>
+
             <!-- 待发送的图片 -->
             <ul class="attachment-strip" id="attachment-strip" hidden></ul>
 
@@ -360,6 +396,14 @@
     <!-- 在回答里划中一段时，出现在选区旁边的「引用这段」 -->
     <button type="button" class="quote-float" id="quote-float" hidden>引用这段</button>
 
+    <!--
+      会话标题被截断时浮出的**完整标题**（悬停或键盘聚焦时出现）。
+      会话栏只有 292px、标题上限 60 字，一行最多显示约 20 个汉字 —— 绝大多数长标题都读不全。
+      浮层挂在页面级（不是塞在会话行里）：会话列表是 `overflow-y: auto` 的一格，
+      放在行内会被裁掉。位置由 app.js 按行的 rect 算（和划词浮标同一套做法）。
+    -->
+    <div class="title-float" id="title-float" role="tooltip" hidden></div>
+
     <!-- 压缩标记：插在「最后一个被摘要覆盖的那一轮」后面 -->
     <template id="context-note-template">
       <li class="context-note" data-field="context-note">
@@ -375,18 +419,32 @@
       </li>
     </template>
 
-    <!-- 会话列表项 -->
+    <!--
+      会话列表项。
+      行尾**只有一个「⋯」**：置顶 / 改名 / 起名 / 删除四个功能收进菜单（点「⋯」才出现）。
+      以前是四个文字按钮直接排在行尾，而且只做了 opacity: 0 —— 视觉上隐藏了，**位置一直占着**，
+      292px 的行里被吃掉约 145px，标题只剩六七个字。
+      菜单挂在行内，但用 fixed 定位：会话列表是 overflow-y: auto，absolute 会被裁掉。
+    -->
     <template id="session-template">
       <li class="session-item">
         <button type="button" class="session-open">
           <span class="session-name" data-field="name"></span>
           <span class="session-meta" data-field="meta"></span>
         </button>
-        <span class="session-tools">
-          <button type="button" class="icon-button" data-action="pin" title="置顶（钉在列表最上面）">置顶</button>
-          <button type="button" class="icon-button" data-action="rename" title="重命名">改名</button>
-          <button type="button" class="icon-button" data-action="retitle" title="让 AI 按现在的对话重新起个名">起名</button>
-          <button type="button" class="icon-button danger" data-action="delete" title="删除这个会话">删除</button>
+        <button
+          type="button"
+          class="icon-button session-more"
+          data-action="more"
+          title="更多操作（置顶 / 改名 / 起名 / 删除）"
+          aria-haspopup="menu"
+          aria-expanded="false"
+        >⋯</button>
+        <span class="session-menu" role="menu" hidden>
+          <button type="button" class="icon-button session-menu-item" data-action="pin" role="menuitem" title="置顶（钉在列表最上面）">置顶</button>
+          <button type="button" class="icon-button session-menu-item" data-action="rename" role="menuitem" title="重命名">改名</button>
+          <button type="button" class="icon-button session-menu-item" data-action="retitle" role="menuitem" title="让 AI 按现在的对话重新起个名">让 AI 起名</button>
+          <button type="button" class="icon-button session-menu-item danger" data-action="delete" role="menuitem" title="删除这个会话">删除</button>
         </span>
       </li>
     </template>

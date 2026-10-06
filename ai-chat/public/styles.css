@@ -42,6 +42,16 @@
   --gap-col: 24px;
   --radius: 3px;
   --line-thread: 1px;
+
+  /*
+   * 会话栏宽度：**只在这一处定义**，`.masthead` 和 `.board` 两处栅格都用它。
+   *
+   * 为什么必须是变量：报头第一行和正文那两栏的列宽必须逐字一致（左格对着会话栏、
+   * 右格对着正文，收起/展开开关就钉在那道缝上）—— 以前是两处都写死 292px，
+   * 改一处忘一处是必然的。现在拖拽只改这一个值，两处一起动。
+   * 运行时由 app.js 写在这个变量上（拖动 / 键盘调整 / 记住的宽度）。
+   */
+  --rail-w: 292px;
 }
 
 @media (max-width: 900px) {
@@ -147,7 +157,8 @@ body::before {
 
 .board {
   display: grid;
-  grid-template-columns: 292px minmax(0, 1fr);
+  /* 会话栏宽度走 --rail-w（见 :root 里那段说明）：拖拽只改这一个值 */
+  grid-template-columns: var(--rail-w, 292px) minmax(0, 1fr);
   column-gap: 28px;
   align-items: start;
 }
@@ -155,7 +166,8 @@ body::before {
 /*
  * 会话列表。
  * top 要把固定报头的高度让出来，否则它自己的表头会被压到报头下面看不见。
- * 滚动到深处时用 .board[data-compact] 通知它报头变矮了（由 JS 同步）。
+ * 那个高度由 JS 实测后写进 `--masthead-h`；**报头高度是恒定的**（不做滚动收窄），
+ * 所以这个偏移在整个滚动过程中不会变 —— 正文滚，这一栏纹丝不动。
  */
 .rail {
   position: sticky;
@@ -175,6 +187,50 @@ body::before {
   justify-content: space-between;
   padding: 22px 0 8px;
   border-bottom: 1px solid var(--rule);
+}
+
+/*
+ * 会话栏右边缘的**拖拽手柄**：左右拖 = 改会话栏宽度（`--rail-w`）。
+ *
+ * 位置：钉在会话栏的右边缘上（那条 `border-right` 上），**从报头下面开始**——
+ * 报头那一行的左格右端已经钉着「收起/展开」开关了（它正好也在这道缝上），
+ * 手柄压在那一层会和它抢点击。会话栏自己的 top 本来就低于报头（sticky 对齐到 --masthead-h），
+ * 所以 `top: 0` 就是「报头下面」。
+ * 手柄本身只有 9px 宽（好点中），视觉上是那条 1px 的竖线 —— 不额外画一条粗线。
+ */
+.rail-resizer {
+  position: absolute;
+  top: 0;
+  right: -5px; /* 骑在 border-right 上：9px 宽的一半 */
+  bottom: 0;
+  width: 9px;
+  cursor: col-resize;
+  background: none;
+  border: 0;
+  padding: 0;
+  touch-action: none; /* 触摸拖动时不要顺手滚动页面 */
+}
+/* 中间那 1px 才是看得见的部分：平时透明（露出原本的 border-right），
+   悬停 / 键盘聚焦 / 正在拖的时候才亮起来 */
+.rail-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 1px;
+  background: transparent;
+  transition: background-color 0.15s ease;
+}
+.rail-resizer:hover::after,
+.rail-resizer:focus-visible::after,
+body[data-resizing="true"] .rail-resizer::after {
+  background: var(--ink);
+}
+/* 拖动过程中：整页锁定指针样式，并且别让拖动变成选文字 */
+body[data-resizing="true"] {
+  cursor: col-resize;
+  user-select: none;
 }
 
 /*
@@ -329,14 +385,21 @@ body::before {
   background: var(--wash);
 }
 
+/*
+ * 会话标题：**一行**，放不下就在末尾收成省略号（`text-overflow: ellipsis`）。
+ *
+ * 会话栏 292px、标题上限 60 字（见 store.js 的 normalizeSession），一行只放得下约 20 个汉字。
+ * 试过放宽到两行 —— 实际不好看：行高参差不齐、列表被撑高、扫读也更慢。
+ * 所以标题**只占一行**，看全交给悬停浮层（见 .title-float）。
+ */
 .session-name {
   display: block;
-  font-size: 13.5px;
-  line-height: 1.45;
-  color: var(--ink);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: var(--ink);
 }
 
 /* 分支会话：行首一个小箭头，一眼看出它是从别处岔出来的。
@@ -358,22 +421,66 @@ body::before {
   white-space: nowrap;
 }
 
-.session-tools {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding-right: 6px;
+/*
+ * 行尾的「⋯」：四个功能（置顶 / 改名 / 起名 / 删除）收进菜单，行里只留这一个小按钮。
+ *
+ * 以前这里是四个文字按钮直接排着（`.session-tools`），而且只做了 `opacity: 0` ——
+ * 视觉上藏起来了，**宽度一直占着**：292px 的行里被吃掉约 145px，标题只剩六七个字。
+ * 现在整行宽度都归标题（约 19–20 个汉字）。
+ */
+.session-more {
+  align-self: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  margin-right: 4px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  letter-spacing: 0;
   opacity: 0;
   transition: opacity 0.15s ease;
 }
-.session-item:hover .session-tools,
-.session-item:focus-within .session-tools {
+.session-item:hover .session-more,
+.session-item:focus-within .session-more,
+.session-more[aria-expanded="true"] {
   opacity: 1;
 }
 @media (hover: none) {
-  .session-tools {
+  .session-more {
     opacity: 1;
   }
+}
+
+/* 菜单：fixed 定位 —— 会话列表是 `overflow-y: auto` 的一格，absolute 会被裁掉。
+   位置由 app.js 按「⋯」的 rect 算（贴到视口下边就翻到上面去）。 */
+.session-menu {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 6; /* 高于会话栏（3）和固定报头（4），和导出弹层同级 */
+  display: flex;
+  flex-direction: column;
+  min-width: 150px;
+  padding: 5px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background: var(--paper-lift);
+  box-shadow: var(--shadow);
+}
+
+.session-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font-size: 13px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 2px;
+}
+.session-menu-item:hover {
+  background: var(--wash);
+  border-color: transparent;
 }
 
 .icon-button {
@@ -456,13 +563,16 @@ body::before {
  * 背景材料那条标注（会话引用，见 lib/reference.js）。
  * 和分支标注是同一套语言（安静的旁注、不冒充对话内容），但用**虚线边**区分开：
  * 分支说的是「这条线从哪儿来」，材料说的是「手边放着一份参考资料」，两件事别混。
+ *
+ * 位置：它在**输入区里面**（输入区是 sticky 贴底的），所以永远在眼前 ——
+ * 存量会话聊了几十轮也不用手动翻回开头。margin 也按「输入区内部」来调。
  */
 .reference-note {
   display: flex;
   align-items: baseline;
   gap: 8px;
   flex-wrap: wrap;
-  margin: 10px 0 0;
+  margin: 0 0 8px;
   padding: 8px 12px;
   border-left: 2px dashed var(--rule-strong);
   background: var(--paper-lift);
@@ -480,9 +590,10 @@ body::before {
   min-width: 0;
 }
 
-/* 材料原文（点「查看材料」才展开）：等宽 + 可滚，读起来像附注而不是正文 */
+/* 材料原文（点「查看材料」才展开）：等宽 + 可滚，读起来像附注而不是正文。
+   长度上限是 240px —— 它在输入区内部，不能让一份长材料把输入框顶出屏幕。 */
 .reference-note-body {
-  margin: 6px 0 0;
+  margin: 6px 0 8px;
   padding: 10px 12px;
   max-height: 240px;
   overflow: auto;
@@ -496,9 +607,10 @@ body::before {
   color: var(--ink-soft);
 }
 
-/* 引用面板：选会话 / 选形式 / 勾轮次 */
+/* 引用面板：选会话 / 选形式 / 勾轮次。
+   它就贴在输入区上面（管的是「下一轮要带什么」），所以下面留一点间距给输入区。 */
 .reference-panel {
-  margin: 16px 0 0;
+  margin: 0 0 10px;
   padding: 14px 16px;
   border: 1px solid var(--rule-strong);
   border-radius: var(--radius);
@@ -866,11 +978,10 @@ body::before {
  * 理由：「新对话」和「对话列表」是全局操作，不该随正文滚走 ——
  * 用户滚到对话深处想开个新话题，还得先滚回顶部，很难受。
  *
- * 代价是它要吃掉一段垂直空间，所以往下滚之后会切换成紧凑态（见下），
- * 把高度压到大约一半。
- *
- * 背景用「半透明 + 模糊」而不是纯色：这一页的背景是稿纸横格，
- * 用纯色会把横格切断得很生硬；模糊能让下面的字迹透出一层，又不影响读按钮。
+ * 它占的那段垂直空间**恒定不变**：以前往下滚会切成紧凑态（高度砍一半），
+ * 但那样会话列表的吸顶偏移会跟着变（正文一滚、列表就往上跳），而且正文的字会从
+ * 半透明的报头下面透出来 —— 两件事用户都明确说过是错的。现在报头就是个恒定的、
+ * 不透明的一条：要更多正文空间，拖会话栏那条缝改宽度。
  */
 .masthead {
   position: sticky;
@@ -880,46 +991,43 @@ body::before {
   padding-top: 40px;
   z-index: 4; /* 要高于侧栏（3）和输入区（2），否则滚起来会被压住 */
   /*
-   * 报头第一行分成两格，列宽和下面 .board 的列宽**一模一样**（292px 的会话栏 + 28px 的缝）：
+   * 报头第一行分成两格，列宽和下面 .board 的列宽**逐字一样**（都是 `var(--rail-w)` 的会话栏 + 28px 的缝）：
    * 左格对着会话栏，右格对着正文。这一行于是成了「会话栏的顶栏 + 正文的顶栏」，
    * 收起/展开开关就钉在左格的右端 —— 会话栏和正文之间那道缝的左边一点。
-   * 两处的列宽必须一致，改一个就得改另一个（test/ui-tests.mjs ⑭ 盯着这条）。
+   * 两处共用**同一个变量**（:root 里的 --rail-w），所以拖动会话栏时两处一起动，
+   * 不会出现"报头和正文错位"那种问题（test/ui-tests.mjs ⑭ 盯着这条）。
    */
   display: grid;
-  grid-template-columns: 292px minmax(0, 1fr);
+  grid-template-columns: var(--rail-w, 292px) minmax(0, 1fr);
   column-gap: 28px;
   align-items: end;
   padding-bottom: 14px;
   border-bottom: 2px solid var(--ink);
-  background: color-mix(in srgb, var(--paper) 88%, transparent);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
   /*
-   * 这里**故意没有 transition**，虽然加一个过渡会更好看。
+   * **不透明**（纯纸色），不是半透明 + 模糊。
    *
-   * 报头高度一变，下方正文的文档坐标就跟着变；而「往下滚 → 收窄」这件事本身是由
-   * 滚动位置触发的。两者叠在一起，动画期间每一帧文档都在长高/变矮，
-   * 浏览器的滚动锚定会跟着一帧帧修正滚动位置 —— 手指停在阈值附近时，
-   * 整页就会来回抖（详见 app.js 里 updateMastheadHeight 的注释）。
-   * 瞬时切换只有一个高度台阶，配合滞回只在离阈值很远处发生，不会抖。
+   * 半透明那版（`color-mix(... 88%, transparent)` + `backdrop-filter: blur()`）看起来更轻，
+   * 但正文往上滚的时候字会**从标题下面透出来** —— 用户的原话是「字往标题那块区域翻出去了」。
+   * 报头是压住正文的一层，那就该压得干干净净。
+   */
+  background: var(--paper);
+  /*
+   * 报头**高度恒定**：不做「滚下去自动收窄」。
    *
-   * 顺带还修掉一个隐蔽的错：过渡期间量到的 offsetHeight 是动画中间值，
-   * 用户恰好在这 180ms 内停止滚动的话，写进 --masthead-h 的就是错的高度，
-   * 会话栏的吸顶偏移会一直偏着。
+   * 那个收窄曾经有过，代价是一整套防抖机制（滞回阈值、只在状态变化时写 DOM、
+   * 故意不给过渡）—— 因为它一改高度，整页文档高度就跟着变，滚动位置会被浏览器的
+   * 滚动锚定反复修正，在阈值附近来回抖（详见 app.js 里那段说明）。
+   * 更糟的是**会话列表的吸顶偏移和高度上限都是按 `--masthead-h` 算的**，
+   * 报头一收窄，会话列表就跟着往上跳、还变高 —— 用户明确说这是错的：
+   * 「正文翻滚，会话列表不动；标题那一块也不该变」。
    *
-   * overflow-anchor: none 是另一回事，别当成上面那条的修法 ——
-   * 它只是不让报头自己成为滚动锚定的候选锚点。报头是个会变高的 sticky 元素，
-   * 让它留在锚点候选里等于往这个容易出问题的角落再加一个变量，
-   * 而它对「正文不被抽动」没有任何贡献（锚点会退到下面的正文节点上去）。
+   * 现在高度从头到尾一样：报头不动、会话列表不动，抖动这件事从根上不可能发生。
+   * 想要更多正文空间，拖会话栏那条缝就好（那一栏现在可以调宽窄）。
+   *
+   * `overflow-anchor: none` 保留着：报头是个 sticky 元素，让它退出滚动锚点候选，
+   * 这一页就少一个容易出问题的变量（它对「正文不被抽动」没有贡献，锚点会退到正文节点上）。
    */
   overflow-anchor: none;
-}
-
-/* 往下滚之后收窄，别一直占着大块地方 */
-.masthead[data-compact="true"] {
-  padding-top: 24px;
-  padding-bottom: 8px;
-  align-items: center;
 }
 
 .masthead-title h1 {
@@ -940,20 +1048,10 @@ body::before {
   /*
    * 这一格只有 292px（和会话栏同宽），这句话比它略宽一点点。
    * 不许换行：一换行这一格就高一截、报头跟着变高，而报头高度是会话栏吸顶偏移的依据
-   * （见 .masthead 里那段关于抖动的说明）。略微溢出的部分会落进右边那道 28px 的缝里，
+   * （报头高度必须恒定，否则会话列表会跟着上下跳）。略微溢出的部分会落进右边那道 28px 的缝里，
    * 看不见 —— 那道缝本来就是留白的。
    */
   white-space: nowrap;
-}
-
-/* 紧凑态：标题缩小、副标题收起 —— 按钮和「对话列表」必须留着，那是固定的意义所在 */
-.masthead[data-compact="true"] .masthead-title h1 {
-  font-size: 21px;
-  letter-spacing: 0.18em;
-}
-
-.masthead[data-compact="true"] .masthead-title p {
-  display: none;
 }
 
 /* 报头左格：大标题 + 钉在这一格右端的开关。
@@ -1026,8 +1124,8 @@ body::before {
 }
 
 /* 开关钉在报头左格的右端（那一格与会话栏同宽，所以它就在正文左边缘的左边一点）。
-   用绝对定位是为了让它彻底脱离标题的宽度 —— 标题进紧凑态、字号变小也推不动它。
-   「点收起/展开」和「往下滚进紧凑态」这两件事都不会让它挪窝。 */
+   用绝对定位是为了让它彻底脱离标题的宽度 —— 标题再长、字号怎么变都推不动它。
+   点「收起/展开」不会让它挪窝，正文滚动也不会（报头高度恒定）。 */
 .masthead-brand .icon-toggle {
   position: absolute;
   right: 0;
@@ -1646,6 +1744,34 @@ body::before {
   color: var(--paper);
 }
 
+/*
+ * 会话标题被截断时浮出的完整标题（悬停 / 键盘聚焦）。
+ *
+ * 和划词浮标同一套做法：fixed 定位 + 按目标的 rect 算位置，挂在页面级
+ *（会话列表 `overflow-y: auto`，浮层放在行内会被裁掉）。
+ * `pointer-events: auto` 是故意的：**文字要能选中复制**（长标题经常是要复制走的），
+ * 代价是鼠标移进浮层会让那一行收到 mouseleave —— app.js 用 160ms 的延迟收起兜住这点。
+ */
+.title-float {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 5;
+  max-width: 320px;
+  padding: 8px 10px;
+  border: 1px solid var(--rule-strong);
+  border-left: 2px solid var(--ink);
+  border-radius: var(--radius);
+  background: var(--paper-lift);
+  box-shadow: var(--shadow);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
 /* 输入区上方的待发送引用 */
 .composer-quote {
   display: grid;
@@ -2159,6 +2285,10 @@ body::before {
     padding-right: 0;
     margin-bottom: 10px;
   }
+  /* 单列布局里没有「那道缝」可拖：会话栏是整幅宽的一段，调宽度没有意义 */
+  .rail-resizer {
+    display: none;
+  }
   .session-list {
     max-height: 210px;
   }
@@ -2186,9 +2316,6 @@ body::before {
   /* 窄屏上副标题一直收起：固定报头在手机上占地太宝贵 */
   .masthead-title p {
     display: none;
-  }
-  .masthead[data-compact="true"] .masthead-title h1 {
-    font-size: 19px;
   }
   .masthead-tools {
     width: 100%;
