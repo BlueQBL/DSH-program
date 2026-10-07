@@ -483,6 +483,30 @@ body[data-resizing="true"] {
   color: color-mix(in srgb, var(--ink) 45%, transparent);
 }
 
+/*
+ * 「已归档」这一小块标记，只出现在**搜索结果**里。
+ *
+ * 为什么必须有：归档之后它在列表里看不见了，搜索就成了「它还活着」的唯一证据；
+ * 而一条搜索结果孤零零地摆在那儿、又不说明自己为什么不在列表里，看起来就像
+ * 搜到了一个已经删掉的东西（或者像界面坏了）。这一小块就是那句话。
+ *
+ * 为什么只在这里：在「已归档」那一组里，每一行都是归档的，每行挂一块纯属噪音。
+ *
+ * 为什么挂在标题的 ::before（和分支箭头同一个位置）：标题是一行 + 末尾省略号，
+ * 挂在开头才不会被截掉；挂在 meta 那一行同理，而 meta 那行还要留给「匹配：…」。
+ * 它是 inline 的，padding/border 不参与行高，所以不会把列表撑高一点点。
+ */
+#group-search .session-item[data-archived="true"] .session-name::before {
+  content: '已归档';
+  margin-right: 6px;
+  padding: 0 4px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 2px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: color-mix(in srgb, var(--ink) 55%, transparent);
+}
+
 .session-meta {
   display: block;
   margin-top: 2px;
@@ -597,6 +621,15 @@ body[data-resizing="true"] {
   border: 0;
   border-radius: 2px;
 }
+/*
+ * 程序把某一项藏起来时（归档的那条不摆「置顶」，见 app.js 的 sessionRow）：
+ * 这里必须让 `[hidden]` 赢过上面那个 `display: block`。
+ * 否则 hidden 写上了也照样占着一整行 —— 菜单里留一个空格子，
+ * 而且那格子的位置正好是「置顶」，点下去还会真的把已归档的会话置顶。
+ */
+.session-menu-item[hidden] {
+  display: none;
+}
 .session-menu-item:hover {
   background: var(--wash);
   border-color: transparent;
@@ -623,6 +656,12 @@ body[data-resizing="true"] {
 /* 已经置顶的那一条：按钮写成「取消置顶」，用正墨色表示它生效了。
    刻意不用红墨 —— 这一页的红墨是「问」标和「正在写」的语义。 */
 .session-item[data-pinned="true"] .icon-button[data-action="pin"] {
+  color: var(--ink);
+  border-color: var(--rule-strong);
+}
+/* 已经归档的那一条：菜单项写成「取消归档」，同样是正墨色表示它生效了。
+   这条规则对「已归档」组里的每一行都成立（也就是那一组里所有行）。 */
+.session-item[data-archived="true"] .icon-button[data-action="archive"] {
   color: var(--ink);
   border-color: var(--rule-strong);
 }

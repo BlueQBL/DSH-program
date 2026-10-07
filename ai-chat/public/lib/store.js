@@ -268,6 +268,9 @@ function normalizeSession(raw) {
     // 置顶：只认显式的 true。别的地方（手改过的 localStorage、导入的数据）
     // 塞进来的 "true" / 1 / {} 一律当成「没置顶」。
     pinned: raw.pinned === true,
+    // 归档：同一个纪律 —— 只认显式的 true。
+    // 老数据（还没有这个字段的那些）里读到 undefined，就是「没归档」，会照常出现在列表里。
+    archived: raw.archived === true,
     messages: (Array.isArray(raw.messages) ? raw.messages : []).map(normalizeMessage).filter(Boolean),
   };
   // 这个名字是谁起的。老数据没有这个字段，靠标题内容反推（见 lib/title.js）——
@@ -343,28 +346,40 @@ function makeSession(overrides = {}) {
     model: '',
     /** 置顶：钉在会话列表最上面那一组（见 groupSessions） */
     pinned: false,
+    /**
+     * 归档：从会话列表里收起来，但**一条数据都没删**（见 groupSessions）。
+     * 它和置顶是同一条「优先级」轴上的两端 —— 置顶是「现在最重要」，
+     * 归档是「收起来了，但别删」。所以两者不会同时为真：归档会顺手把置顶清掉。
+     */
+    archived: false,
     messages: [],
     ...overrides,
   };
 }
 
 /**
- * 把会话分成「置顶」和「最近」两组（会话列表就按这两组画，布局参考 ChatGPT）。
+ * 把会话分成「置顶」「最近」「已归档」三组（会话列表就按这三组画，布局参考 ChatGPT）。
  *
  * 传进来的顺序就是组内顺序 —— `store.sessions` 已经按最近使用排好了，
  * 这里只负责分组，**不重排**：置顶的会话落在置顶组的哪个位置，仍然由「最近用过」决定，
  * 置顶这件事本身不会让它跳到组里的第一名。
  *
+ * 归档的那一条**只**进「已归档」：即使它身上还留着 pinned（手改过的 localStorage、
+ * 旧版本存下的数据），也不该同时出现在置顶组里 —— 一个会话只能在一个组里，
+ * 否则同一个名字在一栏里出现两次，看起来像有两条。
+ *
  * 没有置顶的会话时 pinned 是空数组，界面上那一组连标题都不显示。
  *
- * @param {Array<{pinned?: boolean}>} sessions
- * @returns {{pinned: Array<object>, recent: Array<object>}}
+ * @param {Array<{pinned?: boolean, archived?: boolean}>} sessions
+ * @returns {{pinned: Array<object>, recent: Array<object>, archived: Array<object>}}
  */
 export function groupSessions(sessions) {
   const list = Array.isArray(sessions) ? sessions : [];
+  const live = list.filter((session) => session?.archived !== true);
   return {
-    pinned: list.filter((session) => session?.pinned === true),
-    recent: list.filter((session) => session?.pinned !== true),
+    pinned: live.filter((session) => session?.pinned === true),
+    recent: live.filter((session) => session?.pinned !== true),
+    archived: list.filter((session) => session?.archived === true),
   };
 }
 
@@ -506,10 +521,18 @@ export function createStore() {
   function makeRoom() {
     if (sessions.length < MAX_SESSIONS) return;
     // 不静默失败：按最久未使用淘汰一个。
-    // 置顶的会话排在淘汰队列的**最后** —— 用户明确说过它重要，
-    // 要淘汰就先淘汰没置顶的；实在全都是置顶的，才退回去淘汰最旧的。
+    // 但「谁先走」分三档，规则只有一条：**用户明确表过态的排在后面**。
+    //   普通（没置顶也没归档）→ 归档 → 置顶
+    // 置顶是「现在最重要」，归档是「收起来了，但别删」—— 两个都是用户说过的意思，
+    // 所以都排在普通会话后面；实在全都表过态了，才退回「淘汰最旧的」。
+    //
+    // 归档这一档非有不可：归档的会话「最久没用」几乎永远成立（归档的语义就是不用了），
+    // 落进旧规则里它会**第一个**被淘汰 —— 那就成了「我明明归档了，它却没了」，
+    // 比删除还让人恼火（删除至少是自己按下去的）。
     const byOldest = [...sessions].sort((a, b) => a.updatedAt - b.updatedAt);
-    const oldest = byOldest.find((s) => s.pinned !== true) ?? byOldest[0];
+    const oldest = byOldest.find((s) => s.pinned !== true && s.archived !== true)
+      ?? byOldest.find((s) => s.pinned !== true)
+      ?? byOldest[0];
     sessions = sessions.filter((s) => s.id !== oldest.id);
   }
 
@@ -702,6 +725,30 @@ export function createStore() {
       const session = sessions.find((s) => s.id === id);
       if (!session) return false;
       session.pinned = pinned === true;
+      commit();
+      return true;
+    },
+
+    /**
+     * 归档 / 取消归档。
+     *
+     * 归档**不删任何东西**：会话还在 sessions 里、消息一条不少、导出还带上它、
+     * 搜索也还搜得到（见 app.js 的搜索）。它改的只是「列表里摆不摆」这一件事 ——
+     * 这是它和 deleteSession 的全部区别。
+     *
+     * 三个刻意的决定：
+     *   · 和置顶一样**不 touch()**：归档不是「又用了它一次」。顺带把时间推到现在的话，
+     *     取消归档之后它会凭空冒到「最近」的第一名，而它其实只是个刚被翻出来的老会话。
+     *   · 归档时顺手**清掉置顶**：置顶的意思是「钉在列表最上面」，而归档的这条不在列表里。
+     *     两个状态同时为真，用户就答不上来「取消归档之后它该回哪儿」——
+     *     现在的答案是「回『最近』」，简单、可解释，也不用记一个隐形的旧状态。
+     *   · 只认布尔：别处（手改的 localStorage、导入的数据）塞进来的 "true" / 1 一律当没归档。
+     */
+    setArchived(id, archived) {
+      const session = sessions.find((s) => s.id === id);
+      if (!session) return false;
+      session.archived = archived === true;
+      if (session.archived) session.pinned = false;
       commit();
       return true;
     },

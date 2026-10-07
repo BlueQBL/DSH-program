@@ -103,7 +103,7 @@ const els = {
   referenceChange: document.getElementById('reference-change'),
   referenceDrop: document.getElementById('reference-drop'),
   branchSourceButton: document.getElementById('branch-source-button'),
-  // 会话列表的两组（置顶 / 最近）。每组：section（整组，空组整块藏起来）、
+  // 会话列表的三组（置顶 / 最近 / 已归档）。每组：section（整组，空组整块藏起来）、
   // list（会话行容器，组内收起时藏的是它）、count、toggle（组标题右边的收起/展开）
   groupPinned: {
     section: document.getElementById('group-pinned'),
@@ -118,6 +118,14 @@ const els = {
     toggle: document.getElementById('recent-toggle'),
     // 「显示全部 / 只看最近几个」那个开关（纯显示，见 RECENT_VISIBLE）
     more: document.getElementById('recent-more'),
+  },
+  // 归档的那一组：默认收着（见 readGroupPreference 里那一档说明），
+  // 它同时是归档唯一的出口 —— 没有它就等于把会话藏没了
+  groupArchived: {
+    section: document.getElementById('group-archived'),
+    list: document.getElementById('archived-list'),
+    count: document.getElementById('archived-count'),
+    toggle: document.getElementById('archived-toggle'),
   },
   // 搜索：输入框 + 平铺的「搜索结果」区（有内容时两组让位）
   searchInput: document.getElementById('session-search'),
@@ -606,37 +614,51 @@ els.jumpBottom.addEventListener('click', () => {
  */
 let railRevealPending = false;
 
-// ---------------------------------------------------------------- 列表的两组
+// ---------------------------------------------------------------- 列表的三组
 //
-// 列表分「置顶」和「最近」两组（布局参考 ChatGPT）：置顶的钉在最上面，
-// 其余的按最近使用排在「最近」里。每一组自己能收起/展开 ——
-// 收起来的是**这一组的会话行**，「置顶」「最近」这两个标题永远还在。
+// 列表分「置顶」「最近」「已归档」三组（布局参考 ChatGPT）：置顶的钉在最上面，
+// 其余的按最近使用排在「最近」里，归档的收在最后那一组。每一组自己能收起/展开 ——
+// 收起来的是**这一组的会话行**，「置顶」「最近」「已归档」这些标题永远还在。
+//
+// 归档是「优先级」这条轴的另一端：置顶是「现在最重要」，归档是「收起来了，但别删」。
+// 它只管列表里摆不摆 —— 数据、搜索、导出一样都不受影响（删掉会话才是 deleteSession 的事）。
 //
 // 这和报头那个总开关是两件事：那个把整栏（连标题一起）收起来。
-// 两者互不影响，也都不影响「＋ 新对话」—— 它在两组之外，永远够得着。
+// 两者互不影响，也都不影响「＋ 新对话」—— 它在三组之外，永远够得着。
 
 /** 组的名字，同时也是 localStorage 里的字段名（别改，用户的选择存在那儿） */
-const RAIL_GROUPS = ['pinned', 'recent'];
+const RAIL_GROUPS = ['pinned', 'recent', 'archived'];
 const RAIL_GROUPS_KEY = 'duitanlu.railGroups.v1';
 
 const RAIL_GROUP_ELS = {
   pinned: els.groupPinned,
   recent: els.groupRecent,
+  archived: els.groupArchived,
 };
 
 /**
  * 每一组是不是收着的。
  *
- * 只认显式的 true —— 手改过的 localStorage、别处导入的数据塞进来的东西一律当「展开」。
- * 默认必须是展开：第一次打开就看到两组都空着，会以为会话丢了。
+ * 「置顶」「最近」默认展开，「已归档」默认**收着** —— 两个方向相反的默认值，各有各的道理：
+ *   · 前两组默认展开：第一次打开就看到列表空着，会以为会话丢了；
+ *   · 「已归档」默认收起：归档的意思本来就是「先别占地方」，
+ *     一归档就把这一栏撑长、还要用户自己再收一次，那归档就白归了。
+ *
+ * 用户自己点过收起/展开之后，那个选择一直算数（存 localStorage，刷新还在）——
+ * 所以那里没存过值时（undefined）不能一律写成 false，否则「已归档」的默认收起会被抹掉。
+ * 存过的值只认显式的 true：手改过的 localStorage、别处导入的数据塞进来的 "yes" / 1
+ * 一律当默认。
  */
 function readGroupPreference() {
-  const state = { pinned: false, recent: false };
+  const state = { pinned: false, recent: false, archived: true };
   try {
     const raw = JSON.parse(localStorage.getItem(RAIL_GROUPS_KEY) ?? '{}');
-    for (const name of RAIL_GROUPS) state[name] = raw?.[name] === true;
+    for (const name of RAIL_GROUPS) {
+      if (raw?.[name] === undefined) continue;
+      state[name] = raw[name] === true;
+    }
   } catch {
-    /* 存坏了就当两组都展开 */
+    /* 存坏了就用上面那套默认值 */
   }
   return state;
 }
@@ -743,8 +765,11 @@ els.searchInput?.addEventListener('keydown', (event) => {
 });
 
 /**
- * 一条会话行（两组共用）。
- * 置顶的那条，按钮改成「取消置顶」；分支会话在行首带一个小箭头（样式给的）。
+ * 一条会话行（三组共用）。
+ * 置顶的那条，按钮改成「取消置顶」；归档的那条改成「取消归档」，并且**不再摆「置顶」**——
+ * 它此刻不在列表里，而置顶的意思是「钉在列表最上面」，摆着就是个自相矛盾的按钮
+ * （想置顶就先取消归档，那是同一个菜单里的第一项）。
+ * 分支会话在行首带一个小箭头（样式给的）。
  *
  * 字段都写在 `item`（那个 `.session-item`）上、也返回 `item`，不再返回整片模板：
  * 模板里只有这一个 li，两者在真实浏览器里等价；而「谁被写进去了」保持一处，
@@ -759,6 +784,7 @@ function sessionRow(session, activeId) {
   item.dataset.id = session.id;
   item.dataset.active = String(session.id === activeId);
   item.dataset.pinned = String(session.pinned === true);
+  item.dataset.archived = String(session.archived === true);
   item.dataset.branch = String(Boolean(session.branchOf));
 
   const fullTitle = session.title || '新对话';
@@ -780,8 +806,18 @@ function sessionRow(session, activeId) {
 
   const pin = item.querySelector('[data-action="pin"]');
   const pinned = session.pinned === true;
+  const archived = session.archived === true;
+  pin.hidden = archived;
   pin.textContent = pinned ? '取消置顶' : '置顶';
   pin.title = pinned ? '取消置顶，回到「最近」' : '置顶（钉在列表最上面）';
+
+  // 归档 / 取消归档：同一个按钮，两副面孔（和上面那个置顶按钮一个路子）。
+  // 「已归档」那一组里每一行都点着这一个 —— 它就是归档的出口。
+  const archive = item.querySelector('[data-action="archive"]');
+  archive.textContent = archived ? '取消归档' : '归档';
+  archive.title = archived
+    ? '取消归档，回到「最近」'
+    : '归档（从列表里收起来，一条都没删）';
   return item;
 }
 
@@ -790,6 +826,10 @@ function sessionRow(session, activeId) {
  *
  * 规则只有一条，但它很要紧：**当前会话必须在列**。否则刷新之后（active 可能是个很老的
  * 会话）你会看到自己正待着的那个会话不在左栏里 —— 像丢了。它在 6 条之外时补在末尾。
+ *
+ * 「补在末尾」只对没归档的会话成立：归档是用户**自己按下去的**，
+ * 那一条本来就该离开「最近」（它去了「已归档」），不属于「像丢了」那类意外。
+ * 刷新之后它照样在「已归档」里，位置固定、找得回来。
  *
  * 注意这里只决定**画哪几行**：会话总数、分组条数一律照真实值写。
  */
@@ -897,7 +937,10 @@ function renderSessionList() {
 
   hideTitleFloat(); // 列表要重画了，浮出来的完整标题立刻失去意义
   closeSessionMenu(); // 菜单里的按钮也一起被重画，留着就是指向已消失的节点
-  els.sessionCount.textContent = String(sessions.length);
+  // 「会话」这个数字说的是**这一栏里摆着的**那几条：归档的不算。
+  // 归档的在「已归档」那一组的标题上有自己的一条条数，两处加起来才是全部 ——
+  // 不分的话，「我归档了一个，怎么还是 7」是必然会冒出来的疑问。
+  els.sessionCount.textContent = String(sessions.filter((s) => s.archived !== true).length);
 
   const groups = groupSessions(sessions);
   // null = 没在搜索；有内容时才切成平铺的「搜索结果」
@@ -912,7 +955,9 @@ function renderSessionList() {
     group.section.hidden = hits !== null || rows.length === 0;
     // 条数徽标写的是**这一组真实有几条**，跟画出来几行无关（藏起来的那几个也算）
     group.count.textContent = String(rows.length);
-    // 「最近」默认只画前几个；「置顶」不裁 —— 置顶是用户明确说过重要的东西
+    // 「最近」默认只画前几个；「置顶」和「已归档」不裁 ——
+    // 前一个是用户明确说过重要的东西，后一个是**你自己点开才看到的**（那一组默认收着），
+    // 再在里面藏掉几个纯粹是添乱。
     const visible = name === 'recent' && !recentShowAll ? trimRecentRows(rows, activeId) : rows;
     if (name === 'recent') recentShown = visible.length;
     group.list.replaceChildren(...visible.map((session) => sessionRow(session, activeId)));
@@ -969,6 +1014,21 @@ els.sessionList.addEventListener('click', (event) => {
     setGroupCollapsed(next ? 'pinned' : 'recent', false);
     renderSessionList();
     flashHint(next ? '已置顶，钉在列表最上面' : '已取消置顶，回到「最近」', 2200);
+    return;
+  }
+
+  if (action === 'archive') {
+    const session = store.sessions.find((s) => s.id === id);
+    const next = session?.archived !== true;
+    if (!store.setArchived(id, next)) return;
+    // 取消归档之后它回「最近」：那一组要是正收着，先展开（和置顶同一条道理）。
+    // 归档时**不**把「已归档」展开 —— 那一组默认就是收着的，一归档就展开等于
+    // 每次都把这一栏撑长一次；「它去哪儿了」交给下面那句话回答。
+    if (!next) setGroupCollapsed('recent', false);
+    // 归档**不**把你切走：正文里正看着的这个会话留在原地（它只是不在列表里了）。
+    // 「聊完这一条，把它收起来」恰恰是最常见的用法 —— 这时候被弹到别的会话上才讨厌。
+    renderSessionList();
+    flashHint(next ? '已归档，左栏「已归档」里找得回来' : '已取消归档，回到「最近」', 2600);
     return;
   }
 

@@ -1347,6 +1347,155 @@ group('会话列表的置顶 / 最近：分组是界面的事，置顶本身是�
   check('全是置顶时也会腾出位置（不会卡在上限）', store.sessions.length === 50, String(store.sessions.length));
 }
 
+group('会话归档：不删、不显、能回来');
+
+{
+  // 分组这一层：归档的**只**进「已归档」，不进另外两组
+  const { groupSessions } = await loadStore();
+
+  const sample = [
+    { id: 'a', updatedAt: 5 },
+    { id: 'b', updatedAt: 4, pinned: true },
+    { id: 'c', updatedAt: 3, archived: true },
+    { id: 'd', updatedAt: 2, pinned: true, archived: true },
+  ];
+  const split = groupSessions(sample);
+  check('归档的进「已归档」组', split.archived.map((s) => s.id).join(',') === 'c,d', split.archived.map((s) => s.id).join(','));
+  check('归档的不留在「置顶」组里（一个会话只在一个组里）',
+    split.pinned.map((s) => s.id).join(',') === 'b', split.pinned.map((s) => s.id).join(','));
+  check('归档的不留在「最近」组里', split.recent.map((s) => s.id).join(',') === 'a', split.recent.map((s) => s.id).join(','));
+  check('三条加起来正好是全部（一条不漏、一条不重）',
+    split.pinned.length + split.recent.length + split.archived.length === sample.length);
+  check('只认显式的 true（"true" / 1 都不算归档）',
+    groupSessions([{ id: 'z', archived: 'true' }, { id: 'w', archived: 1 }]).archived.length === 0);
+  check('没有归档的会话时，这一组是空数组（界面据此整块不显示）',
+    groupSessions([{ id: 'z' }]).archived.length === 0);
+  check('脏输入不炸', groupSessions(undefined).archived.length === 0 && groupSessions('x').archived.length === 0);
+}
+
+{
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+
+  const keep = store.session.id;
+  store.pushUser('聊完的一条');
+  const other = store.createSession().id;
+  store.pushUser('还在用的一条');
+  const before = store.sessions.find((s) => s.id === keep).updatedAt;
+  const orderBefore = store.sessions.map((s) => s.id).join(',');
+
+  check('默认一条都没归档', store.sessions.every((s) => s.archived === false));
+  // 和置顶那条断言同一个道理：updatedAt 的精度就是毫秒，不等一下的话
+  // 「归档顺手 touch 了一下」在同一个毫秒里看不出时间戳变化，断言会时灵时不灵
+  await new Promise((r) => setTimeout(r, 5));
+  check('归档成功', store.setArchived(keep, true) === true);
+  check('归档状态记在会话上', store.sessions.find((s) => s.id === keep).archived === true);
+  check('归档**不改**最近使用时间（取消归档之后它不该凭空冒到「最近」第一名）',
+    store.sessions.find((s) => s.id === keep).updatedAt === before);
+  check('归档不改列表本身的顺序（谁在上面由界面的分组决定）',
+    store.sessions.map((s) => s.id).join(',') === orderBefore,
+    store.sessions.map((s) => s.id).join(','));
+  check('取消归档', store.setArchived(keep, false) === true
+    && store.sessions.find((s) => s.id === keep).archived === false);
+  check('脏值不会把会话标成归档',
+    (store.setArchived(keep, 'yes'), store.sessions.find((s) => s.id === keep).archived === false));
+  check('没有这个会话时返回 false', store.setArchived('nope', true) === false);
+
+  // 归档和置顶不能同时为真
+  store.setPinned(other, true);
+  store.setArchived(other, true);
+  check('归档顺手清掉置顶（「钉在最上面」和「不在列表里」不能同时成立）',
+    store.sessions.find((s) => s.id === other).pinned === false
+      && store.sessions.find((s) => s.id === other).archived === true);
+  store.setArchived(other, false);
+  check('取消归档回「最近」，不偷偷回「置顶」',
+    store.sessions.find((s) => s.id === other).pinned === false
+      && store.sessions.find((s) => s.id === other).archived === false);
+}
+
+{
+  // 刷新之后归档还在（normalizeSession 少认一个字段，这一步就会红）
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+  const keep = store.session.id;
+  store.pushUser('要收起来的一条');
+  store.setArchived(keep, true);
+  simulatePageHide();
+
+  const again = createStore();
+  check('刷新之后归档还在', again.sessions.find((s) => s.id === keep)?.archived === true);
+  check('刷新之后没归档的仍然是没归档', again.sessions.every((s) => s.archived === (s.id === keep)));
+}
+
+{
+  // 手改过的 localStorage：字符串 "true" 不该被当成归档
+  freshEnvironment({
+    seed: {
+      [SESSIONS_KEY]: JSON.stringify({
+        activeId: 'sess1',
+        sessions: [{ id: 'sess1', title: '手改过的', archived: 'true', messages: [] }],
+      }),
+    },
+  });
+  const { createStore } = await loadStore();
+  const store = createStore();
+  check('手改出来的 "true" 不算归档（只认布尔 true）', store.sessions[0].archived === false,
+    String(store.sessions[0].archived));
+}
+
+{
+  // 淘汰一个会话时，归档的排在普通会话**后面** ——
+  // 归档的语义是「留着，只是先收起来」，而它「最久没用」几乎永远成立，
+  // 所以这里刻意让归档的那条是**全部会话里最旧的**：它必须活过那些比它新的普通会话。
+  //（不这么摆的话，普通会话本来就比它旧、先被淘汰，这条断言就抓不住缺陷了。）
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+  const kept = store.session.id;
+  store.pushUser('收起来的一条');
+  store.setArchived(kept, true);
+  const normal = store.createSession().id;
+  store.pushUser('普通的一条');
+  for (let i = 0; i < 60; i += 1) store.createSession();
+
+  check('（准备）会话数封顶在 50 条', store.sessions.length === 50, String(store.sessions.length));
+  check('归档的那条不会被淘汰（它最旧，但排在最旧的普通会话后面）',
+    store.sessions.some((s) => s.id === kept));
+  check('（对比）普通的那条早就走了 —— 这就是归档换来的差别',
+    !store.sessions.some((s) => s.id === normal));
+
+  // 全是归档的也得能继续用：退回「淘汰最旧的」，不许卡住
+  for (const session of store.sessions) store.setArchived(session.id, true);
+  store.createSession();
+  check('全是归档时也会腾出位置（不会卡在上限）', store.sessions.length === 50, String(store.sessions.length));
+}
+
+{
+  // 三档的顺序：普通 → 归档 → 置顶
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+  const pinned = store.session.id;
+  store.pushUser('钉在上面的一条');
+  store.setPinned(pinned, true);
+  const archived = store.createSession().id;
+  store.pushUser('收起来的一条');
+  store.setArchived(archived, true);
+  for (let i = 0; i < 48; i += 1) store.createSession();
+  check('（准备）50 条塞满', store.sessions.length === 50, String(store.sessions.length));
+
+  // 把普通会话也全归档：这时队列里只剩「归档」和「置顶」两种
+  for (const session of store.sessions) {
+    if (session.id !== pinned) store.setArchived(session.id, true);
+  }
+  store.createSession();
+  check('只剩归档和置顶时，先走的是归档（置顶是「现在就要用」，留到最后）',
+    store.sessions.some((s) => s.id === pinned) && !store.sessions.some((s) => s.id === archived),
+    `置顶在=${store.sessions.some((s) => s.id === pinned)} 归档在=${store.sessions.some((s) => s.id === archived)}`);
+}
+
 group('会话分支 · 纯函数：标题、复制、图片');
 
 {

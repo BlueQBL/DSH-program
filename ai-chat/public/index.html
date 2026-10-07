@@ -175,6 +175,36 @@
             </section>
 
             <!--
+              「已归档」：从「置顶」「最近」里收起来的那几条放在这儿。
+              和另外两组同构（标题 + 条数 + 收起/展开），但**默认是收着的** ——
+              归档的意思是「先别占地方」，一归档就把这一栏撑长就说不过去了。
+              用户自己展开过之后，那个选择会被记住（见 app.js 的 readGroupPreference）。
+
+              它是归档唯一的出口，所以永远在这儿：没有它，归档就和删除一样了 ——
+              而且更吓人（删除至少是自己按下去的）。
+            -->
+            <section class="rail-group" id="group-archived" data-group="archived" hidden>
+              <div class="rail-group-head">
+                <span class="rail-group-title">已归档</span>
+                <span class="rail-group-count" id="archived-count"></span>
+                <button
+                  type="button"
+                  class="rail-group-toggle"
+                  id="archived-toggle"
+                  aria-expanded="false"
+                  aria-controls="archived-list"
+                  aria-label="收起或展开已归档的会话"
+                  title="收起 / 展开已归档的会话"
+                >
+                  <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" focusable="false">
+                    <path d="M2.5 4.5 L6 8 L9.5 4.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                </button>
+              </div>
+              <ol class="rail-group-list" id="archived-list"></ol>
+            </section>
+
+            <!--
               搜索结果：平铺一层，不分组、不裁。
               「没有匹配」时留一句话，而不是给一个空列表（空列表看起来像坏了）。
             -->
@@ -479,7 +509,7 @@
     <!--
       会话列表项。
       行尾那一小块（`.session-slot`）平时显示「这个会话多久没动了」（3 分钟前 / 昨天 / 2 周前），
-      鼠标停在行上时**原地换成「⋯」**—— 置顶 / 重命名 / 自动命名 / 删除四个功能收在那个菜单里。
+      鼠标停在行上时**原地换成「⋯」**—— 置顶 / 重命名 / 自动命名 / 归档 / 删除五个功能收在那个菜单里。
       两块都在同一个**固定宽度**的槽位里、都右对齐：宽度固定，悬停切换时标题就不会重新截断一下。
       以前行尾是四个文字按钮常驻，而且只做了 opacity: 0 —— 位置一直占着，292px 的行被吃掉约 145px，
       标题只剩六七个字。
@@ -496,7 +526,7 @@
             type="button"
             class="icon-button session-more"
             data-action="more"
-            title="更多操作（置顶 / 重命名 / 自动命名 / 删除）"
+            title="更多操作（置顶 / 重命名 / 自动命名 / 归档 / 删除）"
             aria-haspopup="menu"
             aria-expanded="false"
           >⋯</button>
@@ -506,6 +536,13 @@
           <button type="button" class="icon-button session-menu-item" data-action="pin" role="menuitem" title="置顶（钉在列表最上面）">置顶</button>
           <button type="button" class="icon-button session-menu-item" data-action="rename" role="menuitem" title="自己给这个会话换个名字">重命名</button>
           <button type="button" class="icon-button session-menu-item" data-action="retitle" role="menuitem" title="点一下让 AI 读一遍这个会话，换个更贴题的名字">自动命名</button>
+          <!--
+            归档：从列表里收起来，但一条数据都没删（和下面那个「删除」是两件事）。
+            位置刻意夹在「自动命名」和「删除」中间 —— 安全操作和危险操作之间留一格，
+            别让手指顺着往下滑的时候把「归档」按成「删除」。
+            归档过的那一条，这个按钮上的字会变成「取消归档」（见 app.js 的 sessionRow）。
+          -->
+          <button type="button" class="icon-button session-menu-item" data-action="archive" role="menuitem" title="归档（从列表里收起来，一条都没删）">归档</button>
           <button type="button" class="icon-button session-menu-item danger" data-action="delete" role="menuitem" title="删除这个会话">删除</button>
         </span>
       </li>

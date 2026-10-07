@@ -2011,9 +2011,9 @@ console.log('\n⑯ 会话标题太长：两行 + 悬停看全文');
   await new Promise((r) => setTimeout(r, 80));
   check('列表重画之后浮层收起（那一行可能已经不在了）', floatEl.hidden === true);
 
-  // ---- 行尾只留一个「⋯」，四个功能收进菜单
+  // ---- 行尾只留一个「⋯」，功能全收进菜单
   //
-  // 这一段是**同一个问题的另一半**：那四个文字按钮以前常驻行尾（只做了 opacity: 0，
+  // 这一段是**同一个问题的另一半**：那些文字按钮以前常驻行尾（只做了 opacity: 0，
   // 宽度照占），292px 的行里被吃掉约 145px —— 标题只剩六七个字。
   {
     const rowAt = html.indexOf('id="session-template"');
@@ -2025,8 +2025,8 @@ console.log('\n⑯ 会话标题太长：两行 + 悬停看全文');
 
     check('行里有一个「⋯」按钮', moreAt > -1 && /aria-haspopup="menu"/.test(tpl));
     check('「⋯」初始 aria-expanded=false', /data-action="more"[\s\S]*?aria-expanded="false"/.test(tpl));
-    check('四个功能（置顶/重命名/自动命名/删除）都在菜单里',
-      ['pin', 'rename', 'retitle', 'delete'].every((a) => menuInner.includes(`data-action="${a}"`)),
+    check('五个功能（置顶/重命名/自动命名/归档/删除）都在菜单里',
+      ['pin', 'rename', 'retitle', 'archive', 'delete'].every((a) => menuInner.includes(`data-action="${a}"`)),
       menuInner);
 
     // 菜单上的措辞是**定过的**，不是随手写的：
@@ -2039,8 +2039,8 @@ console.log('\n⑯ 会话标题太长：两行 + 悬停看全文');
 
     check('菜单上的字是「重命名」和「自动命名」',
       menuInner.includes('>重命名</button>') && menuInner.includes('>自动命名</button>'), menuInner);
-    check('「⋯」上的 title 里那四个功能也换了新词',
-      /title="更多操作（置顶 \/ 重命名 \/ 自动命名 \/ 删除）"/.test(tpl),
+    check('「⋯」上的 title 里那几个功能也换了新词',
+      /title="更多操作（置顶 \/ 重命名 \/ 自动命名 \/ 归档 \/ 删除）"/.test(tpl),
       tpl.slice(moreAt, moreAt + 220));
     check('用户看得见的地方不再出现「改名」「起名」（菜单 / 气泡提示 / 对话框标题）',
       !/改名|起名/.test(menuInner) && !/改名|起名/.test(appCode) && !/改名|起名/.test(tpl),
@@ -3680,6 +3680,236 @@ console.log('\n㉓ 轮次导航：右侧那列短杠');
     '找不到 landed-fade 动画/规则');
   check('窄屏（单列）里不出现',
     /@media \(max-width: 1000px\)[\s\S]*?\.turn-nav[\s\S]*?display:\s*none/.test(css));
+}
+
+console.log('\n㉔ 归档：从列表里收起来，但一条数据都没删');
+
+{
+  const css = readFileSync(path.resolve(PUBLIC, 'styles.css'), 'utf8');
+  const sessionTpl = sliceBlock(html, '<template id="session-template">', 'template');
+  const archivedBlock = sliceBlock(html, '<section class="rail-group" id="group-archived"', 'section');
+  const archivedHead = sliceBlock(archivedBlock, '<div class="rail-group-head">', 'div');
+  const recentBlock = sliceBlock(html, '<section class="rail-group" id="group-recent"', 'section');
+  const tagOf = (source, action) => new RegExp(`<button[^>]*data-action="${action}"[^>]*>`).exec(source)?.[0] ?? '';
+
+  // ---- 结构：入口夹在安全操作和危险操作中间
+  check('「⋯」菜单里有「归档」这一项', /data-action="archive"/.test(sessionTpl));
+  check('「归档」夹在「自动命名」和「删除」中间（手指顺下来不会把归档按成删除）',
+    sessionTpl.indexOf('data-action="archive"') > sessionTpl.indexOf('data-action="retitle"')
+      && sessionTpl.indexOf('data-action="archive"') < sessionTpl.indexOf('data-action="delete"'),
+    `retitle=${sessionTpl.indexOf('data-action="retitle"')} archive=${sessionTpl.indexOf('data-action="archive"')} delete=${sessionTpl.indexOf('data-action="delete"')}`);
+  check('「删除」是危险色，「归档」不是（可逆和不可逆在界面上就得长得不一样）',
+    /danger/.test(tagOf(sessionTpl, 'delete')) && !/danger/.test(tagOf(sessionTpl, 'archive')),
+    `delete=${tagOf(sessionTpl, 'delete')} / archive=${tagOf(sessionTpl, 'archive')}`);
+
+  // ---- 结构：第三组
+  check('左栏多出「已归档」一组，和另外两组同构（标题 / 条数 / 收起按钮）',
+    /class="rail-group-title">已归档</.test(archivedBlock) && archivedBlock.includes('id="archived-count"')
+      && archivedBlock.includes('id="archived-list"') && archivedHead.includes('id="archived-toggle"'));
+  check('收起按钮指向这一组的会话容器（aria-controls）', /aria-controls="archived-list"/.test(archivedHead));
+  check('收起按钮在标题行里，**不在**会话容器里（所以收起时标题还在）',
+    archivedHead.includes('id="archived-toggle"')
+      && !sliceBlock(archivedBlock, '<ol class="rail-group-list"', 'ol').includes('archived-toggle'));
+  check('「已归档」在 HTML 里就写着收着（另外两组写着展开）—— 归档的意思就是先别占地方',
+    /id="archived-toggle"[\s\S]*?aria-expanded="false"/.test(archivedHead)
+      && /id="recent-toggle"[\s\S]*?aria-expanded="true"/.test(recentBlock));
+
+  // ---- 行为
+  const recentRows = () => getEl('recent-list').children;
+  const pinnedRows = () => getEl('pinned-list').children;
+  const archivedRows = () => getEl('archived-list').children;
+  const searchSection = getEl('group-search');
+  const searchBox = getEl('session-search');
+  const hint = () => getEl('composer-hint').textContent;
+  const rowElementOf = (node) => (node?.dataset?.id ? node : node?.querySelector('.session-item') ?? null);
+  // 这一组 helper 收的都是**行数组**（`recentRows()` 那种），不是容器元素 ——
+  // 名字里的 list 指的是「一列行」，别再传容器进来（第一次写就是这么错开的）
+  const idsIn = (rows) => rows.map((node) => rowElementOf(node)?.dataset.id).filter(Boolean);
+  const rowOf = (rows, id) => rows.find((node) => rowElementOf(node)?.dataset.id === id) ?? null;
+  const actionEl = (rows, id, action) => rowOf(rows, id)?.querySelector(`[data-action="${action}"]`) ?? null;
+  const labelIn = (rows, id, action) => actionEl(rows, id, action)?.textContent ?? '';
+  const rowsIn = () => JSON.parse(storage.get('duitanlu.sessions.v2')).sessions;
+  const groupState = () => JSON.parse(storage.get('duitanlu.railGroups.v1') ?? '{}');
+  const activeIdIn = () => JSON.parse(storage.get('duitanlu.sessions.v2')).activeId;
+  /** 点某一条会话行里的按钮（会话行是模板克隆出来的，替身里只能自己接一条链） */
+  const clickOn = (id, action) => {
+    const button = makeElement('button');
+    button.dataset.action = action;
+    const row = makeElement('li');
+    row.className = 'session-item';
+    row.dataset.id = id;
+    button.parentElement = row;
+    dispatch(getEl('session-list'), 'click', { target: button });
+  };
+
+  const MIN = 60 * 1000;
+  const now = Date.now();
+  const msg = (id, role, content) => ({
+    id,
+    role,
+    content,
+    versions: [{ content, createdAt: 0, attachments: [], quote: null, feedback: null, ...(role === 'assistant' ? { status: 'done', model: 'gpt-4o' } : {}) }],
+    versionCount: 1,
+  });
+  const make = (id, title, { ago = 1, pinned = false, messages = [] } = {}) => ({
+    id,
+    title,
+    createdAt: now - 10 * 24 * 60 * MIN,
+    updatedAt: now - ago * MIN,
+    pinned,
+    messages,
+  });
+
+  const payload = {
+    // 当前会话就是要归档的那一条：「聊完这一条，把它收起来」是最常见的用法，
+    // 这一条路径上不该出现任何「被弹到别的会话上去」的副作用
+    activeId: 'arc_now',
+    sessions: [
+      make('arc_pin', '钉在上面的一条', { ago: 30, pinned: true }),
+      make('arc_now', '刚聊完的一条', { ago: 1, messages: [msg('arc_now_u1', 'user', '刚聊完的这条')] }),
+      make('arc_old', '放了很久的一条', { ago: 40, messages: [msg('arc_old_u1', 'user', '茴香豆的茴字有四种写法')] }),
+      make('arc_keep', '还在用的一条', { ago: 2 }),
+    ],
+  };
+  storage.set('duitanlu.sessions.v2', JSON.stringify(payload));
+  for (const h of windowHandlers.filter((x) => x.type === 'storage')) {
+    h.fn({ key: 'duitanlu.sessions.v2', newValue: JSON.stringify(payload) });
+  }
+  await new Promise((r) => setTimeout(r, 60));
+  // 这一条必须在**动过这个开关之前**断言：下面几行会按需把它摆回默认
+  check('「已归档」默认收着（用户还没点过的时候它就是收着的）',
+    getEl('archived-list').hidden === true, String(getEl('archived-list').hidden));
+  // 前面几段动过这一栏的收放开关（那是用户的选择，会记住）—— 这里先摆回默认
+  if (getEl('recent-list').hidden === true) dispatch(getEl('recent-toggle'), 'click');
+  if (getEl('pinned-list').hidden === true) dispatch(getEl('pinned-toggle'), 'click');
+  if (getEl('archived-list').hidden === false) dispatch(getEl('archived-toggle'), 'click');
+
+  check('（准备）4 条会话都在，一条都没归档',
+    getEl('session-count').textContent === '4' && archivedRows().length === 0,
+    `${getEl('session-count').textContent} / 归档组 ${archivedRows().length} 行`);
+  check('一条都没归档时，「已归档」整块不显示（不摆个空标题在那儿）',
+    getEl('group-archived').hidden === true);
+
+  const beforeCount = getEl('session-count').textContent;
+  clickOn('arc_now', 'archive');
+
+  check('归档之后它不在「最近」组里', !idsIn(recentRows()).includes('arc_now'), idsIn(recentRows()).join(','));
+  check('它在「已归档」组里', idsIn(archivedRows()).includes('arc_now'), idsIn(archivedRows()).join(','));
+  check('它没进「置顶」组（一个会话只在一个组里）', !idsIn(pinnedRows()).includes('arc_now'));
+  check('「已归档」这一组这时才露出来', getEl('group-archived').hidden === false);
+  check('组标题右边写着这一组有几条', getEl('archived-count').textContent === '1', getEl('archived-count').textContent);
+  check('归档状态存进了会话（刷新之后还在）', rowsIn().find((s) => s.id === 'arc_now')?.archived === true);
+  check('行上打了归档标记（样式和菜单靠它认状态）',
+    rowElementOf(rowOf(archivedRows(), 'arc_now'))?.dataset.archived === 'true');
+  check('那一行的按钮改口成「取消归档」（否则就取消不掉了）',
+    labelIn(archivedRows(), 'arc_now', 'archive') === '取消归档', labelIn(archivedRows(), 'arc_now', 'archive'));
+  check('给了反馈，而且说清楚了去哪儿找',
+    hint().includes('归档') && hint().includes('已归档'), hint());
+  check('「会话」那个数字跟着少了一个（归档的不算这一栏里摆着的）',
+    Number(getEl('session-count').textContent) === Number(beforeCount) - 1,
+    `${beforeCount} → ${getEl('session-count').textContent}`);
+  check('归档**不**自动展开「已归档」（一归档就把这一栏撑长，那归档就白归了）',
+    getEl('archived-list').hidden === true, String(getEl('archived-list').hidden));
+  check('归档不把你切走：正文里还是刚才那一条',
+    activeIdIn() === 'arc_now', activeIdIn());
+  check('归档组里那一行的菜单**不摆「置顶」**（它此刻不在列表里，置顶无从谈起）',
+    actionEl(archivedRows(), 'arc_now', 'pin')?.hidden === true);
+
+  dispatch(getEl('archived-toggle'), 'click');
+  check('展开「已归档」就能看见它 —— 归档不是删除，东西还在那儿',
+    idsIn(archivedRows()).includes('arc_now'));
+  check('展开的选择被记住（刷新之后这一组还是展开的）', groupState().archived === false,
+    storage.get('duitanlu.railGroups.v1'));
+
+  // ---- 归档一条置顶的：两个状态不能同时为真
+  clickOn('arc_pin', 'archive');
+  check('归档一条置顶的：它从「置顶」组里消失', !idsIn(pinnedRows()).includes('arc_pin'),
+    idsIn(pinnedRows()).join(','));
+  check('它身上的置顶被清掉了（「钉在最上面」和「不在列表里」不能同时成立）',
+    rowsIn().find((s) => s.id === 'arc_pin')?.pinned === false);
+  check('置顶组空了就整块藏起来', getEl('group-pinned').hidden === true);
+  check('归档组这时有两条', getEl('archived-count').textContent === '2', getEl('archived-count').textContent);
+
+  // ---- 取消归档：回「最近」，而且那一组收着的话要自动展开
+  dispatch(getEl('recent-toggle'), 'click');
+  check('（准备）「最近」收起来了', getEl('recent-list').hidden === true);
+  clickOn('arc_now', 'archive');
+  check('取消归档：它回到「最近」组',
+    idsIn(recentRows()).includes('arc_now') && !idsIn(archivedRows()).includes('arc_now'),
+    `${idsIn(recentRows()).join(',')} / ${idsIn(archivedRows()).join(',')}`);
+  check('它回到的那一组正收着，会自动展开（否则点一下看起来像没反应）',
+    getEl('recent-list').hidden === false);
+  check('取消归档也有反馈', hint().includes('取消归档'), hint());
+  check('会话上的归档标记被清掉了', rowsIn().find((s) => s.id === 'arc_now')?.archived === false);
+  check('回到列表之后，菜单里的「置顶」又摆出来了',
+    actionEl(recentRows(), 'arc_now', 'pin')?.hidden === false);
+
+  clickOn('arc_pin', 'archive');
+  check('取消归档回的是「最近」，**不**偷偷回「置顶」（归档时清掉的那个状态不长回来）',
+    idsIn(recentRows()).includes('arc_pin') && !idsIn(pinnedRows()).includes('arc_pin'),
+    `${idsIn(recentRows()).join(',')} / ${idsIn(pinnedRows()).join(',')}`);
+  check('归档组又空了，整块藏起来', getEl('group-archived').hidden === true && archivedRows().length === 0);
+
+  // ---- 归档的会话**仍然搜得到**（这是归档和删除的分水岭）
+  clickOn('arc_old', 'archive');
+  searchBox.value = '茴香豆';
+  dispatch(searchBox, 'input');
+  const hits = getEl('search-list').children;
+  check('归档的会话仍然搜得到（归档 ≠ 删除：删掉的才搜不到）',
+    searchSection.hidden === false && hits.map((row) => row.dataset.id).join(',') === 'arc_old',
+    `结果 ${hits.map((row) => row.dataset.id).join(',')}`);
+  check('搜索结果里那一行带着「已归档」标记（说明它为什么不在列表里）',
+    hits[0]?.dataset?.archived === 'true', String(hits[0]?.dataset?.archived));
+
+  // 反过来：没归档的命中行不该带这个标记（标记说的是事实，不是装饰）
+  searchBox.value = '还在用';
+  dispatch(searchBox, 'input');
+  const liveHits = getEl('search-list').children;
+  check('没归档的那一条不会被挂上这个标记',
+    liveHits[0]?.dataset?.id === 'arc_keep' && liveHits[0]?.dataset?.archived === 'false',
+    `${liveHits[0]?.dataset?.id} / ${liveHits[0]?.dataset?.archived}`);
+
+  check('搜索时三组一起让位（平铺结果，不分组）',
+    getEl('group-pinned').hidden === true && getEl('group-recent').hidden === true
+      && getEl('group-archived').hidden === true);
+
+  dispatch(searchBox, 'keydown', { key: 'Escape' });
+  check('清空搜索之后三组回来',
+    searchSection.hidden === true && getEl('group-recent').hidden === false
+      && getEl('group-archived').hidden === false);
+  check('归档的那一条还在「已归档」里（搜一下不会把它弄丢）', idsIn(archivedRows()).includes('arc_old'));
+
+  // ---- 归档是安全的：哪怕最后一条也能归档（「至少留一个」是删除才有的限制）
+  for (const session of rowsIn()) {
+    if (session.archived !== true) clickOn(session.id, 'archive');
+  }
+  check('全部归档之后，「最近」空了、整块藏起来', recentRows().length === 0 && getEl('group-recent').hidden === true,
+    `${recentRows().length} 行`);
+  check('「会话」这个数字归零（列表里确实什么都不剩）', getEl('session-count').textContent === '0',
+    getEl('session-count').textContent);
+  check('但一条数据都没丢：4 条全在「已归档」里',
+    getEl('archived-count').textContent === '4' && archivedRows().length === 4,
+    `${getEl('archived-count').textContent} / ${archivedRows().length} 行`);
+  check('归档最后一条不会像删除那样被拦住（归档是可逆的，用不着「至少留一个」）',
+    rowsIn().length === 4, `${rowsIn().length} 条`);
+
+  // 收尾：把它们都放回去，别把这一栏的样子留给后面的用例
+  for (const session of rowsIn()) {
+    if (session.archived === true) clickOn(session.id, 'archive');
+  }
+  check('（收尾）全部取消归档之后又回到「最近」',
+    idsIn(recentRows()).length === 4 && archivedRows().length === 0,
+    `${idsIn(recentRows()).length} / ${archivedRows().length}`);
+
+  // ---- CSS 契约：替身不做渲染，「藏起来」和「挂在哪一头」只能从样式表上守
+  check('菜单项被藏起来时是真的不占位（[hidden] 必须赢过 display: block）',
+    /^\.session-menu-item\[hidden\]\s*\{[^}]*display:\s*none/m.test(css));
+  check('搜索结果里那一小块「已归档」标记挂在标题的 ::before 上（挂末尾会被省略号吃掉）',
+    /^#group-search \.session-item\[data-archived="true"\] \.session-name::before\s*\{[^}]*content:\s*'已归档'/m.test(css));
+  check('标记只出现在搜索结果里（在「已归档」组里每一行都有，那就是噪音）',
+    !/^\.session-item\[data-archived="true"\] \.session-name::before/m.test(css));
+  check('已经归档的那一行，菜单里的按钮用正墨色标出状态（和「取消置顶」同一个路数）',
+    /^\.session-item\[data-archived="true"\] \.icon-button\[data-action="archive"\]\s*\{[^}]*color:\s*var\(--ink\)/m.test(css));
 }
 
 console.log(`\n${'─'.repeat(52)}`);

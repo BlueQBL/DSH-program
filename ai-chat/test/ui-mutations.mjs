@@ -1115,4 +1115,75 @@ runner.run('落地闪光不做成动画（「减少动态效果」那条规则�
   src.replace('  animation: landed-fade 1.4s ease-out 1;\n  border-radius: var(--radius);', '  border-radius: var(--radius);'),
 );
 
+// ---------------------------------------------------------------- 归档
+
+runner.run('归档之后不重画列表（点了没反应，会话还在原地）', APP, (src) =>
+  src.replace(
+    "    renderSessionList();\n    flashHint(next ? '已归档，左栏「已归档」里找得回来'",
+    "    flashHint(next ? '已归档，左栏「已归档」里找得回来'",
+  ),
+);
+
+runner.run('取消归档时不把「最近」展开（它回到一个收着的组里，看着像没反应）', APP, (src) =>
+  src.replace("    if (!next) setGroupCollapsed('recent', false);\n", ''),
+);
+
+runner.run('「会话」那个数字把归档的也算进去（归档之后数字纹丝不动）', APP, (src) =>
+  src.replace(
+    'String(sessions.filter((s) => s.archived !== true).length)',
+    'String(sessions.length)',
+  ),
+);
+
+runner.run('行上不写归档标记（样式和菜单都不知道这一条是什么状态）', APP, (src) =>
+  src.replace('  item.dataset.archived = String(session.archived === true);\n', ''),
+);
+
+runner.run('归档的那一行也摆着「置顶」（一个在列表里、一个不在，自相矛盾）', APP, (src) =>
+  src.replace('  pin.hidden = archived;', '  pin.hidden = false;'),
+);
+
+runner.run('搜索把归档的滤掉（归档就变成删除了）', APP, (src) =>
+  src.replace(
+    '  const hits = searchSessions(sessions, searchQuery);',
+    '  const hits = searchSessions(sessions.filter((s) => s.archived !== true), searchQuery);',
+  ),
+);
+
+runner.run('「已归档」默认展开（一打开这一栏就长出一截）', APP, (src) =>
+  src.replace(
+    '  const state = { pinned: false, recent: false, archived: true };',
+    '  const state = { pinned: false, recent: false, archived: false };',
+  ),
+);
+
+runner.run('菜单项藏起来时仍然占位（菜单里留一个空格子，点下去还会真的置顶）', CSS, (src) =>
+  src.replace('.session-menu-item[hidden] {\n  display: none;\n}', '.session-menu-item[hidden] {\n  display: block;\n}'),
+);
+
+runner.run('「已归档」标记不再限定在搜索结果里（归档组里每一行都挂一块）', CSS, (src) =>
+  src.replace(
+    '#group-search .session-item[data-archived="true"] .session-name::before {',
+    '.session-item[data-archived="true"] .session-name::before {',
+  ),
+);
+
+runner.run('「归档」排到「删除」后面（危险操作和安全操作挨在一起）', HTML, (src) =>
+  src.replace(
+    '          <button type="button" class="icon-button session-menu-item" data-action="archive" role="menuitem" title="归档（从列表里收起来，一条都没删）">归档</button>\n          <button type="button" class="icon-button session-menu-item danger" data-action="delete" role="menuitem" title="删除这个会话">删除</button>',
+    '          <button type="button" class="icon-button session-menu-item danger" data-action="delete" role="menuitem" title="删除这个会话">删除</button>\n          <button type="button" class="icon-button session-menu-item" data-action="archive" role="menuitem" title="归档（从列表里收起来，一条都没删）">归档</button>',
+  ),
+);
+
+runner.run('「归档」也戴上危险色（可逆的操作看着像不可逆的）', HTML, (src) =>
+  src.replace(
+    'class="icon-button session-menu-item" data-action="archive"',
+    'class="icon-button session-menu-item danger" data-action="archive"',
+  ),
+);
+
+runner.run('「已归档」在 HTML 里默认就写着展开（JS 还没跑起来时这一栏是张开的）', HTML, (src) =>
+  src.replace(/(id="archived-toggle"\s*\n\s*aria-expanded=")false/, '$1true'),
+);
+
 runner.finish();
