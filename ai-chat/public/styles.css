@@ -671,6 +671,341 @@ body[data-resizing="true"] {
   border-top: 1px solid var(--rule);
 }
 
+/* ------------------------------------------------------------------
+   账号：侧栏最底下那一行 + 登录 / 注册 / 换头像的覆盖层
+
+   定位相关的一句话：账号入口在**侧栏底下**（参考 ChatGPT），不往报头塞 ——
+   报头那一行的高度被 `--masthead-h` 管着（滚动收窄、备用入口进出都得恒定），
+   再放一个会变宽变窄的头像进去，是拿那条已经调好的规矩冒险。
+   ------------------------------------------------------------------ */
+
+.account-row {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--rule);
+}
+
+/* 未登录：就是一个普通的描边按钮，和栏里别的按钮一伙 */
+.account-signin {
+  display: block;
+  width: 100%;
+}
+
+.account-self {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  color: var(--ink);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.account-self:hover {
+  background: var(--wash);
+  border-color: var(--rule);
+}
+
+.account-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * 头像：一个圆。
+ * 底色由 JS 写进 `--avatar-bg`（只有「首字母」那种用得到），
+ * 里面要么是一个字、要么是一个 emoji、要么是一张图 —— 三种都由 paintAvatar 决定。
+ */
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--avatar-bg, color-mix(in srgb, var(--ink) 14%, transparent));
+  color: var(--accent-ink);
+  font-size: 13px;
+  line-height: 1;
+  user-select: none;
+}
+.avatar-large {
+  width: 56px;
+  height: 56px;
+  font-size: 26px;
+}
+.avatar-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+/* emoji 不铺深底色：它自己就有颜色，垫一层反而脏 */
+.avatar[data-kind="emoji"] {
+  background: var(--wash);
+}
+
+.account-snapshot {
+  display: block;
+  padding: 4px 10px 6px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: color-mix(in srgb, var(--ink) 45%, transparent);
+}
+.account-menu {
+  min-width: 194px;
+}
+
+/* 账号出问题时的提示（账号文件坏了 / 登录过期）：平时不占地方 */
+.account-note {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--failure);
+  background: color-mix(in srgb, var(--failure) 7%, transparent);
+  border-radius: var(--radius);
+}
+
+/* ---- 覆盖层：登录 / 注册 / 改密码 / 从服务端恢复 / 换头像 ---- */
+
+.auth-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20; /* 高于会话菜单（6）和吸顶报头（4）—— 打开时它就是最上面那层 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: color-mix(in srgb, var(--ink) 32%, transparent);
+}
+
+.auth-card {
+  width: min(380px, 100%);
+  max-height: calc(100dvh - 40px);
+  overflow-y: auto;
+  padding: 16px 18px 18px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background: var(--paper-lift);
+  box-shadow: var(--shadow);
+}
+
+.auth-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.auth-panel-title {
+  flex: 1;
+  font-family: var(--font-display);
+  font-size: 17px;
+  color: var(--ink);
+}
+
+.auth-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.auth-tab {
+  flex: 1;
+  padding: 6px 0;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink-soft);
+  background: none;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.auth-tab:hover {
+  color: var(--ink);
+  border-color: var(--rule-strong);
+}
+.auth-tab[aria-selected="true"] {
+  color: var(--ink);
+  background: var(--wash);
+  border-color: var(--ink);
+}
+
+.auth-body {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--ink-soft);
+}
+
+.auth-field {
+  display: block;
+  margin-bottom: 10px;
+}
+.auth-label {
+  display: block;
+  margin-bottom: 4px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  color: color-mix(in srgb, var(--ink) 48%, transparent);
+}
+.auth-field input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+}
+.auth-field input:focus {
+  outline: none;
+  border-color: var(--ink);
+}
+
+.auth-error,
+.auth-ok {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.auth-error {
+  color: var(--failure);
+}
+.auth-ok {
+  color: var(--success);
+}
+
+.auth-remember {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.auth-hint {
+  margin: 6px 0 0;
+  min-height: 1.2em;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--ink) 55%, transparent);
+}
+
+.auth-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+.auth-actions .solid-button {
+  flex: 1;
+}
+
+/* 卡片底下那句「不登录也能用」：这个助手的定位要写在用户正看着的地方 */
+.auth-note {
+  margin: 12px 0 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: color-mix(in srgb, var(--ink) 48%, transparent);
+}
+
+/* ---- 换头像 ---- */
+
+.avatar-preview {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.avatar-preview-name {
+  font-size: 14px;
+  color: var(--ink);
+}
+
+.avatar-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+}
+.avatar-chip {
+  padding: 8px 0;
+  font-size: 19px;
+  line-height: 1;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.avatar-chip:hover {
+  background: var(--wash);
+  border-color: var(--rule-strong);
+}
+.avatar-chip[aria-pressed="true"] {
+  background: var(--wash);
+  border-color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--ink);
+}
+
+.avatar-colors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+.avatar-swatch {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.avatar-swatch:hover {
+  border-color: var(--rule-strong);
+}
+.avatar-swatch[aria-pressed="true"] {
+  border-color: var(--ink);
+  box-shadow: inset 0 0 0 2px var(--paper-lift);
+}
+
+.avatar-upload-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+.avatar-upload-note {
+  font-size: 11.5px;
+  color: color-mix(in srgb, var(--ink) 45%, transparent);
+}
+
+/* 窄屏：卡片贴到上边、放开高度上限，别顶出屏幕 */
+@media (max-width: 640px) {
+  .auth-overlay {
+    align-items: flex-start;
+    padding: 12px;
+  }
+  .auth-card {
+    max-height: none;
+  }
+}
+
 /* 收起状态：窄屏默认收起，桌面端也允许手动收起 */
 .board[data-rail="hidden"] {
   grid-template-columns: minmax(0, 1fr);

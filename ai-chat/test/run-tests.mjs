@@ -48,6 +48,25 @@ function writeCounts(suite, count, failed) {
 const EXTERNAL_BASE = process.env.DSH_TEST_BASE || '';
 
 /**
+ * 测试用的账号数据目录。
+ * **绝不能**让测试写到用户的 `data/users.json` —— 那是真账号。每个测试实例都指到这里。
+ */
+const TEST_AUTH_DIR = path.join(ROOT, '.tmp-mutations', 'auth-http');
+try {
+  // 每次整套测试都从**空账号**开始：不清的话上一轮注册的名字还在，
+  // 这一轮的「注册成功」会变成 name_taken（我第一次就踩了这个）
+  rmSync(TEST_AUTH_DIR, { recursive: true, force: true });
+  mkdirSync(TEST_AUTH_DIR, { recursive: true });
+} catch {
+  /* 建不了就等下面报错 */
+}
+const testAuthEnv = (suffix = '') => ({
+  AI_USERS_FILE: path.join(TEST_AUTH_DIR, `users${suffix}.json`),
+  AI_SNAPSHOT_DIR: path.join(TEST_AUTH_DIR, `snapshots${suffix}`),
+  AI_AUTH_SECRET_FILE: path.join(TEST_AUTH_DIR, `auth-secret${suffix}`),
+});
+
+/**
  * 取一个大概率空闲的端口。
  * 不用「基准端口 + 固定偏移」：那样容易撞上系统保留端口（5500 就被 Windows 占了），
  * 报出来是「服务起不来」，看着像代码问题，其实是端口问题。
@@ -432,7 +451,7 @@ function startServer(env = {}) {
   // 也让服务端日志不至于和测试输出混在一起。启动失败由健康检查兜底。
   const child = spawn(process.execPath, ['server.mjs'], {
     cwd: ROOT,
-    env: { ...process.env, PORT: String(PORT), ...env },
+    env: { ...process.env, PORT: String(PORT), ...testAuthEnv(), ...env },
     stdio: 'ignore',
   });
   return { child };
@@ -471,13 +490,13 @@ async function waitForServer(timeoutMs = 8000, base = BASE) {
 }
 
 /** 读一条 SSE 流，返回所有事件 */
-async function collectStream(body, { abortAfterMs = 0 } = {}) {
+async function collectStream(body, { abortAfterMs = 0, cookie = '' } = {}) {
   const controller = new AbortController();
   if (abortAfterMs) setTimeout(() => controller.abort(), abortAfterMs);
 
   const res = await fetch(`${BASE}/api/chat`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
     body: JSON.stringify(body),
     signal: controller.signal,
   });
@@ -860,6 +879,247 @@ try {
 
   {
     await fetch(`${BASE}/api/history/${session}_abort`, { method: 'DELETE' });
+  }
+
+  // ---------------------------------------------------------------- 账号
+  //
+  // 这一组盯的是**真发出去的那几个包**：Cookie 上的属性、状态码、
+  // 「谁能看到谁的东西」。纯函数那一半在 test/auth-tests.mjs 里，这里只管网络行为。
+
+  group('账号 · 注册 / 登录 / 用户隔离');
+
+  /** 带 Cookie 的请求：fetch 自己不记 Cookie，这里手动把 Set-Cookie 接回来传下去 */
+  const authCall = async (pathname, { method = 'POST', body, cookie = '', headers = {} } = {}) => {
+    const res = await fetch(`${BASE}${pathname}`, {
+      method,
+      headers: {
+        ...(body ? { 'content-type': 'application/json' } : {}),
+        ...(cookie ? { cookie } : {}),
+        ...headers,
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {
+      /* 空响应体 */
+    }
+    const setCookie = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+    return {
+      status: res.status,
+      data,
+      cookie: setCookie.map((c) => c.split(';')[0]).join('; '),
+      raw: setCookie.join(' | '),
+    };
+  };
+
+  {
+    const anon = await authCall('/api/auth/me', { method: 'GET' });
+    check('未登录时 /api/auth/me 回 200 + user: null（本地模式不是错误）',
+      anon.status === 200 && anon.data?.user === null, `${anon.status} ${JSON.stringify(anon.data)}`);
+    check('同时告诉页面注册开着', anon.data?.registerOpen === true);
+
+    const reg = await authCall('/api/auth/register', {
+      body: { name: '小林', password: 'correct-horse-1', avatar: { kind: 'emoji', emoji: '🐳' } },
+    });
+    check('注册成功', reg.status === 200 && reg.data?.user?.name === '小林',
+      `${reg.status} ${JSON.stringify(reg.data)}`);
+    check('下发会话 Cookie', /duitanlu_session=/.test(reg.raw), reg.raw);
+    check('Cookie 是 HttpOnly（页面脚本读不到它）', /HttpOnly/i.test(reg.raw), reg.raw);
+    check('Cookie 是 SameSite=Lax', /SameSite=Lax/i.test(reg.raw), reg.raw);
+    check('没勾「记住我」时不写 Max-Age（关掉浏览器就退出）', !/Max-Age/i.test(reg.raw), reg.raw);
+    check('回给页面的用户里没有密码、盐、tokenVersion',
+      reg.data.user.password === undefined && reg.data.user.tokenVersion === undefined
+        && !JSON.stringify(reg.data).includes('correct-horse-1'));
+    check('头像是刚选的那个 emoji', reg.data.user.avatar?.emoji === '🐳');
+
+    const me = await authCall('/api/auth/me', { method: 'GET', cookie: reg.cookie });
+    check('带着 Cookie 再问：就是刚注册的那个人', me.data?.user?.id === reg.data.user.id);
+
+    check('重名（大小写不同也算）→ 400 name_taken',
+      (await authCall('/api/auth/register', { body: { name: '小林', password: 'another-one-1' } })).data?.code === 'name_taken');
+    check('名字不合法 → 400 bad_name',
+      (await authCall('/api/auth/register', { body: { name: 'a b', password: 'another-one-1' } })).data?.code === 'bad_name');
+    check('密码太短 → 400 bad_password',
+      (await authCall('/api/auth/register', { body: { name: '小明', password: '123' } })).data?.code === 'bad_password');
+
+    const wrong = await authCall('/api/auth/login', { body: { name: '小林', password: 'wrong-password' } });
+    const ghost = await authCall('/api/auth/login', { body: { name: '查无此人', password: 'wrong-password' } });
+    check('密码错 → 401', wrong.status === 401, String(wrong.status));
+    check('账号不存在 → 401，而且和密码错**同一句话**（不告诉对方谁注册过）',
+      ghost.status === 401 && ghost.data?.code === wrong.data?.code,
+      `${ghost.data?.code} / ${wrong.data?.code}`);
+
+    const login = await authCall('/api/auth/login', { body: { name: '小林', password: 'correct-horse-1', remember: true } });
+    check('登录成功', login.status === 200 && login.data?.user?.name === '小林', String(login.status));
+    check('勾了「记住我」就写 Max-Age', /Max-Age=\d+/.test(login.raw), login.raw);
+    check('登录拿到的新 Cookie 能用', (await authCall('/api/auth/me', { method: 'GET', cookie: login.cookie })).data?.user?.id === login.data.user.id);
+
+    // 令牌是签名的：改一个字符就该失效（签名校验写漏一行，谁都能伪造登录态）
+    const forged = `${login.cookie.slice(0, -1)}${login.cookie.endsWith('A') ? 'B' : 'A'}`;
+    check('把 Cookie 改一个字符 → 立刻不认（签名真的在校验）',
+      (await authCall('/api/auth/me', { method: 'GET', cookie: forged })).data?.user === null,
+      forged.slice(0, 40));
+
+    check('跨站来源的写操作被拒（SameSite 之外的第二道）',
+      (await authCall('/api/auth/login', {
+        body: { name: '小林', password: 'correct-horse-1' },
+        headers: { origin: 'http://evil.example' },
+      })).status === 403);
+
+    const out = await authCall('/api/auth/logout', { cookie: login.cookie });
+    check('退出登录：Cookie 立刻过期（浏览器会把它删掉）', /Max-Age=0/.test(out.raw), out.raw);
+    check('不再带票的请求就是未登录状态（本地模式照常能用）',
+      (await authCall('/api/auth/me', { method: 'GET' })).data?.user === null);
+    // 说清楚一件事：退出是**让浏览器把手里的票丢掉**，票本身在到期前仍然有效
+    //（无状态令牌的固有性质）。真正的「立刻全失效」只有改密码那条路，见下面那一组。
+    check('（如实说明）旧票本身在到期前依然有效 —— 所以退出靠的是浏览器删掉它',
+      (await authCall('/api/auth/me', { method: 'GET', cookie: login.cookie })).data?.user?.name === '小林');
+  }
+
+  {
+    // 限速：同一个「IP + 名字」连着错 8 次，第 9 次被拦住
+    let last = null;
+    for (let i = 0; i < 8; i += 1) {
+      last = await authCall('/api/auth/login', { body: { name: '被爆破的名字', password: `guess-${i}` } });
+    }
+    check('（准备）前 8 次都是 401', last?.status === 401, String(last?.status));
+    const blocked = await authCall('/api/auth/login', { body: { name: '被爆破的名字', password: 'guess-more' } });
+    check('错到第 9 次被限速（不然可以对着 8 位密码试一整夜）', blocked.status === 429, String(blocked.status));
+    check('限速时告诉对方还要等多久', /秒/.test(blocked.data?.error ?? ''), blocked.data?.error);
+    check('换个名字照常能试（同机两个人不连坐）',
+      (await authCall('/api/auth/register', { body: { name: '另一个名字', password: 'another-one-2' } })).status === 200);
+  }
+
+  {
+    // 笔记本快照：登录之后存一份、换设备时拉回来
+    const a = await authCall('/api/auth/register', { body: { name: '快照用户', password: 'snapshot-pass-1' } });
+    const cookie = a.cookie;
+    const b = await authCall('/api/auth/register', { body: { name: '另一个用户', password: 'snapshot-pass-2' } });
+
+    check('未登录读快照 → 401', (await authCall('/api/sessions/snapshot', { method: 'GET' })).status === 401);
+    check('未登录写快照 → 401',
+      (await authCall('/api/sessions/snapshot', { method: 'PUT', body: { snapshot: { sessions: [] } } })).status === 401);
+
+    const payload = {
+      version: 2,
+      activeId: 's_snap01',
+      sessions: [{ id: 's_snap01', title: '快照里的那条', messages: [] }],
+    };
+    const put = await authCall('/api/sessions/snapshot', { method: 'PUT', body: { snapshot: payload, device: '测试机' }, cookie });
+    check('登录之后能存快照', put.status === 200 && put.data?.count === 1, `${put.status} ${JSON.stringify(put.data)}`);
+
+    const meta = await authCall('/api/sessions/snapshot?meta=1', { method: 'GET', cookie });
+    check('问「那边有什么」时只回摘要（不把整本笔记本搬过来）',
+      meta.data?.count === 1 && meta.data?.snapshot === null && Boolean(meta.data?.savedAt),
+      JSON.stringify(meta.data));
+    const full = await authCall('/api/sessions/snapshot', { method: 'GET', cookie });
+    check('要全量时才回整本', full.data?.snapshot?.sessions?.[0]?.id === 's_snap01');
+    check('存的时候记下了是哪台设备', meta.data?.device === '测试机', meta.data?.device);
+
+    check('**别人的快照看不见**（每个用户一份）',
+      (await authCall('/api/sessions/snapshot?meta=1', { method: 'GET', cookie: b.cookie })).data?.count === 0);
+    check('形状不对的快照被拒（不是 store 那套结构）',
+      (await authCall('/api/sessions/snapshot', { method: 'PUT', body: { snapshot: { nope: 1 } }, cookie })).data?.code === 'bad_snapshot');
+    check('会话 id 不合法的快照也被拒',
+      (await authCall('/api/sessions/snapshot', {
+        method: 'PUT', cookie, body: { snapshot: { sessions: [{ id: '../evil' }] } },
+      })).data?.code === 'bad_snapshot');
+
+    // 太大：上限 8MB。以前超限会直接砍连接，客户端只能看到「失败了」而不知道原因
+    const big = { version: 2, activeId: 's_big001', sessions: [{ id: 's_big001', title: 'x'.repeat(9 * 1024 * 1024), messages: [] }] };
+    const tooBig = await fetch(`${BASE}/api/sessions/snapshot`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ snapshot: big }),
+    }).then((r) => r.status).catch(() => '网络错误');
+    check('笔记本超过上限时明确回 413（客户端读得到原因，不是连接被重置）', tooBig === 413, String(tooBig));
+  }
+
+  {
+    // 会话兜底副本的归属：userId 不同的人互相看不到
+    const a = await authCall('/api/auth/register', { body: { name: '隔离甲', password: 'isolation-pass-1' } });
+    const b = await authCall('/api/auth/register', { body: { name: '隔离乙', password: 'isolation-pass-2' } });
+    const sessionId = `t_iso_${Date.now().toString(36)}`;
+
+    const turned = await collectStream(
+      { messages: [{ role: 'user', content: '甲说的话' }], sessionId },
+      { cookie: a.cookie },
+    );
+    check('（准备）甲发了一轮', turned.status === 200 && turned.text.length > 0, String(turned.status));
+
+    check('甲读得到自己的兜底副本',
+      (await authCall(`/api/history/${sessionId}`, { method: 'GET', cookie: a.cookie })).data?.turns?.length >= 1);
+    check('**乙读不到甲的**（403）',
+      (await authCall(`/api/history/${sessionId}`, { method: 'GET', cookie: b.cookie })).status === 403);
+    check('没登录的人也读不到别人的（403）',
+      (await authCall(`/api/history/${sessionId}`, { method: 'GET' })).status === 403);
+    check('乙也删不掉甲的（403）',
+      (await authCall(`/api/history/${sessionId}`, { method: 'DELETE', cookie: b.cookie })).status === 403);
+    check('甲自己删得掉',
+      (await authCall(`/api/history/${sessionId}`, { method: 'DELETE', cookie: a.cookie })).status === 200);
+  }
+
+  {
+    // 改密码：旧密码不对不改；改完**别处开着的页面立刻失效**，自己这次要拿到新票
+    const a = await authCall('/api/auth/register', { body: { name: '改密码的人', password: 'old-password-1' } });
+    const otherDevice = await authCall('/api/auth/login', { body: { name: '改密码的人', password: 'old-password-1' } });
+
+    check('原密码不对就改不了',
+      (await authCall('/api/auth/password', { body: { oldPassword: 'nope-nope-nope', newPassword: 'new-password-1' }, cookie: a.cookie })).status === 400);
+    const changed = await authCall('/api/auth/password', {
+      body: { oldPassword: 'old-password-1', newPassword: 'new-password-1' },
+      cookie: a.cookie,
+    });
+    check('改密码成功，并补发一张新票', changed.status === 200 && /duitanlu_session=/.test(changed.raw), String(changed.status));
+    check('改完之后自己还在线（不然用户会以为改坏了）',
+      (await authCall('/api/auth/me', { method: 'GET', cookie: changed.cookie })).data?.user?.name === '改密码的人');
+    check('**别的设备上那张旧票立刻失效**（这正是改密码想要的效果）',
+      (await authCall('/api/auth/me', { method: 'GET', cookie: otherDevice.cookie })).data?.user === null);
+    check('新密码能登录',
+      (await authCall('/api/auth/login', { body: { name: '改密码的人', password: 'new-password-1' } })).status === 200);
+    check('旧密码登不上了',
+      (await authCall('/api/auth/login', { body: { name: '改密码的人', password: 'old-password-1' } })).status === 401);
+  }
+
+  {
+    // 账号文件坏了：账号那几条路停用，但**聊天和本地模式照常**，
+    // 而且绝不能把已有账号当成空（那等于让所有人都能拿原来的名字重新注册）
+    const brokenDir = path.join(TEST_AUTH_DIR, 'broken');
+    mkdirSync(brokenDir, { recursive: true });
+    const brokenFile = path.join(brokenDir, 'users.json');
+    writeFileSync(brokenFile, '{ 这不是 JSON', 'utf8');
+
+    const broken = EXTERNAL_BASE ? null : await startServerWithRetry({
+      ...testAuthEnv('-broken'),
+      AI_USERS_FILE: brokenFile,
+    });
+    try {
+      if (!broken) {
+        check('坏账号文件实例能启动', false, '实例没起来');
+      } else {
+        const me = await fetch(`${broken.base}/api/auth/me`).then((r) => r.json());
+        check('账号文件坏了：/api/auth/me 说清楚原因（页面要把这句话摆出来）',
+          typeof me.authError === 'string' && me.authError.includes('账号文件'), JSON.stringify(me).slice(0, 120));
+        check('这时候登录接口回 503，而不是「密码不对」',
+          (await fetch(`${broken.base}/api/auth/login`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ name: '谁', password: 'whatever-1' }),
+          }).then((r) => r.status)) === 503);
+        const health = await fetch(`${broken.base}/api/health`);
+        check('**服务本身照常活着**（聊天和本地模式不受影响）', health.ok);
+        const stillChats = await fetch(`${broken.base}/api/chat`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ messages: [{ role: 'user', content: '账号坏了也要能聊' }] }),
+        });
+        check('账号坏了也聊得下去', stillChats.ok, String(stillChats.status));
+      }
+    } finally {
+      broken?.stop();
+    }
   }
 } catch (err) {
   failures.push(`测试中断：${err.message}`);

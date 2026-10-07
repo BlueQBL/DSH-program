@@ -10,7 +10,7 @@
 // 这样多标签页、刷新、断流恢复都只需要一个真相来源。
 
 import { createServer } from 'node:http';
-import { mkdir, readFile, writeFile, appendFile, rm } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, appendFile, rename, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +25,20 @@ import {
   visionModels,
 } from './lib/error-mapping.mjs';
 import { writeJson, readJsonBody, openEventStream, sleep, isAbort } from './lib/http-utils.mjs';
+import {
+  TOKEN_COOKIE,
+  TOKEN_TTL_MS,
+  clearSessionCookie,
+  createRateLimiter,
+  createUserStore,
+  loadSecret,
+  ownsRecord,
+  readCookie,
+  sessionCookie,
+  signToken,
+  verifyToken,
+} from './lib/auth.mjs';
+import { nameKey, publicUser } from './public/lib/auth-rules.js';
 // 提示词与清洗规则放在 public/lib/title.js：浏览器和服务端 import 同一份，
 // 免得两边各写一套提示词然后慢慢分叉
 import { buildTitleMessages, titleFromModel } from './public/lib/title.js';
@@ -39,6 +53,21 @@ const FEEDBACK_FILE = path.join(DATA_DIR, 'feedback.jsonl');
  * 用 AI_SERVER_LOG 可以换地方 —— 测试就靠它写到临时文件，不污染正经日志。
  */
 const LOG_FILE = process.env.AI_SERVER_LOG || path.join(DATA_DIR, 'server.log');
+
+// ---- 账号（可选：不登录照样是本地模式，见 README「账号与登录」）----
+/** 账号文件。**这是唯一一份账号数据**：坏了要大声报错，不能当成空（见 lib/auth.mjs 的头注释） */
+const USERS_FILE = process.env.AI_USERS_FILE || path.join(DATA_DIR, 'users.json');
+/** 令牌签名密钥（环境变量 AI_AUTH_SECRET 优先，否则生成在这个文件里） */
+const SECRET_FILE = process.env.AI_AUTH_SECRET_FILE || path.join(DATA_DIR, 'auth-secret');
+/** 每个用户一份的「笔记本快照」 */
+const SNAPSHOT_DIR = process.env.AI_SNAPSHOT_DIR || path.join(DATA_DIR, 'snapshots');
+/**
+ * 快照上限 8MB（localStorage 也才 5MB 左右）。
+ * 不设上限的话，一次 PUT 就能把内存吃掉 —— 它是**整本笔记本**，不是一条消息。
+ */
+const SNAPSHOT_MAX = 8 * 1024 * 1024;
+/** 注册开关：自己建完账号之后，设 AI_ALLOW_REGISTER=0 就没人能再注册了 */
+const REGISTER_OPEN = !['0', 'false', 'no'].includes(String(process.env.AI_ALLOW_REGISTER || '').toLowerCase());
 
 const PORT = Number(process.env.PORT || 5250);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -808,7 +837,7 @@ async function handleFeedback(req, res, body) {
   writeJson(res, 200, { ok: true, at: entry.at });
 }
 
-async function handleChat(req, res, body) {
+async function handleChat(req, res, body, user = null) {
   const incoming = normalizeMessages(body.messages);
   const sessionId = typeof body.sessionId === 'string' && /^[A-Za-z0-9_-]{4,64}$/.test(body.sessionId)
     ? body.sessionId
@@ -930,7 +959,7 @@ async function handleChat(req, res, body) {
   // 不 await：落盘不该拖慢用户看到 done。写入过程登记在 pendingWrites 里，
   // 谁在这个窗口内读历史，谁就等它写完 —— 否则「刚发完就读」会读到空。
   if (sessionId && !aborted) {
-    const task = saveConversation(sessionId, incoming, partial.join(''), failure).catch(() => {});
+    const task = saveConversation(sessionId, incoming, partial.join(''), failure, user?.id ?? 'local').catch(() => {});
     pendingWrites.set(sessionId, task);
     task.finally(() => {
       if (pendingWrites.get(sessionId) === task) pendingWrites.delete(sessionId);
@@ -949,7 +978,7 @@ function textOnly(msg) {
   return { role: msg.role, content: typeof msg.content === 'string' ? msg.content : '' };
 }
 
-async function saveConversation(sessionId, incoming, replyText, failure) {
+async function saveConversation(sessionId, incoming, replyText, failure, userId = 'local') {
   if (!replyText && !failure) return;
   const previous = await loadConversation(sessionId);
   const turns = previous?.turns ?? [];
@@ -964,6 +993,9 @@ async function saveConversation(sessionId, incoming, replyText, failure) {
 
   const payload = {
     sessionId,
+    // **这条记录属于谁**：读的时候靠它判（见 ownsRecord）。
+    // 老记录没有这个字段 → 当成本地模式的，升级之后照样打得开。
+    userId,
     updatedAt: new Date().toISOString(),
     turns: merged.slice(-400),
   };
@@ -977,6 +1009,158 @@ async function loadConversation(sessionId) {
   } catch {
     return null;
   }
+}
+
+// ---------------------------------------------------------------- 账号与登录
+//
+// 定位：**可选**。不登录就是现在这样（本地模式，浏览器里那本笔记本）；登录之后多出
+// 账号、头像、按用户隔离的笔记本、以及「换台机器也能把自己的笔记本拉回来」。
+//
+// 安全上的三件事写在这一段里：
+//   · 令牌是 HMAC 签名的 HttpOnly Cookie（浏览器里的脚本读不到）；
+//   · 改密码会让 tokenVersion +1，别处开着的页面立刻失效；
+//   · 所有写操作都过一道同源检查（SameSite=Lax 之外的第二道）。
+
+const users = createUserStore({ file: USERS_FILE });
+const loginLimiter = createRateLimiter({ max: 8, windowMs: 10 * 60 * 1000 });
+let authSecret = '';
+/** 账号文件坏了的话，这里放一句给人看的话（服务照常起，只有账号那几条路返回 503） */
+let authBroken = null;
+const AUTH_BROKEN = '账号文件读不了（data/users.json 可能坏了）。为了不把已有账号当成空，登录/注册暂时停用 —— 修好文件再重启即可，聊天不受影响。';
+
+async function initAuth() {
+  try {
+    authSecret = await loadSecret({ file: SECRET_FILE });
+    const count = await users.init();
+    console.log(`  账号：${count ? `${count} 个（登录可选）` : '还没有账号（注册入口开着）'}`);
+  } catch (err) {
+    // 不退出进程：聊天、本地模式照常能用，坏的只是账号那几条路 ——
+    // 而且**绝不能**顺手把文件当成空的（那等于让所有人重新注册一遍，见 lib/auth.mjs）
+    authBroken = err;
+    console.error(`\n  账号文件读不了：${err.message}`);
+    console.error('  为了不把已有账号当成空，登录 / 注册 / 快照暂时停用。聊天与本地模式不受影响。\n');
+  }
+}
+
+/** 这次的请求是 https 吗（决定要不要给 Cookie 加 Secure） */
+function isSecure(req) {
+  if (req.socket?.encrypted) return true;
+  const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  return proto === 'https';
+}
+
+/**
+ * 同源检查：跨站发起的写操作一律拒掉。
+ *
+ * 为什么 Cookie 已经是 SameSite=Lax 还要这一道：SameSite 是浏览器的行为，
+ * 而这个服务可能被套在各种反代后面 —— 第二道闸不依赖浏览器守规矩。
+ * 没有 Origin 头（curl、脚本、测试客户端）放行：那不是「跨站」，是「不是浏览器」。
+ */
+function sameOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  try {
+    return new URL(origin).host === req.headers.host;
+  } catch {
+    return false;
+  }
+}
+
+/** 限速的键：**IP + 名字**。按名字而不是只按 IP，是为了让同一台机器上两个人互不连坐 */
+function limitKey(req, name) {
+  const ip = req.socket?.remoteAddress || 'unknown';
+  return `${ip}|${nameKey(name)}`;
+}
+
+/**
+ * 当前登录的是谁。
+ * 四道：有 Cookie、签名对且没过期、这个 id 还在、令牌版本和账号当前版本一致
+ *（最后一条是「改密码之后别处立刻失效」的实现）。
+ */
+function currentUser(req) {
+  if (!authSecret || authBroken) return null;
+  const token = readCookie(req.headers.cookie, TOKEN_COOKIE);
+  if (!token) return null;
+  const payload = verifyToken(token, authSecret);
+  if (!payload) return null;
+  const user = users.byId(payload.uid);
+  if (!user) return null;
+  if ((Number(user.tokenVersion) || 1) !== (Number(payload.tv) || 1)) return null;
+  return user;
+}
+
+/** 下发登录态。remember = 「记住我」（不带这个就是浏览器会话 Cookie，关掉窗口就没了） */
+function startSession(req, res, user, { remember = false } = {}) {
+  const now = Date.now();
+  const token = signToken(
+    { uid: user.id, tv: Number(user.tokenVersion) || 1, iat: now, exp: now + TOKEN_TTL_MS },
+    authSecret,
+  );
+  res.setHeader('set-cookie', sessionCookie(token, {
+    maxAgeSeconds: remember ? Math.floor(TOKEN_TTL_MS / 1000) : 0,
+    secure: isSecure(req),
+  }));
+}
+
+/** 需要登录的接口统一从这儿过 */
+function requireUser(req, res) {
+  if (authBroken) {
+    writeJson(res, 503, { error: AUTH_BROKEN, code: 'auth_broken' });
+    return null;
+  }
+  const user = currentUser(req);
+  if (!user) {
+    writeJson(res, 401, { error: '需要先登录', code: 'unauthorized' });
+    return null;
+  }
+  return user;
+}
+
+// ---- 笔记本快照（每个用户一份，换设备时拉回来）
+
+function snapshotFile(userId) {
+  // userId 是服务端生成的（u_xxx），再过一遍白名单：这个值会变成文件名
+  return path.join(SNAPSHOT_DIR, `${String(userId).replace(/[^A-Za-z0-9_-]/g, '')}.json`);
+}
+
+async function loadSnapshot(userId) {
+  try {
+    const parsed = JSON.parse(await readFile(snapshotFile(userId), 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveSnapshot(userId, payload, device) {
+  await mkdir(SNAPSHOT_DIR, { recursive: true });
+  const record = {
+    userId,
+    savedAt: new Date().toISOString(),
+    device: String(device || '').slice(0, 60),
+    payload,
+  };
+  const file = snapshotFile(userId);
+  const tmp = `${file}.tmp`;
+  await writeFile(tmp, `${JSON.stringify(record)}\n`, 'utf8');
+  // 先写临时文件再改名：读到半个 JSON 比读到旧版本糟得多
+  await rename(tmp, file);
+  return record;
+}
+
+/** 快照的形状检查：是 store 那套 { version, activeId, sessions } 就行，别的字段原样存着 */
+function validSnapshot(payload) {
+  if (!payload || typeof payload !== 'object') return '快照不是一个对象';
+  if (!Array.isArray(payload.sessions)) return '快照里缺少 sessions 数组';
+  if (payload.sessions.length > 200) return '快照里的会话太多了';
+  for (const session of payload.sessions) {
+    if (!session || typeof session !== 'object') return '快照里有不是对象的会话';
+    if (typeof session.id !== 'string' || !/^[A-Za-z0-9_-]{4,64}$/.test(session.id)) return '快照里有会话 id 不合法';
+  }
+  if ('activeId' in payload && payload.activeId !== null && typeof payload.activeId !== 'string') {
+    return 'activeId 不合法';
+  }
+  return '';
 }
 
 // ---------------------------------------------------------------- 静态文件
@@ -1045,7 +1229,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname === '/api/chat' && req.method === 'POST') {
-      await handleChat(req, res, await readJsonBody(req));
+      await handleChat(req, res, await readJsonBody(req), currentUser(req));
       return;
     }
 
@@ -1064,6 +1248,181 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // ---------------------------------------------------------------- 账号
+    //
+    // 这几条路的形状都一样：同源检查 → （要登录的）取用户 → 读体 → 干事 → 回 publicUser。
+    // 「谁能注册」由 AI_ALLOW_REGISTER 控制；「谁能登录」由 users.json 决定。
+
+    // 当前登录的是谁。没登录也回 200（user: null）—— 这不是错误，是「本地模式」
+    if (pathname === '/api/auth/me' && req.method === 'GET') {
+      writeJson(res, 200, {
+        user: publicUser(currentUser(req)),
+        registerOpen: REGISTER_OPEN,
+        authError: authBroken ? AUTH_BROKEN : null,
+      });
+      return;
+    }
+
+    if (pathname === '/api/auth/register' && req.method === 'POST') {
+      if (!sameOrigin(req)) {
+        writeJson(res, 403, { error: '跨站请求被拒绝' });
+        return;
+      }
+      if (authBroken) {
+        writeJson(res, 503, { error: AUTH_BROKEN, code: 'auth_broken' });
+        return;
+      }
+      if (!REGISTER_OPEN) {
+        writeJson(res, 403, { error: '这台服务器关闭了注册（AI_ALLOW_REGISTER=0）', code: 'register_closed' });
+        return;
+      }
+      const body = await readJsonBody(req, 128 * 1024);
+      const key = limitKey(req, body.name);
+      const gate = loginLimiter.check(key);
+      if (!gate.allowed) {
+        writeJson(res, 429, {
+          error: `试得有点频繁，请等 ${Math.ceil(gate.retryAfterMs / 1000)} 秒再试`,
+          code: 'rate_limited',
+        });
+        return;
+      }
+      const result = await users.register({ name: body.name, password: body.password, avatar: body.avatar });
+      if (!result.ok) {
+        loginLimiter.fail(key);
+        writeJson(res, 400, { error: result.error, code: result.code });
+        return;
+      }
+      loginLimiter.succeed(key);
+      startSession(req, res, result.user, { remember: body.remember === true });
+      writeJson(res, 200, { user: publicUser(result.user) });
+      return;
+    }
+
+    if (pathname === '/api/auth/login' && req.method === 'POST') {
+      if (!sameOrigin(req)) {
+        writeJson(res, 403, { error: '跨站请求被拒绝' });
+        return;
+      }
+      if (authBroken) {
+        writeJson(res, 503, { error: AUTH_BROKEN, code: 'auth_broken' });
+        return;
+      }
+      const body = await readJsonBody(req, 128 * 1024);
+      const key = limitKey(req, body.name);
+      const gate = loginLimiter.check(key);
+      if (!gate.allowed) {
+        writeJson(res, 429, {
+          error: `试得有点频繁，请等 ${Math.ceil(gate.retryAfterMs / 1000)} 秒再试`,
+          code: 'rate_limited',
+        });
+        return;
+      }
+      const result = await users.verify({ name: body.name, password: body.password });
+      if (!result.ok) {
+        loginLimiter.fail(key);
+        writeJson(res, 401, { error: result.error, code: result.code });
+        return;
+      }
+      loginLimiter.succeed(key);
+      startSession(req, res, result.user, { remember: body.remember === true });
+      writeJson(res, 200, { user: publicUser(result.user) });
+      return;
+    }
+
+    if (pathname === '/api/auth/logout' && req.method === 'POST') {
+      if (!sameOrigin(req)) {
+        writeJson(res, 403, { error: '跨站请求被拒绝' });
+        return;
+      }
+      // 退出只是把浏览器手里那张票作废。**本地笔记本一个字节都不动** ——
+      // 退出之后回到的是本地模式那本，不是空的。
+      res.setHeader('set-cookie', clearSessionCookie());
+      writeJson(res, 200, { ok: true, user: null });
+      return;
+    }
+
+    if (pathname === '/api/auth/avatar' && req.method === 'POST') {
+      if (!sameOrigin(req)) {
+        writeJson(res, 403, { error: '跨站请求被拒绝' });
+        return;
+      }
+      const user = requireUser(req, res);
+      if (!user) return;
+      const body = await readJsonBody(req, 256 * 1024);
+      const result = await users.setAvatar(user.id, body.avatar);
+      if (!result.ok) {
+        writeJson(res, 400, { error: '换头像失败', code: result.code });
+        return;
+      }
+      writeJson(res, 200, { user: publicUser(result.user) });
+      return;
+    }
+
+    if (pathname === '/api/auth/password' && req.method === 'POST') {
+      if (!sameOrigin(req)) {
+        writeJson(res, 403, { error: '跨站请求被拒绝' });
+        return;
+      }
+      const user = requireUser(req, res);
+      if (!user) return;
+      const body = await readJsonBody(req, 64 * 1024);
+      const result = await users.setPassword(user.id, {
+        oldPassword: body.oldPassword,
+        newPassword: body.newPassword,
+      });
+      if (!result.ok) {
+        writeJson(res, 400, { error: result.error, code: result.code });
+        return;
+      }
+      // 改密码会让 tokenVersion +1（别处的旧令牌立刻失效），
+      // 所以**要给自己补发一张新的** —— 否则「改完密码就被踢出去」，用户会以为改坏了。
+      startSession(req, res, result.user, { remember: body.remember === true });
+      writeJson(res, 200, { user: publicUser(result.user) });
+      return;
+    }
+
+    // ---------------------------------------------------------------- 笔记本快照
+    //
+    // 本地优先：浏览器里那本仍然是权威副本，这里只是**每个用户一份的整本备份**，
+    // 换设备/清过浏览器数据之后能拉回来。带 ?meta=1 就只回摘要（问「那边有什么」时用）。
+
+    if (pathname === '/api/sessions/snapshot' && req.method === 'GET') {
+      const user = requireUser(req, res);
+      if (!user) return;
+      const record = await loadSnapshot(user.id);
+      const count = Array.isArray(record?.payload?.sessions) ? record.payload.sessions.length : 0;
+      const meta = { savedAt: record?.savedAt ?? null, device: record?.device ?? '', count };
+      writeJson(res, 200, url.searchParams.get('meta') === '1' || !record
+        ? { ...meta, snapshot: null }
+        : { ...meta, snapshot: record.payload });
+      return;
+    }
+
+    if (pathname === '/api/sessions/snapshot' && req.method === 'PUT') {
+      if (!sameOrigin(req)) {
+        writeJson(res, 403, { error: '跨站请求被拒绝' });
+        return;
+      }
+      const user = requireUser(req, res);
+      if (!user) return;
+      // 上限交给读体那道闸：超了直接 413，不会先在内存里摊开一个 100MB 的东西
+      const body = await readJsonBody(req, SNAPSHOT_MAX);
+      const payload = body?.snapshot ?? body;
+      const problem = validSnapshot(payload);
+      if (problem) {
+        writeJson(res, 400, { error: problem, code: 'bad_snapshot' });
+        return;
+      }
+      const bytes = Buffer.byteLength(JSON.stringify(payload));
+      if (bytes > SNAPSHOT_MAX) {
+        writeJson(res, 413, { error: `笔记本太大了（${Math.round(bytes / 1024 / 1024)}MB），暂时存不进服务端快照`, code: 'too_large' });
+        return;
+      }
+      const record = await saveSnapshot(user.id, payload, body?.device);
+      writeJson(res, 200, { ok: true, savedAt: record.savedAt, count: payload.sessions.length, bytes });
+      return;
+    }
+
     if (pathname.startsWith('/api/history/') && req.method === 'GET') {
       const sessionId = pathname.slice('/api/history/'.length);
       if (!/^[A-Za-z0-9_-]{4,64}$/.test(sessionId)) {
@@ -1073,6 +1432,13 @@ const server = createServer(async (req, res) => {
       // 刚发完一轮就读历史时，先等这轮的落盘任务收尾，避免读到旧数据
       await pendingWrites.get(sessionId);
       const saved = await loadConversation(sessionId);
+      // 有这条记录、但不是你的 → 拒掉。
+      // 注意「压根没有这条记录」不算越权（回空壳就行）：否则光凭状态码就能问出
+      // 「这个 sessionId 在服务端存不存在」，而 sessionId 是客户端随便起的名字。
+      if (saved && !ownsRecord(saved, currentUser(req))) {
+        writeJson(res, 403, { error: '这是别的账号的会话' });
+        return;
+      }
       writeJson(res, 200, saved ?? { sessionId, turns: [] });
       return;
     }
@@ -1080,6 +1446,11 @@ const server = createServer(async (req, res) => {
     if (pathname.startsWith('/api/history/') && req.method === 'DELETE') {
       const sessionId = pathname.slice('/api/history/'.length);
       if (/^[A-Za-z0-9_-]{4,64}$/.test(sessionId)) {
+        const saved = await loadConversation(sessionId);
+        if (saved && !ownsRecord(saved, currentUser(req))) {
+          writeJson(res, 403, { error: '这是别的账号的会话' });
+          return;
+        }
         await rm(conversationFile(sessionId), { force: true }).catch(() => {});
       }
       writeJson(res, 200, { ok: true });
@@ -1136,6 +1507,9 @@ const server = createServer(async (req, res) => {
     }
   }
 });
+
+// 账号在路由开工之前先读起来（文件坏了只会让账号那几条路停用，不拦着聊天）
+await initAuth();
 
 server.listen(PORT, HOST, () => {
   const where = `http://${HOST}:${PORT}`;

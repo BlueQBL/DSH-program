@@ -84,6 +84,7 @@ const docLines = {
   'quote-tests': 'node test/quote-tests.mjs',
   'feedback-tests': 'node test/feedback-tests.mjs',
   'compress-tests': 'node test/compress-tests.mjs',
+  'auth-tests': 'node test/auth-tests.mjs',
   'ui-tests': 'node test/ui-tests.mjs',
   'verify-upstream-payload': 'node test/verify-upstream-payload.mjs',
 };
@@ -164,6 +165,10 @@ const CONTRACTS = [
   ['压缩不会删掉本地消息', /原始消息一条都不删|一条不删|不会删掉/],
   ['归档只是收起来，一条数据都没删', /收起来，但一条数据都没删|收起来了，但别删/],
   ['归档和删除不是一回事（搜得到、能还原）', /列表里没有[\s\S]{0,20}和[\s\S]{0,10}搜得到[\s\S]{0,20}同时成立/],
+  ['登录是可选的（不登录照样能用）', /不登录照样能用|不登录就是前面那些章节描述的样子/],
+  ['密码是哈希存的，不是明文', /scrypt 加随机盐|没有明文密码|\*\*没有明文\*\*/],
+  ['改密码会让别处的登录立刻失效', /立刻失效/],
+  ['这套认证不是经过审计的（公网要套 HTTPS）', /不是一套经过审计的身份系统[\s\S]{0,200}HTTPS/],
 ];
 for (const [name, pattern] of CONTRACTS) {
   check(`文档写明了「${name}」`, pattern.test(readme));

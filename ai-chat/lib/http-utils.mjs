@@ -14,17 +14,27 @@ export function writeJson(res, status, payload) {
 export function readJsonBody(req, limit = 2 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0;
+    let overflow = false;
     const chunks = [];
     req.on('data', (chunk) => {
       size += chunk.length;
       if (size > limit) {
-        reject(Object.assign(new Error('请求体过大'), { status: 413 }));
-        req.destroy();
+        // 超限**不**立刻砍连接：把后面来的数据丢进垃圾桶、让请求读完，
+        // 这样那句 413 才真的发得出去（以前是 req.destroy()，客户端只看到连接被重置，
+        // 读不到任何解释 —— 「笔记本太大存不进去」就变成了一句没有原因的失败）。
+        // 但也不能无限收：超过 4 倍上限就当是有人在灌数据，直接砍掉。
+        overflow = true;
+        chunks.length = 0;
+        if (size > limit * 4) req.destroy();
         return;
       }
       chunks.push(chunk);
     });
     req.on('end', () => {
+      if (overflow) {
+        reject(Object.assign(new Error(`请求体过大（上限 ${Math.round(limit / 1024)}KB）`), { status: 413 }));
+        return;
+      }
       const raw = Buffer.concat(chunks).toString('utf8').trim();
       if (!raw) return resolve({});
       try {

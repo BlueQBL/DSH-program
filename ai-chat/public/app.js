@@ -27,6 +27,19 @@ import { createSpeechInput, isSpeechSupported, unsupportedReason } from './lib/s
 import { toMarkdown, toPlainText, toJson, download, suggestedFilename } from './lib/exporters.js';
 import { supportsVision } from './lib/vision.js';
 import {
+  AVATAR_MAX_EDGE,
+  AVATAR_TARGET_CHARS,
+  authFormError,
+  avatarFromUpload,
+  createAuthApi,
+  paintAvatar,
+  restoreConfirmText,
+  shouldPushSnapshot,
+  snapshotNote,
+  uploadErrorMessage,
+} from './lib/auth.js';
+import { AVATAR_COLORS, AVATAR_EMOJI, normalizeAvatar, passwordHint } from './lib/auth-rules.js';
+import {
   copyFeedbackState,
   copyHint,
   copyFeedbackDuration,
@@ -139,6 +152,53 @@ const els = {
   // 列表收起（或窄屏）时，报头上的备用入口
   newSessionCompact: document.getElementById('new-session-compact'),
   exportAll: document.getElementById('export-all-button'),
+
+  // 账号（可选登录）：侧栏底下那一行 + 三个覆盖层面板
+  accountRow: document.getElementById('account-row'),
+  accountSignin: document.getElementById('account-signin'),
+  accountSelf: document.getElementById('account-self'),
+  accountAvatar: document.getElementById('account-avatar'),
+  accountName: document.getElementById('account-name'),
+  accountMenu: document.getElementById('account-menu'),
+  accountSnapshotNote: document.getElementById('account-snapshot-note'),
+  accountNote: document.getElementById('account-note'),
+  authOverlay: document.getElementById('auth-overlay'),
+  authPanelTitle: document.getElementById('auth-panel-title'),
+  authTabs: document.getElementById('auth-tabs'),
+  authTabLogin: document.getElementById('auth-tab-login'),
+  authTabRegister: document.getElementById('auth-tab-register'),
+  authBody: document.getElementById('auth-body'),
+  authNameField: document.getElementById('auth-name-field'),
+  authNameLabel: document.getElementById('auth-name-label'),
+  authName: document.getElementById('auth-name'),
+  authPasswordField: document.getElementById('auth-password-field'),
+  authPasswordLabel: document.getElementById('auth-password-label'),
+  authPassword: document.getElementById('auth-password'),
+  authNewField: document.getElementById('auth-new-field'),
+  authNewLabel: document.getElementById('auth-new-label'),
+  authNew: document.getElementById('auth-new'),
+  authConfirmField: document.getElementById('auth-confirm-field'),
+  authConfirmLabel: document.getElementById('auth-confirm-label'),
+  authConfirm: document.getElementById('auth-confirm'),
+  authOk: document.getElementById('auth-ok'),
+  authError: document.getElementById('auth-error'),
+  authRememberRow: document.getElementById('auth-remember-row'),
+  authRemember: document.getElementById('auth-remember'),
+  authHint: document.getElementById('auth-hint'),
+  authSubmit: document.getElementById('auth-submit'),
+  authCancel: document.getElementById('auth-cancel'),
+  authClose: document.getElementById('auth-close'),
+  avatarOverlay: document.getElementById('avatar-overlay'),
+  avatarPreview: document.getElementById('avatar-preview'),
+  avatarPreviewName: document.getElementById('avatar-preview-name'),
+  avatarGrid: document.getElementById('avatar-grid'),
+  avatarColors: document.getElementById('avatar-colors'),
+  avatarFile: document.getElementById('avatar-file'),
+  avatarUpload: document.getElementById('avatar-upload'),
+  avatarError: document.getElementById('avatar-error'),
+  avatarSave: document.getElementById('avatar-save'),
+  avatarCancel: document.getElementById('avatar-cancel'),
+  avatarClose: document.getElementById('avatar-close'),
 
   modeChip: document.getElementById('mode-chip'),
   modeLabel: document.getElementById('mode-label'),
@@ -1100,6 +1160,7 @@ function openSessionMenuFor(row, button) {
   const menu = row?.querySelector?.('.session-menu');
   if (!menu) return;
   closeSessionMenu();
+  closeAccountMenu(); // 两个菜单不叠着出现
   hideTitleFloat(); // 两个浮层不叠着出现
 
   menu.hidden = false;
@@ -3722,6 +3783,16 @@ document.addEventListener('click', (event) => {
 
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
+  // 覆盖层最优先：开着面板时按 Esc 只关它（不顺手把别处的浮层一起收了）
+  if (!els.authOverlay.hidden) {
+    closeAuthPanel();
+    return;
+  }
+  if (!els.avatarOverlay.hidden) {
+    closeAvatarPanel();
+    return;
+  }
+  closeAccountMenu();
   if (!els.quoteFloat.hidden) hideQuoteFloat();
   closeSessionMenu();
   hideTitleFloat();
@@ -3799,6 +3870,9 @@ function setRailVisible(visible) {
   //（它们的主入口都在列表顶上，见 index.html 的 .rail-actions）
   if (els.newSessionCompact) els.newSessionCompact.hidden = visible;
   if (els.referenceCompact) els.referenceCompact.hidden = visible;
+  // 账号那一行也在侧栏里（栏底），收起来时它跟着看不见；菜单是 fixed 的，
+  // 不关掉的话会孤零零地飘在一个已经收起来的栏上面
+  if (!visible) closeAccountMenu();
   writeRailPreference(visible);
 }
 
@@ -4123,10 +4197,593 @@ els.exchanges.addEventListener('input', (event) => {
   runtime.feedbackDraft.note = note.value;
 });
 
-// ---------------------------------------------------------------- 跨标签页同步
+// ---------------------------------------------------------------- 账号（可选）
+//
+// 定位：**不登录照样是现在这样**。登录之后多出三样东西 ——
+//   1. 账号本身（服务端存着，密码是 scrypt 哈希）；
+//   2. 一本属于这个账号的笔记本（浏览器里按账号分开存，两个人不会串）；
+//   3. 服务端那份「整本快照」，换设备时能拉回来。
+//
+// 四件容易做错、所以写在这里当纪律的事：
+//   · **登录不是「门」**：没登录时栏底是一个「登录 / 注册」，聊天一个字节都没变；
+//   · **换账号就是换一本笔记本**（store.useScope），退出登录回到本地那本，谁都不动谁的；
+//   · **第一次登录会把本地那本复制成账号的起点**（复制不是搬走，本地那份还在）——
+//     不然用户一登录就会以为「我的会话全没了」；
+//   · **登录过期 ≠ 数据没了**：过期只把界面切回未登录，正看着的笔记本留在原地，
+//     数据一条不少（重新登录就回来了）。
 
+const authApi = createAuthApi({ onUnauthorized: () => handleAuthLost() });
+const LOCAL_SCOPE = 'local';
+/** 本地模式那本笔记本的键（store.js 里的老键，只用来「复制一份带进账号」） */
+const LOCAL_NOTEBOOK_KEY = 'duitanlu.sessions.v2';
+/** 改动之后多久把笔记本推到服务端（一次推送是整本，别推得太勤） */
+const SNAPSHOT_PUSH_MS = 4000;
+
+const authState = {
+  user: null,
+  /** 给用户看的一句话（账号文件坏了 / 登录过期），平时空着 */
+  notice: '',
+  snapshot: { savedAt: '', count: 0, pending: false, failed: false },
+};
+
+let authMode = 'login';
+let snapshotTimer = null;
+let lastPushedAt = 0;
+let openAccountMenu = null;
+/** 换头像面板里正在编辑的那个头像（点「保存」之前不碰真的） */
+let avatarDraft = null;
+/** 面板里那两排可选项（留着引用，标记选中状态时不必去查 DOM） */
+let avatarChoices = [];
+
+function deviceLabel() {
+  return String(globalThis.navigator?.userAgent ?? '浏览器').slice(0, 60);
+}
+
+/** 把侧栏底下那一行账号画出来 */
+function renderAuth() {
+  const user = authState.user;
+  els.accountSignin.hidden = Boolean(user);
+  els.accountSelf.hidden = !user;
+  // 菜单的显隐只认「有没有开着」这一件事，免得重画的时候把打开的菜单留下或藏掉
+  els.accountMenu.hidden = !openAccountMenu;
+  els.accountNote.hidden = !authState.notice;
+  if (authState.notice) els.accountNote.textContent = authState.notice;
+  if (user) {
+    els.accountName.textContent = user.name;
+    paintAvatar(els.accountAvatar, user);
+  }
+  els.accountSnapshotNote.textContent = user ? snapshotNote(authState.snapshot) : '';
+}
+
+/**
+ * 这个账号在这台机器上的笔记本是不是空的。
+ * 「空」= 只有 store 自动开的那一条没说过话的会话 —— 只有这种情况才把本地那本带进来。
+ */
+function isBlankNotebook() {
+  const sessions = store.sessions;
+  return sessions.length === 1 && sessions[0].messages.length === 0;
+}
+
+/** 把本地模式那本复制成当前账号的起点。返回带进来几条（0 = 没带） */
+function bringLocalNotebookIn() {
+  let parsed = null;
+  try {
+    parsed = JSON.parse(localStorage.getItem(LOCAL_NOTEBOOK_KEY) ?? 'null');
+  } catch {
+    return 0;
+  }
+  const rows = Array.isArray(parsed?.sessions) ? parsed.sessions : [];
+  if (!rows.length) return 0;
+  if (!store.adoptSnapshot(parsed, { persist: true })) return 0;
+  return rows.length;
+}
+
+/**
+ * 登录 / 注册成功之后那句话。
+ *
+ * 为什么把三件事拼成**一句**：气泡提示只有一个坑，分开说等于后面那句把前面那句盖掉 ——
+ * 「已把本地模式的 3 个会话带进这个账号」正是最不能盖掉的那一句。
+ */
+function signInHint(headline, { brought = 0, snapshotCount = 0 } = {}) {
+  const parts = [headline];
+  if (brought) parts.push(`已把本地模式的 ${brought} 个会话带进这个账号（本地那份还在）`);
+  if (snapshotCount) parts.push(`服务端还有一份 ${snapshotCount} 个会话的快照，账号菜单里可以恢复`);
+  return parts.join('；');
+}
+
+/**
+ * 登录 / 注册成功之后。
+ * 顺序要紧：**先换笔记本再重画**（反过来的话会拿旧数据画一遍，闪一下才对上）。
+ * 返回 { brought, snapshotCount } 给调用方拼那句提示。
+ */
+async function onSignedIn(user) {
+  const previousScope = authState.user?.id ?? LOCAL_SCOPE;
+  authState.user = user;
+  authState.notice = '';
+  if (user.id !== previousScope) store.useScope(user.id);
+
+  const brought = user.id !== previousScope && isBlankNotebook() ? bringLocalNotebookIn() : 0;
+
+  renderAuth();
+  renderAll();
+
+  // 服务端还存着别的设备推上来的快照吗？这件事得让用户知道（不然「恢复」这个入口等于藏着）
+  const meta = await authApi.snapshotMeta().catch(() => null);
+  if (meta) {
+    authState.snapshot = {
+      savedAt: meta.savedAt ?? '',
+      count: meta.count ?? 0,
+      pending: false,
+      failed: false,
+    };
+    renderAuth();
+  }
+  return { brought, snapshotCount: meta?.count ?? 0 };
+}
+
+/** 退出登录：先把最后一点改动推上去，再回到本地模式那本 */
+async function signOut() {
+  closeAccountMenu();
+  await pushSnapshot().catch(() => {});
+  try {
+    await authApi.logout();
+  } catch {
+    /* 网络不通也照样退：本地状态自己切回去就行 */
+  }
+  if (authState.user) store.useScope(LOCAL_SCOPE);
+  authState.user = null;
+  authState.notice = '';
+  authState.snapshot = { savedAt: '', count: 0, pending: false, failed: false };
+  renderAuth();
+  renderAll();
+  flashHint('已退出登录，回到本地模式（这本笔记本一直都在）', 3600);
+}
+
+/**
+ * 登录过期 / 被踢。
+ * **不换笔记本**：正看着的东西留在原地，数据都在，重新登录就回来了。
+ */
+function handleAuthLost() {
+  if (!authState.user) return;
+  authState.user = null;
+  authState.notice = '登录已过期（改过密码或到了 30 天）。重新登录就能继续 —— 会话一条都没丢。';
+  renderAuth();
+}
+
+// ---- 笔记本快照的推送
+
+/**
+ * 有改动就安排一次推送（节流）。
+ * 生成回答的时候不推：一次推送是**整本笔记本**，边流式边推等于每几秒把整本传一遍。
+ */
+function scheduleSnapshotPush(delay = SNAPSHOT_PUSH_MS) {
+  if (!authState.user) return;
+  if (snapshotTimer) clearTimeout(snapshotTimer);
+  snapshotTimer = setTimeout(() => {
+    snapshotTimer = null;
+    if (!authState.user) return;
+    if (!shouldPushSnapshot({ busy: runtime.busy, lastPushedAt })) {
+      scheduleSnapshotPush();
+      return;
+    }
+    void pushSnapshot();
+  }, delay);
+}
+
+async function pushSnapshot() {
+  if (!authState.user) return false;
+  authState.snapshot = { ...authState.snapshot, pending: true };
+  renderAuth();
+  try {
+    const result = await authApi.putSnapshot(store.snapshot(), deviceLabel());
+    lastPushedAt = Date.now();
+    authState.snapshot = {
+      savedAt: result.savedAt || new Date().toISOString(),
+      count: Number(result.count) || 0,
+      pending: false,
+      failed: false,
+    };
+    renderAuth();
+    return true;
+  } catch (err) {
+    authState.snapshot = { ...authState.snapshot, pending: false, failed: true };
+    if (err?.status === 401) handleAuthLost();
+    renderAuth();
+    return false;
+  }
+}
+
+// ---- 账号菜单
+
+function closeAccountMenu() {
+  if (!openAccountMenu) return;
+  openAccountMenu.menu.hidden = true;
+  openAccountMenu.button.setAttribute('aria-expanded', 'false');
+  openAccountMenu = null;
+}
+
+function openAccountMenuFor() {
+  const menu = els.accountMenu;
+  const button = els.accountSelf;
+  if (!menu || !button) return;
+  closeSessionMenu(); // 两个菜单不叠着出现
+  menu.hidden = false;
+  button.setAttribute('aria-expanded', 'true');
+  openAccountMenu = { menu, button };
+
+  // 它在侧栏最底下，所以菜单**往上**长（往下放一定出屏）
+  const rect = button.getBoundingClientRect();
+  const width = menu.offsetWidth || 194;
+  const height = menu.offsetHeight || 170;
+  const left = Math.min(rect.left, Math.max(8, window.innerWidth - width - 8));
+  menu.style.left = `${Math.round(Math.max(8, left))}px`;
+  menu.style.top = `${Math.round(Math.max(8, rect.top - height - 6))}px`;
+}
+
+// ---- 登录 / 注册 / 改密码 / 恢复：同一个卡片，按模式换字段
+
+function showAuthError(text) {
+  els.authError.textContent = text;
+  els.authError.hidden = !text;
+}
+
+function showAuthOk(text) {
+  els.authOk.textContent = text;
+  els.authOk.hidden = !text;
+}
+
+/** 密码那一行的提示：注册和改密码时给强度，登录时什么都不说 */
+function updateAuthHint() {
+  if (authMode === 'login' || authMode === 'restore') {
+    els.authHint.textContent = '';
+    return;
+  }
+  const hint = passwordHint(authPasswordValue());
+  els.authHint.textContent = hint.text ? `密码强度：${hint.text}` : '';
+}
+
+function authPasswordValue() {
+  return authMode === 'password' ? els.authNew.value : els.authPassword.value;
+}
+
+function openAuthPanel(mode = 'login', { body = '' } = {}) {
+  authMode = mode;
+  const isPassword = mode === 'password';
+  const isRestore = mode === 'restore';
+
+  els.authPanelTitle.textContent = {
+    login: '登录',
+    register: '注册',
+    password: '改密码',
+    restore: '从服务端恢复',
+  }[mode] ?? '登录';
+  els.authTabs.hidden = isPassword || isRestore;
+  els.authTabLogin.setAttribute('aria-selected', String(mode === 'login'));
+  els.authTabRegister.setAttribute('aria-selected', String(mode === 'register'));
+  els.authBody.hidden = !body;
+  els.authBody.textContent = body;
+
+  // 字段按模式摆：登录要名字+密码；注册多一个「再输一遍」；改密码要原密码+新密码+再输一遍
+  els.authNameField.hidden = isPassword || isRestore;
+  els.authPasswordField.hidden = isRestore;
+  els.authNewField.hidden = !isPassword;
+  els.authConfirmField.hidden = mode === 'login' || isRestore;
+  els.authRememberRow.hidden = isRestore;
+  els.authNameLabel.textContent = '名字';
+  els.authPasswordLabel.textContent = isPassword ? '原密码' : '密码';
+  els.authConfirmLabel.textContent = '再输一遍';
+
+  els.authSubmit.textContent = {
+    login: '登录',
+    register: '注册',
+    password: '改密码',
+    restore: '用服务端那份覆盖本机',
+  }[mode] ?? '登录';
+
+  showAuthError('');
+  showAuthOk('');
+  els.authHint.textContent = '';
+  els.authOverlay.hidden = false;
+
+  if (isRestore) {
+    els.authSubmit.focus?.();
+    return;
+  }
+  // 打开就落在一个该填的格子上：改密码是「原密码」，其余是「名字」
+  if (isPassword) els.authPassword.focus?.();
+  else els.authName.focus?.();
+}
+
+function closeAuthPanel() {
+  els.authOverlay.hidden = true;
+  // 密码不进 DOM 留着：关掉就清干净（否则下次打开还挂着上一个人输的东西）
+  els.authPassword.value = '';
+  els.authNew.value = '';
+  els.authConfirm.value = '';
+  showAuthError('');
+  showAuthOk('');
+  els.authHint.textContent = '';
+}
+
+async function submitAuthPanel() {
+  if (authMode === 'restore') {
+    await restoreFromSnapshot();
+    return;
+  }
+
+  const name = els.authName.value.trim();
+  const oldPassword = els.authPassword.value;
+  const newPassword = els.authNew.value;
+  const confirm = els.authConfirm.value;
+  const remember = els.authRemember.checked === true;
+
+  const problem = authFormError({ mode: authMode, name, password: oldPassword, confirm, newPassword });
+  if (problem) {
+    showAuthError(problem);
+    return;
+  }
+
+  els.authSubmit.disabled = true;
+  showAuthError('');
+  try {
+    if (authMode === 'register') {
+      const data = await authApi.register({ name, password: oldPassword, remember });
+      closeAuthPanel();
+      const welcome = await onSignedIn(data.user);
+      flashHint(signInHint(`注册成功，欢迎 ${data.user.name}`, welcome), 5200);
+    } else if (authMode === 'login') {
+      const data = await authApi.login({ name, password: oldPassword, remember });
+      closeAuthPanel();
+      const welcome = await onSignedIn(data.user);
+      flashHint(signInHint(`已登录：${data.user.name}`, welcome), 5200);
+    } else {
+      const data = await authApi.changePassword({ oldPassword, newPassword, remember });
+      authState.user = data.user;
+      authState.notice = '';
+      renderAuth();
+      closeAuthPanel();
+      flashHint('密码已改：别的设备上开着的页面已经失效', 3800);
+    }
+  } catch (err) {
+    showAuthError(err?.message || '没成功，稍后再试');
+  } finally {
+    els.authSubmit.disabled = false;
+  }
+}
+
+/** 从服务端恢复：**先给确认**（它覆盖本机这个账号的所有会话） */
+async function openRestorePanel() {
+  closeAccountMenu();
+  let meta = null;
+  try {
+    meta = await authApi.snapshotMeta();
+  } catch (err) {
+    flashHint(err?.message || '读不到服务端的快照', 3400);
+    return;
+  }
+  if (!meta?.count) {
+    flashHint('服务端还没有这个账号的快照（每个账号只有一份，是你这台机器推上去的）', 4200);
+    return;
+  }
+  authState.snapshot = { savedAt: meta.savedAt ?? '', count: meta.count ?? 0, pending: false, failed: false };
+  renderAuth();
+  openAuthPanel('restore', {
+    body: restoreConfirmText({ count: meta.count, savedAt: meta.savedAt, localCount: store.sessions.length }),
+  });
+}
+
+async function restoreFromSnapshot() {
+  els.authSubmit.disabled = true;
+  showAuthError('');
+  try {
+    const data = await authApi.snapshot();
+    const payload = data?.snapshot;
+    if (!payload || !Array.isArray(payload.sessions) || !payload.sessions.length) {
+      showAuthError('服务端那份快照是空的');
+      return;
+    }
+    if (!store.adoptSnapshot(payload, { persist: true })) {
+      showAuthError('这份快照读不出来（结构不对），没有动本机的东西');
+      return;
+    }
+    closeAuthPanel();
+    renderAll();
+    flashHint(`已从服务端恢复 ${payload.sessions.length} 个会话`, 3600);
+  } catch (err) {
+    showAuthError(err?.message || '恢复失败，稍后再试');
+  } finally {
+    els.authSubmit.disabled = false;
+  }
+}
+
+// ---- 换头像
+
+function paintAvatarPreview() {
+  const preview = { name: authState.user?.name ?? '', avatar: avatarDraft };
+  paintAvatar(els.avatarPreview, preview);
+  els.avatarPreviewName.textContent = `${authState.user?.name ?? ''} 的头像`;
+}
+
+function markAvatarChoices() {
+  const current = normalizeAvatar(avatarDraft);
+  for (const choice of avatarChoices) {
+    const selected =
+      current?.kind === choice.avatar.kind
+      && (choice.avatar.kind !== 'emoji' || choice.avatar.emoji === current.emoji)
+      && (choice.avatar.kind !== 'initial' || choice.avatar.color === current.color);
+    choice.el.setAttribute('aria-pressed', String(Boolean(selected)));
+  }
+}
+
+function buildAvatarChoices() {
+  const grid = els.avatarGrid;
+  const colors = els.avatarColors;
+  avatarChoices = [];
+  if (!grid || !colors) return;
+
+  grid.replaceChildren(...AVATAR_EMOJI.map((emoji) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'avatar-chip';
+    button.textContent = emoji;
+    button.setAttribute('aria-label', `用 ${emoji} 当头像`);
+    button.addEventListener('click', () => {
+      avatarDraft = { kind: 'emoji', emoji };
+      paintAvatarPreview();
+      markAvatarChoices();
+    });
+    avatarChoices.push({ el: button, avatar: { kind: 'emoji', emoji } });
+    return button;
+  }));
+
+  colors.replaceChildren(...AVATAR_COLORS.map((color) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'avatar-swatch';
+    button.style.background = color;
+    button.setAttribute('aria-label', `底色 ${color}`);
+    button.addEventListener('click', () => {
+      // 挑底色 = 用首字母头像 + 这个颜色（emoji 头上垫色没意义）
+      avatarDraft = { kind: 'initial', color };
+      paintAvatarPreview();
+      markAvatarChoices();
+    });
+    avatarChoices.push({ el: button, avatar: { kind: 'initial', color } });
+    return button;
+  }));
+}
+
+function openAvatarPanel() {
+  if (!authState.user) return;
+  closeAccountMenu();
+  avatarDraft = normalizeAvatar(authState.user.avatar) ?? { kind: 'initial', color: null };
+  buildAvatarChoices();
+  markAvatarChoices();
+  paintAvatarPreview();
+  els.avatarError.hidden = true;
+  els.avatarOverlay.hidden = false;
+}
+
+function closeAvatarPanel() {
+  els.avatarOverlay.hidden = true;
+  els.avatarError.hidden = true;
+}
+
+function showAvatarError(text) {
+  els.avatarError.textContent = text;
+  els.avatarError.hidden = !text;
+}
+
+async function saveAvatar() {
+  els.avatarSave.disabled = true;
+  showAvatarError('');
+  try {
+    const data = await authApi.setAvatar(normalizeAvatar(avatarDraft) ?? { kind: 'initial', color: null });
+    authState.user = data.user;
+    renderAuth();
+    closeAvatarPanel();
+    flashHint('头像已更新', 2200);
+  } catch (err) {
+    showAvatarError(err?.message || '换头像失败，稍后再试');
+  } finally {
+    els.avatarSave.disabled = false;
+  }
+}
+
+// ---- 事件接线
+
+els.accountSignin?.addEventListener('click', () => openAuthPanel('login'));
+els.accountSelf?.addEventListener('click', () => {
+  if (openAccountMenu) closeAccountMenu();
+  else openAccountMenuFor();
+});
+
+els.accountMenu?.addEventListener('click', (event) => {
+  const action = event.target.closest?.('[data-action]')?.dataset.action;
+  if (!action) return;
+  closeAccountMenu();
+  if (action === 'avatar') openAvatarPanel();
+  if (action === 'password') {
+    openAuthPanel('password', {
+      body: `给「${authState.user?.name ?? ''}」改密码。改完之后，别的设备上开着的页面会立刻失效。`,
+    });
+  }
+  if (action === 'restore') void openRestorePanel();
+  if (action === 'logout') void signOut();
+});
+
+els.authTabLogin?.addEventListener('click', () => openAuthPanel('login'));
+els.authTabRegister?.addEventListener('click', () => openAuthPanel('register'));
+els.authSubmit?.addEventListener('click', () => void submitAuthPanel());
+els.authCancel?.addEventListener('click', closeAuthPanel);
+els.authClose?.addEventListener('click', closeAuthPanel);
+els.authPassword?.addEventListener('input', updateAuthHint);
+els.authNew?.addEventListener('input', updateAuthHint);
+// 点卡片外面 = 关掉（覆盖层的惯例）。只在点到背景本身时关，点卡片内部不算
+els.authOverlay?.addEventListener('click', (event) => {
+  if (event.target === els.authOverlay) closeAuthPanel();
+});
+els.avatarOverlay?.addEventListener('click', (event) => {
+  if (event.target === els.avatarOverlay) closeAvatarPanel();
+});
+// 回车直接提交（表单里没有 <form>，所以自己接一下）
+for (const input of [els.authName, els.authPassword, els.authNew, els.authConfirm]) {
+  input?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') void submitAuthPanel();
+  });
+}
+
+els.avatarSave?.addEventListener('click', () => void saveAvatar());
+els.avatarCancel?.addEventListener('click', closeAvatarPanel);
+els.avatarClose?.addEventListener('click', closeAvatarPanel);
+els.avatarUpload?.addEventListener('click', () => els.avatarFile?.click?.());
+els.avatarFile?.addEventListener('change', async () => {
+  const file = els.avatarFile.files?.[0];
+  if (!file) return;
+  showAvatarError('');
+  // 选完就清掉选择：不然**再选同一张图**不会触发 change（浏览器认为值没变），
+  // 表现是「我明明点了那张图，它什么也没发生」
+  els.avatarFile.value = '';
+  try {
+    // 复用聊天图片那条压缩路：`maxEdge` 128px、目标 40KB —— 头像是要写进账号文件的，不能没边
+    const compressed = await compressImage(file, { maxEdge: AVATAR_MAX_EDGE, targetChars: AVATAR_TARGET_CHARS });
+    const avatar = avatarFromUpload(compressed);
+    if (!avatar) {
+      showAvatarError('这张图没能用：只支持 png / jpg / webp，而且压完不能超过 64KB');
+      return;
+    }
+    avatarDraft = avatar;
+    paintAvatarPreview();
+    markAvatarChoices();
+  } catch (err) {
+    showAvatarError(uploadErrorMessage(err));
+  }
+});
+
+// 笔记本一有改动就安排一次推送（节流在 scheduleSnapshotPush 里；没登录时它直接返回）
+store.subscribe(() => scheduleSnapshotPush());
+
+// 页面要走了：补推一次（现在多半是最后一点改动）。keepalive 让请求在卸载过程中也能发出去
+window.addEventListener('pagehide', () => {
+  if (!authState.user) return;
+  try {
+    void fetch('/api/sessions/snapshot', {
+      method: 'PUT',
+      credentials: 'same-origin',
+      keepalive: true,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ snapshot: store.snapshot(), device: deviceLabel() }),
+    });
+  } catch {
+    /* 走了就走了 */
+  }
+});
+
+// ---------------------------------------------------------------- 跨标签页同步
 window.addEventListener('storage', (event) => {
-  if (event.key !== 'duitanlu.sessions.v2') return;
+  // 只认**当前这本笔记本**那个键：登录之后键是 `…v2::<账号 id>`；
+  // 别的标签页换了个人、或者本地模式那本被改了，都不该动这一页。
+  if (event.key !== store.storageKey) return;
   if (runtime.busy) return; // 本页正在生成时不打断
 
   let snapshot = null;
@@ -4182,7 +4839,47 @@ function resolveStartingSession() {
   return reason;
 }
 
+/**
+ * 问服务端「现在是谁」。
+ *
+ * 读不到就当没登录 —— **不拦着用**：不登录本来就是正常状态（本地模式）。
+ * 拿到人之后第一件事是**换笔记本**（store.useScope），必须在 renderAll 之前，
+ * 否则会先拿本地那本画一遍、再闪一下换成账号那本。
+ */
+async function resolveAuth() {
+  try {
+    const data = await authApi.me();
+    authState.notice = data?.authError ?? '';
+    if (data?.user) {
+      authState.user = data.user;
+      store.useScope(data.user.id);
+      const meta = await authApi.snapshotMeta().catch(() => null);
+      if (meta) {
+        authState.snapshot = {
+          savedAt: meta.savedAt ?? '',
+          count: meta.count ?? 0,
+          pending: false,
+          failed: false,
+        };
+      }
+    }
+  } catch {
+    authState.user = null;
+  }
+  renderAuth();
+}
+
 async function boot() {
+  // 0) 浮层先一律关掉：index.html 里写着 hidden，但那是给「JS 还没跑起来」看的，
+  //    这里明确摆一次，免得某次改动之后打开页面就飘着一个面板
+  closeAuthPanel();
+  closeAvatarPanel();
+  closeAccountMenu();
+  els.accountMenu.hidden = true;
+
+  // 1) 现在是谁（登录了就先换成他那本笔记本）
+  await resolveAuth();
+
   const startReason = resolveStartingSession();
 
   fillPersonaSelect();

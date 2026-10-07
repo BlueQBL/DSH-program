@@ -374,6 +374,16 @@ let releaseHang = null;
 /** 流式回答里 meta 帧报告的运行模式（离线用例会把它设成 mock） */
 let chatMode = 'model';
 
+/** 账号那几条路的假服务端：默认「谁都没登录」，用例里可以随便摆 */
+let authUser = null;
+let authAccount = null;
+/** 每一次账号 / 快照请求（按顺序），用来断言「到底发出去了什么」 */
+const authCalls = [];
+/** 非空时让账号接口按这个结果失败（{ status, error, code }） */
+let authFail = null;
+/** 服务端那份快照：{ savedAt, device, payload } */
+let serverSnapshot = null;
+
 /** 造一个能用的 SSE 响应体：app.js 的 readEventStream 要 getReader() */
 function sseResponse(frames) {
   const chunks = frames.map((f) => new TextEncoder().encode(`data: ${JSON.stringify(f)}\n\n`));
@@ -441,6 +451,88 @@ globalThis.fetch = async (url, init) => {
     // 故意不给 body：send() 会走「请求失败」分支，正好验证失败路径不会把引用搞丢
     return { ok: false, json: async () => ({ error: 'stub' }) };
   }
+
+  // ---- 账号与快照（这一路是真实接口的形状：状态码 + { error, code } + 用户对象）
+  if (target.includes('/api/auth/') || target.includes('/api/sessions/snapshot')) {
+    const method = String(init?.method ?? 'GET').toUpperCase();
+    let body = null;
+    try {
+      body = init?.body ? JSON.parse(init.body) : null;
+    } catch {
+      body = null;
+    }
+    authCalls.push({ method, path: target, body });
+
+    if (authFail) {
+      const fail = authFail;
+      return { ok: false, status: fail.status, json: async () => ({ error: fail.error, code: fail.code }) };
+    }
+
+    const ok = (payload) => ({ ok: true, status: 200, json: async () => payload });
+
+    if (target.includes('/api/auth/me')) {
+      return ok({ user: authUser, registerOpen: true, authError: null });
+    }
+    if (target.includes('/api/auth/register')) {
+      authAccount = { name: body?.name, password: body?.password };
+      authUser = {
+        id: 'u_test_1',
+        name: String(body?.name ?? ''),
+        createdAt: '2026-01-01T00:00:00.000Z',
+        avatar: body?.avatar ?? { kind: 'initial', color: null },
+      };
+      return ok({ user: authUser });
+    }
+    if (target.includes('/api/auth/login')) {
+      if (!authAccount || authAccount.name !== body?.name || authAccount.password !== body?.password) {
+        return { ok: false, status: 401, json: async () => ({ error: '名字或密码不对', code: 'invalid' }) };
+      }
+      authUser = {
+        id: 'u_test_1',
+        name: authAccount.name,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        avatar: authUser?.avatar ?? { kind: 'initial', color: null },
+      };
+      return ok({ user: authUser });
+    }
+    if (target.includes('/api/auth/logout')) {
+      authUser = null;
+      return ok({ ok: true, user: null });
+    }
+    if (target.includes('/api/auth/avatar')) {
+      if (!authUser) return { ok: false, status: 401, json: async () => ({ error: '需要先登录', code: 'unauthorized' }) };
+      authUser = { ...authUser, avatar: body?.avatar ?? authUser.avatar };
+      return ok({ user: authUser });
+    }
+    if (target.includes('/api/auth/password')) {
+      if (!authUser) return { ok: false, status: 401, json: async () => ({ error: '需要先登录', code: 'unauthorized' }) };
+      if (authAccount && body?.oldPassword !== authAccount.password) {
+        return { ok: false, status: 400, json: async () => ({ error: '原密码不对', code: 'bad_old_password' }) };
+      }
+      if (authAccount) authAccount.password = body?.newPassword;
+      return ok({ user: authUser });
+    }
+    if (target.includes('/api/sessions/snapshot')) {
+      if (!authUser) return { ok: false, status: 401, json: async () => ({ error: '需要先登录', code: 'unauthorized' }) };
+      if (method === 'PUT') {
+        serverSnapshot = {
+          savedAt: '2026-10-07T10:00:00.000Z',
+          device: body?.device ?? '',
+          payload: body?.snapshot ?? null,
+        };
+        return ok({ ok: true, savedAt: serverSnapshot.savedAt, count: serverSnapshot.payload?.sessions?.length ?? 0, bytes: 128 });
+      }
+      const meta = {
+        savedAt: serverSnapshot?.savedAt ?? null,
+        device: serverSnapshot?.device ?? '',
+        count: serverSnapshot?.payload?.sessions?.length ?? 0,
+      };
+      const wantMeta = target.includes('meta=1');
+      return ok(wantMeta ? { ...meta, snapshot: null } : { ...meta, snapshot: serverSnapshot?.payload ?? null });
+    }
+    return { ok: false, status: 404, json: async () => ({ error: '没有这条路' }) };
+  }
+
   void init;
   return { ok: true, json: async () => ({}) };
 };
@@ -3910,6 +4002,406 @@ console.log('\n㉔ 归档：从列表里收起来，但一条数据都没删');
     !/^\.session-item\[data-archived="true"\] \.session-name::before/m.test(css));
   check('已经归档的那一行，菜单里的按钮用正墨色标出状态（和「取消置顶」同一个路数）',
     /^\.session-item\[data-archived="true"\] \.icon-button\[data-action="archive"\]\s*\{[^}]*color:\s*var\(--ink\)/m.test(css));
+}
+
+console.log('\n㉕ 账号：注册 / 登录 / 头像 / 从服务端恢复');
+
+{
+  const settle = () => new Promise((r) => setTimeout(r, 60));
+  const railBlock = sliceBlock(html, '<aside class="rail" id="rail"', 'aside');
+  const authBlock = sliceBlock(html, '<div class="auth-overlay" id="auth-overlay"', 'div');
+  const avatarBlock = sliceBlock(html, '<div class="auth-overlay" id="avatar-overlay"', 'div');
+  const menuItem = (action) => {
+    const button = makeElement('button');
+    button.dataset.action = action;
+    return button;
+  };
+  const LOCAL_KEY = 'duitanlu.sessions.v2';
+  const ACCOUNT_KEY = 'duitanlu.sessions.v2::u_test_1';
+  const notebookOf = (key) => JSON.parse(storage.get(key) ?? 'null');
+  const titlesIn = () =>
+    getEl('recent-list').children.map((row) => row.querySelector?.('[data-field="name"]')?.textContent ?? '');
+  const snapshotPuts = () => authCalls.filter((c) => c.method === 'PUT' && c.path.includes('/api/sessions/snapshot'));
+  const lastPut = () => snapshotPuts().at(-1) ?? null;
+  const clickMenu = (action) => dispatch(getEl('account-menu'), 'click', { target: menuItem(action) });
+
+  // ---- 结构：入口在侧栏底下（参考 ChatGPT），不往报头里塞
+  check('侧栏里有一个账号入口', railBlock.includes('id="account-row"'));
+  check('它排在「导出全部」后面（栏底那一块）',
+    railBlock.indexOf('id="account-row"') > railBlock.indexOf('id="export-all-button"'),
+    `account-row@${railBlock.indexOf('id="account-row"')} export@${railBlock.indexOf('id="export-all-button"')}`);
+  check('未登录时是一个「登录 / 注册」按钮',
+    /id="account-signin"[^>]*>登录 \/ 注册</.test(railBlock), railBlock.slice(railBlock.indexOf('account-signin'), railBlock.indexOf('account-signin') + 120));
+  check('登录后是头像 + 名字 + 一个菜单',
+    railBlock.includes('id="account-avatar"') && railBlock.includes('id="account-name"') && railBlock.includes('id="account-menu"'));
+  check('菜单里有换头像 / 改密码 / 从服务端恢复 / 退出登录',
+    ['avatar', 'password', 'restore', 'logout'].every((a) => railBlock.includes(`data-action="${a}"`)));
+  check('「退出登录」是危险色（它和别的几项不是一类）',
+    /data-action="logout"[^>]*|class="[^"]*danger[^"]*"[^>]*data-action="logout"/.test(railBlock)
+      && /danger[^>]*data-action="logout"|data-action="logout"[^>]*danger/.test(railBlock),
+    (railBlock.match(/<button[^>]*data-action="logout"[^>]*>/) ?? [''])[0]);
+  check('账号菜单里写着快照的状态（不然用户不知道服务端到底有没有那份备份）',
+    railBlock.includes('id="account-snapshot-note"'));
+
+  check('登录面板是对话框语义', authBlock.includes('role="dialog"') && authBlock.includes('aria-modal="true"'));
+  check('面板上写着「不登录也能用」（定位要写在用户正看着的地方）',
+    /auth-note[^>]*>不登录也能用/.test(authBlock));
+  check('「记住我」默认勾上', /id="auth-remember"[^>]*checked/.test(authBlock));
+  check('换头像面板里有 emoji 网格、配色、上传三条路',
+    avatarBlock.includes('id="avatar-grid"') && avatarBlock.includes('id="avatar-colors"') && avatarBlock.includes('id="avatar-file"'));
+  check('头像面板里也有预览（所见即所得）', avatarBlock.includes('id="avatar-preview"'));
+
+  // ---- 未登录：本地模式照常
+  authUser = null;
+  authAccount = null;
+  authFail = null;
+  serverSnapshot = null;
+  authCalls.length = 0;
+  storage.delete(ACCOUNT_KEY);
+
+  const seed = {
+    version: 2,
+    activeId: 'loc_01',
+    sessions: [
+      { id: 'loc_01', title: '本地模式的一条', createdAt: Date.now() - 9000, updatedAt: Date.now() - 1000, messages: [] },
+      { id: 'loc_02', title: '本地模式的另一条', createdAt: Date.now() - 8000, updatedAt: Date.now() - 2000, messages: [] },
+    ],
+  };
+  storage.set(LOCAL_KEY, JSON.stringify(seed));
+  for (const h of windowHandlers.filter((x) => x.type === 'storage')) {
+    h.fn({ key: LOCAL_KEY, newValue: JSON.stringify(seed) });
+  }
+  await settle();
+
+  check('未登录时栏底是「登录 / 注册」', getEl('account-signin').hidden === false && getEl('account-self').hidden === true);
+  check('未登录时登录面板关着', getEl('auth-overlay').hidden === true);
+  check('**未登录照样能用**：会话照常画出来（登录不是门）',
+    titlesIn().join(',') === '本地模式的一条,本地模式的另一条', titlesIn().join(','));
+
+  // ---- 打开面板 + 本地校验（不该白跑一趟服务端）
+  dispatch(getEl('account-signin'), 'click');
+  check('点「登录 / 注册」出面板', getEl('auth-overlay').hidden === false);
+  check('默认是登录这一档', getEl('auth-panel-title').textContent === '登录' && getEl('auth-submit').textContent === '登录');
+  check('登录只要名字 + 密码（不要「再输一遍」）',
+    getEl('auth-confirm-field').hidden === true && getEl('auth-name-field').hidden === false);
+
+  dispatch(getEl('auth-tab-register'), 'click');
+  check('切到注册：多出「再输一遍」，按钮改口', getEl('auth-confirm-field').hidden === false && getEl('auth-submit').textContent === '注册');
+
+  let callsBefore = authCalls.length;
+  getEl('auth-name').value = 'a';
+  getEl('auth-password').value = 'correct-horse-1';
+  getEl('auth-confirm').value = 'correct-horse-1';
+  dispatch(getEl('auth-submit'), 'click');
+  await settle();
+  check('名字太短：面板里出错误，而且**一个请求都没发**',
+    getEl('auth-error').hidden === false && authCalls.length === callsBefore,
+    `${getEl('auth-error').textContent} / 请求 ${authCalls.length - callsBefore} 次`);
+  check('说的话是规则本身（不是「失败」两个字）',
+    getEl('auth-error').textContent.includes('2 个字'), getEl('auth-error').textContent);
+
+  getEl('auth-name').value = '小林';
+  getEl('auth-password').value = '1234567';
+  dispatch(getEl('auth-submit'), 'click');
+  await settle();
+  check('密码太短也拦得住', getEl('auth-error').textContent.includes('8 位'), getEl('auth-error').textContent);
+
+  getEl('auth-password').value = 'correct-horse-1';
+  getEl('auth-password').dispatch?.('input');
+  dispatch(getEl('auth-password'), 'input');
+  check('打字时给密码强度提示（说得出理由）',
+    getEl('auth-hint').textContent.includes('密码强度'), getEl('auth-hint').textContent);
+
+  getEl('auth-confirm').value = '不一样的密码';
+  dispatch(getEl('auth-submit'), 'click');
+  await settle();
+  check('两次输入不一样也拦得住', getEl('auth-error').textContent.includes('不一样'), getEl('auth-error').textContent);
+
+  // ---- 注册成功
+  const localRawBefore = storage.get(LOCAL_KEY);
+  getEl('auth-confirm').value = 'correct-horse-1';
+  dispatch(getEl('auth-submit'), 'click');
+  await settle();
+  await settle();
+
+  check('注册成功：面板关掉', getEl('auth-overlay').hidden === true);
+  check('栏底换成头像 + 名字',
+    getEl('account-signin').hidden === true && getEl('account-self').hidden === false
+      && getEl('account-name').textContent === '小林',
+    getEl('account-name').textContent);
+  check('头像画出来了（首字母 + 按名字算的底色）',
+    getEl('account-avatar').dataset.kind === 'initial'
+      && getEl('account-avatar').querySelector('.avatar-text').textContent === '小'
+      && /^#[0-9a-f]{6}$/i.test(getEl('account-avatar').style.getPropertyValue('--avatar-bg')),
+    `${getEl('account-avatar').dataset.kind} / ${getEl('account-avatar').style.getPropertyValue('--avatar-bg')}`);
+  check('头像带无障碍名字', /小林/.test(getEl('account-avatar').getAttribute('aria-label') ?? ''),
+    getEl('account-avatar').getAttribute('aria-label'));
+
+  // ---- 换了一本笔记本：两个账号不会串
+  check('账号的笔记本写在**另一个键**上', notebookOf(ACCOUNT_KEY) !== null);
+  check('第一次登录：本地模式那本被**复制**成账号的起点',
+    notebookOf(ACCOUNT_KEY)?.sessions?.length === 2, String(notebookOf(ACCOUNT_KEY)?.sessions?.length));
+  check('本地模式那本**原样还在**（复制不是搬走，退出登录还回得去）',
+    storage.get(LOCAL_KEY) === localRawBefore);
+  check('提示里说清了这件事', /本地那份还在/.test(getEl('composer-hint').textContent),
+    getEl('composer-hint').textContent);
+
+  // 让账号那本和本地那本**长得不一样**：两本内容一样的话，「有没有真的换本」根本分辨不出来。
+  // （这不是为了看着舒服 —— 变异测试里「退出登录不换回本地那本」就是靠这一点才抓得住的。）
+  // 用「置顶」这个字段最直接：它是会话上的一个布尔值，不依赖条数、也不依赖渲染顺序。
+  const clickOn = (id, action) => {
+    const button = makeElement('button');
+    button.dataset.action = action;
+    const row = makeElement('li');
+    row.className = 'session-item';
+    row.dataset.id = id;
+    button.parentElement = row;
+    dispatch(getEl('session-list'), 'click', { target: button });
+  };
+  const pinnedFlag = (key, id) => notebookOf(key)?.sessions?.find((s) => s.id === id)?.pinned === true;
+
+  clickOn('loc_02', 'pin');
+  await settle();
+  check('在账号里把一条置顶：**账号那本**记下了，本地那本没有',
+    pinnedFlag(ACCOUNT_KEY, 'loc_02') === true && pinnedFlag(LOCAL_KEY, 'loc_02') === false,
+    `账号 ${pinnedFlag(ACCOUNT_KEY, 'loc_02')} / 本地 ${pinnedFlag(LOCAL_KEY, 'loc_02')}`);
+  check('画面上的「置顶」组里确实多了一条（这一条是账号那本的）',
+    getEl('pinned-list').children.length === 1, String(getEl('pinned-list').children.length));
+
+  check('登录之后，别的标签页改本地那本不会动这一页（只认当前这个键）', (() => {
+    const other = JSON.stringify({ version: 2, activeId: 'loc_01', sessions: [{ id: 'loc_01', title: '别的标签页改的', messages: [] }] });
+    storage.set(LOCAL_KEY, other);
+    for (const h of windowHandlers.filter((x) => x.type === 'storage')) h.fn({ key: LOCAL_KEY, newValue: other });
+    const unchanged = getEl('pinned-list').children.length === 1 && !titlesIn().includes('别的标签页改的');
+    // 把本地那本还原回去：上面只是为了确认「它不影响当前视图」，不是要真的改掉它
+    storage.set(LOCAL_KEY, localRawBefore);
+    return unchanged;
+  })(), titlesIn().join(','));
+
+  // ---- 退出登录：回到本地模式那本
+  dispatch(getEl('account-self'), 'click');
+  check('点头像出账号菜单', getEl('account-menu').hidden === false && getEl('account-self').getAttribute('aria-expanded') === 'true');
+  check('菜单里写着快照状态', /快照/.test(getEl('account-snapshot-note').textContent), getEl('account-snapshot-note').textContent);
+
+  authCalls.length = 0;
+  clickMenu('logout');
+  await settle();
+  await settle();
+  check('退出之前先把笔记本推了一次（最后一点改动不会丢）',
+    lastPut()?.body?.snapshot?.sessions?.length === 2, JSON.stringify(lastPut()?.body?.snapshot ?? null).slice(0, 60));
+  check('退出登录：栏底回到「登录 / 注册」', getEl('account-signin').hidden === false && getEl('account-self').hidden === true);
+  check('回到本地模式那本（**不是**账号那本 —— 账号里置顶的那条在这本里没置顶）',
+    getEl('pinned-list').children.length === 0 && titlesIn().length === 2,
+    `置顶 ${getEl('pinned-list').children.length} 条 / 最近 ${titlesIn().join(',')}`);
+  check('账号那本留在浏览器里（下次登录还在，置顶也还在）',
+    notebookOf(ACCOUNT_KEY)?.sessions?.length === 2 && pinnedFlag(ACCOUNT_KEY, 'loc_02') === true);
+  check('退出有反馈，而且说明本地这本一直没动', /本地模式/.test(getEl('composer-hint').textContent), getEl('composer-hint').textContent);
+
+  // ---- 再登录一次：账号那本回来，本地这本不被再复制一遍
+  dispatch(getEl('account-signin'), 'click');
+  dispatch(getEl('auth-tab-login'), 'click');
+  getEl('auth-name').value = '小林';
+  getEl('auth-password').value = 'correct-horse-1';
+  getEl('auth-remember').checked = true;
+  dispatch(getEl('auth-submit'), 'click');
+  await settle();
+  await settle();
+  check('再登录：账号那本回来了（账号里置顶的那条还在「置顶」组里）',
+    getEl('account-self').hidden === false && getEl('pinned-list').children.length === 1
+      && titlesIn().length === 1,
+    `置顶 ${getEl('pinned-list').children.length} / 最近 ${titlesIn().join(',')}`);
+  check('本地那本没有被再复制一遍（它已经是这个账号的了，不用再带）',
+    notebookOf(ACCOUNT_KEY)?.sessions?.length === 2, String(notebookOf(ACCOUNT_KEY)?.sessions?.length));
+  check('登录时把「记住我」一起发了出去',
+    authCalls.some((c) => c.path.includes('/api/auth/login') && c.body?.remember === true));
+
+  // ---- 登录失败：面板不关，原话说给用户听
+  dispatch(getEl('account-self'), 'click');
+  clickMenu('logout');
+  await settle();
+  dispatch(getEl('account-signin'), 'click');
+  getEl('auth-name').value = '小林';
+  getEl('auth-password').value = '猜的密码';
+  dispatch(getEl('auth-submit'), 'click');
+  await settle();
+  check('密码不对：面板不关，服务端那句话原样摆出来',
+    getEl('auth-overlay').hidden === false && getEl('auth-error').textContent === '名字或密码不对',
+    getEl('auth-error').textContent);
+  dispatch(getEl('auth-close'), 'click');
+  check('关掉面板：密码格清干净（不留给下一个人）',
+    getEl('auth-password').value === '' && getEl('auth-overlay').hidden === true);
+
+  // 键盘用户的出口：Esc 也得能关（不能逼人去够那个 ×）
+  dispatch(getEl('account-signin'), 'click');
+  check('（准备）面板又开了', getEl('auth-overlay').hidden === false);
+  for (const h of documentHandlers.filter((x) => x.type === 'keydown')) h.fn({ key: 'Escape' });
+  check('Esc 关掉面板', getEl('auth-overlay').hidden === true);
+
+  // ---- 重新登录，接着测头像 / 恢复
+  dispatch(getEl('account-signin'), 'click');
+  getEl('auth-name').value = '小林';
+  getEl('auth-password').value = 'correct-horse-1';
+  dispatch(getEl('auth-submit'), 'click');
+  await settle();
+  await settle();
+  check('（准备）又登录上了', getEl('account-self').hidden === false);
+
+  // ---- 换头像
+  dispatch(getEl('account-self'), 'click');
+  clickMenu('avatar');
+  check('换头像面板出来，预览画的是当前头像',
+    getEl('avatar-overlay').hidden === false && getEl('avatar-preview').dataset.kind === 'initial');
+  check('emoji 网格和配色都灌好了',
+    getEl('avatar-grid').children.length === 20 && getEl('avatar-colors').children.length === 8,
+    `${getEl('avatar-grid').children.length} / ${getEl('avatar-colors').children.length}`);
+
+  const whaleChip = getEl('avatar-grid').children[0];
+  dispatch(whaleChip, 'click');
+  check('点一个 emoji：预览立刻跟着变（保存前不动真的）',
+    getEl('avatar-preview').dataset.kind === 'emoji' && getEl('avatar-preview').querySelector('.avatar-text').textContent === whaleChip.textContent,
+    getEl('avatar-preview').querySelector('.avatar-text').textContent);
+  dispatch(getEl('avatar-save'), 'click');
+  await settle();
+  await settle();
+  check('保存之后侧栏头像变成那个 emoji',
+    getEl('account-avatar').dataset.kind === 'emoji'
+      && getEl('account-avatar').querySelector('.avatar-text').textContent === whaleChip.textContent,
+    `${getEl('account-avatar').dataset.kind} / ${getEl('account-avatar').querySelector('.avatar-text').textContent}`);
+  check('发出去的正是那个 emoji',
+    authCalls.some((c) => c.path.includes('/api/auth/avatar') && c.body?.avatar?.kind === 'emoji' && c.body.avatar.emoji === whaleChip.textContent),
+    JSON.stringify(authCalls.filter((c) => c.path.includes('/api/auth/avatar')).at(-1)?.body ?? null));
+
+  // 上传：替身里没有 canvas / FileReader，压缩必然失败 —— 这里要看的是「失败也说人话」
+  dispatch(getEl('account-self'), 'click');
+  clickMenu('avatar');
+  getEl('avatar-file').files = [{ name: 'me.png', type: 'image/png' }];
+  dispatch(getEl('avatar-file'), 'change');
+  await settle();
+  check('上传处理不了时给一句能照着做的话（不是「上传失败」）',
+    getEl('avatar-error').hidden === false && /png|jpg|webp/.test(getEl('avatar-error').textContent),
+    getEl('avatar-error').textContent);
+  dispatch(getEl('avatar-cancel'), 'click');
+  check('取消就关掉，头像不动',
+    getEl('avatar-overlay').hidden === true && getEl('account-avatar').dataset.kind === 'emoji');
+
+  // ---- 改密码
+  dispatch(getEl('account-self'), 'click');
+  clickMenu('password');
+  check('改密码面板：原密码 + 新密码 + 再输一遍，按钮写着「改密码」',
+    getEl('auth-new-field').hidden === false && getEl('auth-confirm-field').hidden === false
+      && getEl('auth-password-label').textContent === '原密码' && getEl('auth-submit').textContent === '改密码',
+    `${getEl('auth-password-label').textContent} / ${getEl('auth-submit').textContent}`);
+  getEl('auth-password').value = '猜的';
+  getEl('auth-new').value = 'brand-new-pass-1';
+  getEl('auth-confirm').value = 'brand-new-pass-1';
+  dispatch(getEl('auth-submit'), 'click');
+  await settle();
+  check('原密码不对：面板里出错误', getEl('auth-error').textContent === '原密码不对', getEl('auth-error').textContent);
+  getEl('auth-password').value = 'correct-horse-1';
+  dispatch(getEl('auth-submit'), 'click');
+  await settle();
+  await settle();
+  check('改成功：面板关掉，并且说清了「别处会失效」',
+    getEl('auth-overlay').hidden === true && /别的设备/.test(getEl('composer-hint').textContent),
+    getEl('composer-hint').textContent);
+
+  // ---- 快照：先「离开页面时补推一次」，再「从服务端恢复」
+  //
+  // 这一段**不 await**：假 fetch 是同步记账的（push 在调用那一刻就记下了），
+  // 而节流窗口是 4 秒 —— 等下去的话可能撞上一个定时器推的第二次，计数就不确定了。
+  authCalls.length = 0;
+  for (const h of windowHandlers.filter((x) => x.type === 'pagehide')) h.fn();
+  check('离开页面时补推一次（最后一点改动不会丢）', snapshotPuts().length === 1, `${snapshotPuts().length} 次`);
+  check('推上去的是**整本笔记本**', lastPut()?.body?.snapshot?.sessions?.length === 2,
+    JSON.stringify(lastPut()?.body?.snapshot?.sessions?.length));
+  check('顺带报了是哪台设备', typeof lastPut()?.body?.device === 'string' && lastPut().body.device.length > 0);
+
+  // 另一台设备推上来的那份（这里直接摆好，模拟「换设备」）
+  serverSnapshot = {
+    savedAt: '2026-10-07T12:00:00.000Z',
+    device: '另一台机器',
+    payload: {
+      version: 2,
+      activeId: 'srv_01',
+      sessions: [{ id: 'srv_01', title: '服务端那份', messages: [] }],
+    },
+  };
+  const beforeRestore = titlesIn().join(',');
+  dispatch(getEl('account-self'), 'click');
+  clickMenu('restore');
+  await settle();
+  check('恢复之前要确认：面板里写着两边各有多少会话',
+    getEl('auth-overlay').hidden === false && /1 个会话/.test(getEl('auth-body').textContent) && /覆盖/.test(getEl('auth-body').textContent),
+    getEl('auth-body').textContent);
+  check('**还没有真的动本机**（要先点确认）', titlesIn().join(',') === beforeRestore, titlesIn().join(','));
+  dispatch(getEl('auth-submit'), 'click');
+  await settle();
+  await settle();
+  check('确认之后：本机这个账号的会话变成服务端那份',
+    titlesIn().join(',') === '服务端那份', titlesIn().join(','));
+  check('恢复有反馈，说清恢复了几个',
+    /从服务端恢复 1 个会话/.test(getEl('composer-hint').textContent), getEl('composer-hint').textContent);
+
+  // 服务端还没有快照时，不能摆一个空面板让人以为能恢复
+  const keepSnapshot = serverSnapshot;
+  serverSnapshot = null;
+  dispatch(getEl('account-self'), 'click');
+  clickMenu('restore');
+  await settle();
+  check('服务端还没有快照时：不去开一个空面板，直接说清楚',
+    getEl('auth-overlay').hidden === true && /还没有这个账号的快照/.test(getEl('composer-hint').textContent),
+    getEl('composer-hint').textContent);
+  serverSnapshot = keepSnapshot;
+
+  // ---- 票过期（401）：界面回到未登录，但**数据一条不丢**
+  const notebookBefore = storage.get(ACCOUNT_KEY);
+  const titlesBefore = titlesIn().join(',');
+  authFail = { status: 401, error: '需要先登录', code: 'unauthorized' };
+  dispatch(getEl('account-self'), 'click');
+  clickMenu('restore');
+  await settle();
+  check('任何一条路回 401：界面切回未登录（不装作还登录着）',
+    getEl('account-signin').hidden === false && getEl('account-self').hidden === true);
+  check('并且把原因摆出来（不是悄悄退掉）',
+    getEl('account-note').hidden === false && /过期/.test(getEl('account-note').textContent),
+    getEl('account-note').textContent);
+  check('正看着的笔记本留在原地（过期不等于数据没了）',
+    titlesIn().join(',') === titlesBefore, titlesIn().join(','));
+  check('账号那本在浏览器里一个字节都没动', storage.get(ACCOUNT_KEY) === notebookBefore);
+
+  // 再重画一遍看：handleAuthLost 只重画账号那一行，列表要等下一次重画才露出来 ——
+  // 这一条不是凑数：变异「401 之后顺手把笔记本也切走」只有重画之后才看得见。
+  getEl('session-search').value = '';
+  dispatch(getEl('session-search'), 'input');
+  check('过期之后重画一遍：看到的仍然是账号那本（没有悄悄换成本地那本）',
+    titlesIn().join(',') === titlesBefore, titlesIn().join(','));
+  authFail = null;
+
+  // ---- CSS 契约：替身不做布局，位置和层级只能从样式表上守
+  const css = readFileSync(path.resolve(PUBLIC, 'styles.css'), 'utf8');
+  const ruleOf = (selector) => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return css.match(new RegExp(`^${escaped}\\s*\\{[\\s\\S]*?\\n\\}`, 'm'))?.[0] ?? '';
+  };
+  const decl = (rule, prop) => {
+    const found = [...String(rule).matchAll(new RegExp(`(?:^|[;{\\s])${prop}\\s*:\\s*([^;]+);`, 'g'))];
+    return found.length ? found[found.length - 1][1].trim() : '';
+  };
+  check('登录面板是覆盖层（fixed + 盖满整屏）',
+    decl(ruleOf('.auth-overlay'), 'position') === 'fixed' && decl(ruleOf('.auth-overlay'), 'inset') === '0',
+    `${decl(ruleOf('.auth-overlay'), 'position')} / ${decl(ruleOf('.auth-overlay'), 'inset')}`);
+  check('它盖在会话菜单和吸顶报头上面',
+    Number(decl(ruleOf('.auth-overlay'), 'z-index')) > 6, decl(ruleOf('.auth-overlay'), 'z-index'));
+  check('卡片窄屏也不会顶出屏幕（有最大宽度 + 能滚）',
+    decl(ruleOf('.auth-card'), 'width').includes('min(') && decl(ruleOf('.auth-card'), 'overflow-y') === 'auto',
+    `${decl(ruleOf('.auth-card'), 'width')} / ${decl(ruleOf('.auth-card'), 'overflow-y')}`);
+  check('头像是个圆，底色走 --avatar-bg（JS 只写这一个变量）',
+    decl(ruleOf('.avatar'), 'border-radius') === '50%' && decl(ruleOf('.avatar'), 'background').includes('--avatar-bg'),
+    decl(ruleOf('.avatar'), 'background'));
+  check('emoji 头像不铺深底色（emoji 自带颜色，垫一层反而脏）',
+    /\.avatar\[data-kind="emoji"\]\s*\{[^}]*background:\s*var\(--wash\)/.test(css));
+  check('上传的图裁成正方形铺满（不会拉变形）',
+    decl(ruleOf('.avatar-img'), 'object-fit') === 'cover', decl(ruleOf('.avatar-img'), 'object-fit'));
 }
 
 console.log(`\n${'─'.repeat(52)}`);

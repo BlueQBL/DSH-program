@@ -222,6 +222,53 @@
           </div>
 
           <!--
+            账号（**可选**，参考 ChatGPT 把账号放在侧栏最底下）。
+
+            不登录也照样能用 —— 那时候这里就是一个「登录 / 注册」入口，
+            笔记本存在这个浏览器里；登录之后这里换成头像 + 名字，点开是一个小菜单
+            （换头像 / 改密码 / 从服务端恢复 / 退出登录）。
+
+            为什么放在栏底而不是报头：报头那一行的高度是被 `--masthead-h` 管着的
+            （滚动时收窄、备用入口进出都要它保持恒定），往里再塞一个会变宽变窄的头像
+            是拿那条已经调好的规矩去冒险。侧栏底下这一块本来就是「放零碎东西」的地方。
+            代价写在 README 里：整栏收起来时，账号入口也跟着看不见（点报头那个 [▤] 就回来了）。
+          -->
+          <div class="account-row" id="account-row">
+            <button type="button" class="ghost-button account-signin" id="account-signin">登录 / 注册</button>
+
+            <button
+              type="button"
+              class="account-self"
+              id="account-self"
+              hidden
+              aria-haspopup="menu"
+              aria-expanded="false"
+              title="账号（换头像 / 改密码 / 退出登录）"
+            >
+              <span class="avatar" id="account-avatar">
+                <img class="avatar-img" alt="" hidden />
+                <span class="avatar-text" id="account-avatar-text"></span>
+              </span>
+              <span class="account-name" id="account-name"></span>
+            </button>
+
+            <!-- 菜单是 fixed 定位，跟会话行那个「⋯」菜单同一套（列表是 overflow-y: auto，absolute 会被裁掉） -->
+            <span class="session-menu account-menu" id="account-menu" role="menu" hidden>
+              <button type="button" class="icon-button session-menu-item" data-action="avatar" role="menuitem" title="换一个头像（emoji / 配色 / 传一张图）">换头像…</button>
+              <button type="button" class="icon-button session-menu-item" data-action="password" role="menuitem" title="改密码（改完别处开着的页面会失效）">改密码…</button>
+              <button type="button" class="icon-button session-menu-item" data-action="restore" role="menuitem" title="把服务端存的那份快照拉回来（会覆盖这个账号在本机的会话）">从服务端恢复…</button>
+              <span class="account-snapshot" id="account-snapshot-note"></span>
+              <button type="button" class="icon-button session-menu-item danger" data-action="logout" role="menuitem" title="退出登录（本地模式那本笔记本一个字节都不动）">退出登录</button>
+            </span>
+          </div>
+
+          <!--
+            账号出问题时的提示条（账号文件坏了 / 登录过期）。
+            平时藏着 —— 只有真有事才占地方。
+          -->
+          <p class="account-note" id="account-note" hidden></p>
+
+          <!--
             会话栏右边缘的拖拽手柄：左右拖 = 改这一栏的宽度（写 --rail-w 一个变量，
             报头和正文两处栅格都用它，所以不会错位）。
             它钉在会话栏里、从报头**下面**开始 —— 报头那一行左格的右端已经钉着
@@ -646,6 +693,108 @@
         </div>
       </li>
     </template>
+
+    <!--
+      登录 / 注册 / 改密码 / 从服务端恢复 —— 同一个卡片，按「模式」换字段。
+
+      为什么合成一个卡片而不是四个：这四种情况要填的东西高度重合（名字、密码、再输一遍），
+      拆成四个就会有四套「校验文案放哪儿、回车提交、Esc 关掉」要各自写一遍，然后慢慢长歪。
+      现在的规矩只有一条：字段按 mode 显示/隐藏，提交按钮的字跟着 mode 走。
+
+      它是覆盖层（`position: fixed` + 半透明底），点背景或按 Esc 关掉。
+      刻意**不做**「未登录就锁住页面」：这个助手的定位是本地优先 —— 不登录照样能聊。
+    -->
+    <div class="auth-overlay" id="auth-overlay" hidden>
+      <div class="auth-card" role="dialog" aria-modal="true" aria-labelledby="auth-panel-title">
+        <div class="auth-head">
+          <span class="auth-panel-title" id="auth-panel-title">登录</span>
+          <button type="button" class="prompt-close" id="auth-close" title="关掉（什么都不改）" aria-label="关闭">×</button>
+        </div>
+
+        <div class="auth-tabs" id="auth-tabs" role="tablist">
+          <button type="button" class="auth-tab" id="auth-tab-login" role="tab" aria-selected="true" data-mode="login">登录</button>
+          <button type="button" class="auth-tab" id="auth-tab-register" role="tab" aria-selected="false" data-mode="register">注册</button>
+        </div>
+
+        <p class="auth-body" id="auth-body" hidden></p>
+
+        <label class="auth-field" id="auth-name-field">
+          <span class="auth-label" id="auth-name-label">名字</span>
+          <input type="text" id="auth-name" autocomplete="username" spellcheck="false" />
+        </label>
+
+        <label class="auth-field" id="auth-password-field">
+          <span class="auth-label" id="auth-password-label">密码</span>
+          <input type="password" id="auth-password" autocomplete="current-password" />
+        </label>
+
+        <!-- 只在「改密码」这一档出现：新密码 -->
+        <label class="auth-field" id="auth-new-field" hidden>
+          <span class="auth-label" id="auth-new-label">新密码</span>
+          <input type="password" id="auth-new" autocomplete="new-password" />
+        </label>
+
+        <label class="auth-field" id="auth-confirm-field" hidden>
+          <span class="auth-label" id="auth-confirm-label">再输一遍</span>
+          <input type="password" id="auth-confirm" autocomplete="new-password" />
+        </label>
+
+        <p class="auth-ok" id="auth-ok" hidden></p>
+        <p class="auth-error" id="auth-error" hidden></p>
+
+        <label class="auth-remember" id="auth-remember-row">
+          <input type="checkbox" id="auth-remember" checked />
+          <span>记住我（这台机器上 30 天不用再登）</span>
+        </label>
+        <p class="auth-hint" id="auth-hint"></p>
+
+        <div class="auth-actions">
+          <button type="button" class="solid-button" id="auth-submit">登录</button>
+          <button type="button" class="ghost-button" id="auth-cancel">取消</button>
+        </div>
+
+        <p class="auth-note" id="auth-note">不登录也能用 —— 不登录时这本笔记本就存在这个浏览器里，一个字节都不会少。</p>
+      </div>
+    </div>
+
+    <!--
+      换头像：emoji 网格 + 配色 + 传一张图。
+      三样都是可选的 —— 什么都不选就是「首字母 + 按名字算的颜色」，注册完立刻就能看。
+      预览用的是**真头像渲染**（和侧栏那一颗同一个函数），所见即所得。
+    -->
+    <div class="auth-overlay" id="avatar-overlay" hidden>
+      <div class="auth-card" role="dialog" aria-modal="true" aria-labelledby="avatar-title">
+        <div class="auth-head">
+          <span class="auth-panel-title" id="avatar-title">换头像</span>
+          <button type="button" class="prompt-close" id="avatar-close" title="关掉（不改动头像）" aria-label="关闭">×</button>
+        </div>
+
+        <div class="avatar-preview">
+          <span class="avatar avatar-large" id="avatar-preview">
+            <img class="avatar-img" alt="" hidden />
+            <span class="avatar-text" id="avatar-preview-text"></span>
+          </span>
+          <span class="avatar-preview-name" id="avatar-preview-name"></span>
+        </div>
+
+        <div class="avatar-grid" id="avatar-grid" role="group" aria-label="选一个 emoji 头像"></div>
+
+        <div class="avatar-colors" id="avatar-colors" role="group" aria-label="选一个底色（首字母头像用）"></div>
+
+        <div class="avatar-upload-row">
+          <input type="file" id="avatar-file" accept="image/png,image/jpeg,image/webp" hidden />
+          <button type="button" class="ghost-button" id="avatar-upload">上传一张图…</button>
+          <span class="avatar-upload-note">会压到 128px（png / jpg / webp，单张几十 KB）</span>
+        </div>
+
+        <p class="auth-error" id="avatar-error" hidden></p>
+
+        <div class="auth-actions">
+          <button type="button" class="solid-button" id="avatar-save">保存</button>
+          <button type="button" class="ghost-button" id="avatar-cancel">取消</button>
+        </div>
+      </div>
+    </div>
 
     <script type="module" src="app.js"></script>
   </body>

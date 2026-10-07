@@ -1186,4 +1186,88 @@ runner.run('「已归档」在 HTML 里默认就写着展开（JS 还没跑起�
   src.replace(/(id="archived-toggle"\s*\n\s*aria-expanded=")false/, '$1true'),
 );
 
+// ---------------------------------------------------------------- 账号
+
+runner.run('登录之后不换笔记本（两个人共用一个键，看到的是别人的会话）', APP, (src) =>
+  src.replace('  if (user.id !== previousScope) store.useScope(user.id);\n', ''),
+);
+
+runner.run('第一次登录不带入本地模式那本（用户以为会话全没了）', APP, (src) =>
+  src.replace(
+    '  const brought = user.id !== previousScope && isBlankNotebook() ? bringLocalNotebookIn() : 0;\n',
+    '  const brought = 0;\n',
+  ),
+);
+
+runner.run('退出登录不回到本地模式那本（本机那本像被吞了）', APP, (src) =>
+  src.replace('  if (authState.user) store.useScope(LOCAL_SCOPE);\n', ''),
+);
+
+runner.run('退出之前不推快照（刚聊完的那几句没进服务端备份）', APP, (src) =>
+  src.replace('  await pushSnapshot().catch(() => {});\n', ''),
+);
+
+runner.run('从服务端恢复点了就覆盖（不给确认，也不说会丢什么）', APP, (src) =>
+  src.replace(
+    "  openAuthPanel('restore', {\n    body: restoreConfirmText({ count: meta.count, savedAt: meta.savedAt, localCount: store.sessions.length }),\n  });",
+    '  await restoreFromSnapshot();',
+  ),
+);
+
+runner.run('401 之后界面装作还登录着（什么都存不上，用户还不知道）', APP, (src) =>
+  src.replace("createAuthApi({ onUnauthorized: () => handleAuthLost() })", 'createAuthApi()'),
+);
+
+runner.run('401 之后顺手把笔记本也切走（看起来像数据丢了）', APP, (src) =>
+  src.replace(
+    "  authState.notice = '登录已过期（改过密码或到了 30 天）。重新登录就能继续 —— 会话一条都没丢。';",
+    "  authState.notice = '登录已过期（改过密码或到了 30 天）。重新登录就能继续 —— 会话一条都没丢。';\n  store.useScope(LOCAL_SCOPE);",
+  ),
+);
+
+runner.run('点一个 emoji 头像不改预览（点了没反应，看不见自己选了什么）', APP, (src) =>
+  src.replace(
+    "      avatarDraft = { kind: 'emoji', emoji };\n      paintAvatarPreview();",
+    "      avatarDraft = { kind: 'emoji', emoji };",
+  ),
+);
+
+runner.run('上传的图处理不了时不给话（用户只看到「什么也没发生」）', APP, (src) =>
+  src.replace('    showAvatarError(uploadErrorMessage(err));', '    void err;'),
+);
+
+runner.run('表单自己那一关不拦（明明填错了还白跑一趟服务端）', APP, (src) =>
+  src.replace('  if (problem) {\n    showAuthError(problem);\n    return;\n  }\n', ''),
+);
+
+runner.run('关掉面板不清密码（下一个用这台机器的人直接看到上一个人的密码）', APP, (src) =>
+  src.replace(
+    "  els.authPassword.value = '';\n  els.authNew.value = '';\n  els.authConfirm.value = '';\n",
+    '',
+  ),
+);
+
+runner.run('服务端拒绝时不给原因（面板里什么都不说）', APP, (src) =>
+  src.replace("    showAuthError(err?.message || '没成功，稍后再试');", '    void err;'),
+);
+
+runner.run('服务端没快照时也开一个空面板（点了不知道能恢复什么）', APP, (src) =>
+  src.replace('  if (!meta?.count) {\n', '  if (false) {\n'),
+);
+
+runner.run('登录提示里把「本地那本已经带进来」这件事丢掉', APP, (src) =>
+  src.replace("  if (brought) parts.push(`已把本地模式的 ${brought} 个会话带进这个账号（本地那份还在）`);\n", ''),
+);
+
+runner.run('账号菜单里不显示快照状态（用户不知道服务端到底有没有备份）', APP, (src) =>
+  src.replace("  els.accountSnapshotNote.textContent = user ? snapshotNote(authState.snapshot) : '';\n", ''),
+);
+
+runner.run('Esc 关不掉登录面板', APP, (src) =>
+  src.replace(
+    '  if (!els.authOverlay.hidden) {\n    closeAuthPanel();\n    return;\n  }\n',
+    '',
+  ),
+);
+
 runner.finish();

@@ -383,49 +383,77 @@ export function groupSessions(sessions) {
   };
 }
 
-export function createStore() {
-  const restored = safeParse(localStorage.getItem(STORAGE_KEY));
+/**
+ * 造一个 store。
+ *
+ * `scope` 决定**读哪一本笔记本**：`'local'`（默认，不登录时用的那本）读写老键
+ * `duitanlu.sessions.v2`；登录之后用账号 id 当 scope，读写 `duitanlu.sessions.v2::<id>`。
+ *
+ * 为什么用「一个键一份」而不是把几本笔记本塞进同一个键：登录 / 退出就是换一次 scope，
+ * 谁也不会串到谁的会话上去；而且**不登录时那条路一个字节都没变**（老键原样）。
+ * 换身份走 `useScope()`。
+ */
+export function createStore({ scope = 'local' } = {}) {
+  const keyFor = (name) => (name && name !== 'local' ? `${STORAGE_KEY}::${name}` : STORAGE_KEY);
+  let storageKey = keyFor(scope);
 
-  let sessions = Array.isArray(restored?.sessions)
-    ? restored.sessions.map(normalizeSession).filter(Boolean)
-    : [];
-
-  let migrated = false;
-  if (!sessions.length) {
-    const legacy = migrateLegacy();
-    if (legacy) {
-      sessions = [legacy];
-      migrated = true;
-      // 迁移完成就清掉旧键，避免下次又搬一遍
-      try {
-        localStorage.removeItem(LEGACY_KEY);
-        localStorage.removeItem(LEGACY_SESSION_KEY);
-      } catch {
-        /* 忽略 */
-      }
-    }
-  }
-
-  if (!sessions.length) sessions = [makeSession()];
-
-  let activeId = isSessionId(restored?.activeId) && sessions.some((s) => s.id === restored.activeId)
-    ? restored.activeId
-    : sessions[0].id;
-
+  let sessions = [];
+  let activeId = '';
   /** 最近用过的模型：新会话沿用它（角色不沿用，见 createSession） */
-  let lastUsedModel = sessions.find((s) => s.model)?.model ?? '';
-
-  // 上次是流式中途离开的（刷新 / 关页 / 断网）：标记成中断，保留已写出的文字
+  let lastUsedModel = '';
+  /** 上次是流式中途离开的（刷新 / 关页 / 断网）：标记成中断，保留已写出的文字 */
   let recoveredInterrupted = 0;
-  for (const session of sessions) {
-    for (const msg of session.messages) {
-      if (msg.status === 'streaming') {
-        msg.status = 'interrupted';
-        msg.finishedAt = msg.finishedAt || Date.now();
-        recoveredInterrupted += 1;
+  let migrated = false;
+
+  /**
+   * 把当前 storageKey 那一份读回内存。
+   * 创建时跑一次，登录 / 退出换身份时再跑一次 —— 所以这里的每个状态都必须是
+   * **可重入的**（先全部重置再读），否则换了个人还能看见上一个人的东西。
+   */
+  function restoreFromDisk() {
+    const restored = safeParse(localStorage.getItem(storageKey));
+
+    sessions = Array.isArray(restored?.sessions)
+      ? restored.sessions.map(normalizeSession).filter(Boolean)
+      : [];
+
+    migrated = false;
+    if (!sessions.length) {
+      const legacy = migrateLegacy();
+      if (legacy) {
+        sessions = [legacy];
+        migrated = true;
+        // 迁移完成就清掉旧键，避免下次又搬一遍
+        try {
+          localStorage.removeItem(LEGACY_KEY);
+          localStorage.removeItem(LEGACY_SESSION_KEY);
+        } catch {
+          /* 忽略 */
+        }
+      }
+    }
+
+    if (!sessions.length) sessions = [makeSession()];
+
+    activeId = isSessionId(restored?.activeId) && sessions.some((s) => s.id === restored.activeId)
+      ? restored.activeId
+      : sessions[0].id;
+
+    lastUsedModel = sessions.find((s) => s.model)?.model ?? '';
+
+    recoveredInterrupted = 0;
+    for (const session of sessions) {
+      for (const msg of session.messages) {
+        if (msg.status === 'streaming') {
+          msg.status = 'interrupted';
+          msg.finishedAt = msg.finishedAt || Date.now();
+          recoveredInterrupted += 1;
+        }
       }
     }
   }
+
+  restoreFromDisk();
 
   const listeners = new Set();
   const active = () => sessions.find((s) => s.id === activeId) ?? sessions[0];
@@ -461,7 +489,11 @@ export function createStore() {
     }
     lastWrite = Date.now();
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot()));
+      // **storageKey，不是 STORAGE_KEY**：登录之后写的是这个账号那一本。
+      // 这里写成常量的话，登录后每一次落盘都会拿账号的笔记本去覆盖本地模式那一本
+      //（两个人共用一个键，而且退出登录之后本地那本已经变成别人的了）——
+      // 这是 ui-tests 的「第一次登录：本地模式那本原样还在」那条断言抓出来的。
+      localStorage.setItem(storageKey, JSON.stringify(snapshot()));
     } catch (err) {
       // 配额满或隐私模式：不影响当前会话，只是不再落盘
       console.warn('[对谈录] 本地保存失败：', err);
@@ -556,6 +588,10 @@ export function createStore() {
     },
     get recoveredInterrupted() {
       return recoveredInterrupted;
+    },
+    /** 当前这本笔记本写在哪个键上（换身份、以及跨标签页同步按它过滤 storage 事件） */
+    get storageKey() {
+      return storageKey;
     },
     get migrated() {
       return migrated;
@@ -1141,6 +1177,22 @@ export function createStore() {
       sessions = [makeSession()];
       activeId = sessions[0].id;
       commit();
+    },
+
+    /**
+     * 换一本笔记本（登录 / 退出 / 换账号时用）。
+     *
+     * 三步：换键 → 重新读盘 → 写回并通知界面。
+     * 「写回」这一步不能省：新键本来根本不存在，不写一次的话刷新之后又会退回上一个人的数据。
+     * 返回是不是真的换了（同一个 scope 再来一次是空操作）。
+     */
+    useScope(next) {
+      const key = keyFor(next);
+      if (key === storageKey) return false;
+      storageKey = key;
+      restoreFromDisk();
+      commit();
+      return true;
     },
 
     /**

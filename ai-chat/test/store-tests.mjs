@@ -1496,6 +1496,54 @@ group('会话归档：不删、不显、能回来');
     `置顶在=${store.sessions.some((s) => s.id === pinned)} 归档在=${store.sessions.some((s) => s.id === archived)}`);
 }
 
+group('账号：一本笔记本一个键（登录 / 退出就是换一本）');
+
+{
+  // 这一组是**直接盯数据层**的。之前这里踩过一次：换本只换了「读」的键，
+  // 「写」还在写老键 —— 于是登录之后每一次落盘都拿账号那本去覆盖本地那本。
+  // 界面测试也抓到了它，但这种事该在最近的地方被钉住。
+  freshEnvironment();
+  const { createStore } = await loadStore();
+  const store = createStore();
+
+  const localId = store.session.id;
+  store.pushUser('本地模式的一条');
+  const localRaw = localStorage.getItem('duitanlu.sessions.v2');
+
+  check('默认这本写在老键上（不登录时一个字节都没变）',
+    store.storageKey === 'duitanlu.sessions.v2', store.storageKey);
+
+  check('换到账号那本：返回 true', store.useScope('u_test') === true);
+  check('键跟着换', store.storageKey === 'duitanlu.sessions.v2::u_test', store.storageKey);
+  check('账号那本是空的（只有一条还没说过话的新会话）',
+    store.sessions.length === 1 && store.sessions[0].messages.length === 0);
+  check('换完**立刻把新键写出来**（不然刷新之后又退回上一个人的数据）',
+    localStorage.getItem('duitanlu.sessions.v2::u_test') !== null);
+
+  store.pushUser('账号里的一条');
+  const accountRaw = localStorage.getItem('duitanlu.sessions.v2::u_test');
+  check('在账号那本里写东西，**不会**碰到本地那本',
+    localStorage.getItem('duitanlu.sessions.v2') === localRaw);
+
+  store.useScope('local');
+  check('换回本地：读到的是原来那条', store.sessions.some((s) => s.id === localId));
+  // 注意别拿**整段字符串**比：快照里那个 `updatedAt` 是「这次写盘的时刻」，
+  // 换回来时顺手写一次就会变。要比的是**内容**（会话和当前会话）。
+  const localAfter = JSON.parse(localStorage.getItem('duitanlu.sessions.v2'));
+  check('换回本地之后，本地那本里的会话还是原来那些（换本不会弄丢东西）',
+    localAfter.sessions.some((s) => s.id === localId) && localAfter.activeId === localId,
+    JSON.stringify(localAfter.sessions.map((s) => s.id)));
+  check('账号那本也原样留着（下次登录还在）',
+    localStorage.getItem('duitanlu.sessions.v2::u_test') === accountRaw);
+
+  check('换到同一本上什么都不做（返回 false）', store.useScope('local') === false);
+  check('scope 是空值时当成本地那本', (store.useScope(''), store.storageKey === 'duitanlu.sessions.v2'));
+
+  check('换到一本从没有过的本：activeId 是它自己的新会话，不会带上一个人的',
+    (store.useScope('u_other'), store.sessionId === store.sessions[0].id && store.sessions.length === 1),
+    store.sessionId);
+}
+
 group('会话分支 · 纯函数：标题、复制、图片');
 
 {
