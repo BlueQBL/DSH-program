@@ -53,13 +53,20 @@ import {
   verifyToken,
 } from '../lib/auth.mjs';
 import {
+  RECENT_ACCOUNTS_KEY,
+  RECENT_ACCOUNTS_MAX,
   authFormError,
   avatarFromUpload,
+  matchRecentAccounts,
   paintAvatar,
+  readRecentAccounts,
+  rememberAccount,
+  renameRememberedAccount,
   restoreConfirmText,
   shouldPushSnapshot,
   snapshotNote,
   uploadErrorMessage,
+  writeRecentAccounts,
 } from '../public/lib/auth.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -445,6 +452,45 @@ group('账号文件：注册、登录、改密码、坏文件要报错');
   check('脏头像回落到首字母（不是拒绝整次请求）', bad.ok === true && bad.user.avatar.kind === 'initial');
   check('给不存在的用户换头像 → no_user', (await reopened.setAvatar('u_nope', { kind: 'emoji', emoji: '🐳' })).code === 'no_user');
 
+  // ---- 改名字
+  const tokenBefore = reopened.byId(created.user.id).tokenVersion;
+  const passwordBefore = JSON.stringify(reopened.byId(created.user.id).password);
+
+  check('名字不合法 → bad_name', (await reopened.rename(created.user.id, 'a b')).code === 'bad_name');
+  check('名字太短 → bad_name', (await reopened.rename(created.user.id, 'x')).code === 'bad_name');
+  check('换成别人已经用了的名字 → name_taken',
+    (await reopened.rename(created.user.id, 'ALICE')).code === 'name_taken',
+    JSON.stringify(await reopened.rename(created.user.id, 'ALICE')));
+  check('给不存在的用户改名 → no_user', (await reopened.rename('u_nope', '随便')).code === 'no_user');
+
+  const renamed = await reopened.rename(created.user.id, '张三');
+  check('改名成功', renamed.ok === true && renamed.user.name === '张三', JSON.stringify(renamed).slice(0, 80));
+  check('判重用的那个键也跟着改了（不改的话旧名字还占着、新名字谁都能抢）',
+    reopened.byId(created.user.id).nameKey === '张三', reopened.byId(created.user.id).nameKey);
+  check('**改名不动 tokenVersion**（名字不是凭证，别处不该被踢下线）',
+    reopened.byId(created.user.id).tokenVersion === tokenBefore, String(reopened.byId(created.user.id).tokenVersion));
+  check('改名不动密码记录', JSON.stringify(reopened.byId(created.user.id).password) === passwordBefore);
+  check('新名字能登录（登录用的是名字 + 密码）',
+    (await reopened.verify({ name: '张三', password: 'brand-new-pass-1' })).ok === true);
+  check('旧名字登不上了', (await reopened.verify({ name: '小林', password: 'brand-new-pass-1' })).ok === false);
+  check('旧名字从此可以让给别人（已经不占着了）', reopened.byName('小林') === null);
+
+  // 这一条是最容易写错的地方：查重必须排除自己，否则「Zhangsan → ZHANGSAN」会被自己拦住
+  check('先改成拉丁名字（为了能测大小写）', (await reopened.rename(created.user.id, 'Zhangsan')).ok === true);
+  const recase = await reopened.rename(created.user.id, 'ZHANGSAN');
+  check('只改大小写（还是自己）→ 当成功，不报「已有人用」',
+    recase.ok === true && recase.unchanged !== true, JSON.stringify(recase).slice(0, 80));
+  check('而且名字**照你要的那个写法存**（不能回一句「没变」就把人打发了）',
+    reopened.byId(created.user.id).name === 'ZHANGSAN', reopened.byId(created.user.id).name);
+  check('判重键仍然是不分大小写的那个', reopened.byId(created.user.id).nameKey === 'zhangsan',
+    reopened.byId(created.user.id).nameKey);
+  check('重复提交同一个名字也不报错',
+    (await reopened.rename(created.user.id, 'ZHANGSAN')).unchanged === true);
+
+  const reopenedAgain = createUserStore({ file });
+  await reopenedAgain.init();
+  check('重启之后新名字还在', reopenedAgain.byName('ZHANGSAN')?.name === 'ZHANGSAN');
+
   rmSync(dir, { recursive: true, force: true });
 }
 
@@ -525,6 +571,14 @@ group('登录框：提交之前自己先看一眼');
     authFormError({ mode: 'password', password: 'longenough', newPassword: 'longenough', confirm: 'longenough' }).includes('一样'));
   check('改密码：都对了就放行',
     authFormError({ mode: 'password', password: 'old-one-1', newPassword: 'longenough', confirm: 'longenough' }) === '');
+
+  // 改名字：只要名字合法就放行，**不要密码**（它只是个显示用的名字）
+  check('改名：空的要说', authFormError({ mode: 'name', name: '' }).includes('名字'));
+  check('改名：太短要说', authFormError({ mode: 'name', name: 'a' }).includes('2 个字'));
+  check('改名：不合法字符要说', authFormError({ mode: 'name', name: 'a b' }).includes('空格'));
+  check('改名：合法就放行', authFormError({ mode: 'name', name: '张三' }) === '');
+  check('改名不需要密码（没填密码也算通过）',
+    authFormError({ mode: 'name', name: '张三', password: '' }) === '');
 }
 
 group('笔记本快照：什么时候推、怎么说、恢复前怎么问');
@@ -551,6 +605,87 @@ group('笔记本快照：什么时候推、怎么说、恢复前怎么问');
   const confirm = restoreConfirmText({ count: 3, savedAt: '2026-10-07T10:00:00.000Z', localCount: 5 });
   check('恢复前说清两边各有多少', confirm.includes('3 个会话') && confirm.includes('5 个会话'), confirm);
   check('并且明说「覆盖」以及会丢什么', confirm.includes('覆盖') && confirm.includes('没了'), confirm);
+}
+
+group('最近登录过的账号：去重、提前、封顶、按前缀匹配');
+
+{
+  const fakeStorage = () => ({
+    map: new Map(),
+    getItem(key) {
+      return this.map.has(key) ? this.map.get(key) : null;
+    },
+    setItem(key, value) {
+      this.map.set(key, String(value));
+    },
+  });
+
+  check('一开头是空的', readRecentAccounts(fakeStorage()).length === 0);
+  check('坏数据当空、不抛（手改过的 localStorage 不该把登录页搞崩）',
+    readRecentAccounts({ getItem: () => '{不是 JSON' }).length === 0
+      && readRecentAccounts({ getItem: () => '"一个字符串"' }).length === 0);
+
+  let list = [];
+  list = rememberAccount(list, '小林');
+  check('记一个就进去了', list.length === 1 && list[0].name === '小林');
+  list = rememberAccount(list, 'alice');
+  check('最近用过的排最前面', list.map((i) => i.name).join(',') === 'alice,小林', list.map((i) => i.name).join(','));
+  list = rememberAccount(list, '小林');
+  check('再登录一次同一个账号：**提到最前**，不是多出一条',
+    list.map((i) => i.name).join(',') === '小林,alice' && list.length === 2, list.map((i) => i.name).join(','));
+  list = rememberAccount(list, 'ALICE');
+  check('判重不看大小写（和账号本身一个规矩）', list.length === 2, String(list.length));
+  check('存的是你最后一次写的那个写法', list[0].name === 'ALICE', list[0].name);
+  check('空名字不记', rememberAccount(list, '   ').length === 2);
+  check('名字两边的空格会去掉', rememberAccount([], '  小林  ')[0].name === '小林');
+
+  let many = [];
+  for (const name of ['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7', 'a8']) many = rememberAccount(many, name);
+  check(`最多记 ${RECENT_ACCOUNTS_MAX} 个（列表不能无限长）`, many.length === RECENT_ACCOUNTS_MAX, String(many.length));
+  check('砍掉的是最旧的那些', !many.some((i) => i.name === 'a1') && many[0].name === 'a8',
+    many.map((i) => i.name).join(','));
+
+  check('空输入 = 全都列出来（点一下名字格看到的就是「最近的」）',
+    matchRecentAccounts(many, '').length === RECENT_ACCOUNTS_MAX);
+  check('按前缀匹配',
+    matchRecentAccounts([{ name: '小林' }, { name: '小明' }, { name: 'alice' }], '小').map((i) => i.name).join(',') === '小林,小明',
+    matchRecentAccounts([{ name: '小林' }, { name: '小明' }, { name: 'alice' }], '小').map((i) => i.name).join(','));
+  check('匹配也不分大小写', matchRecentAccounts([{ name: 'Alice' }], 'aL').length === 1);
+  check('**是前缀，不是「包含」**（打中间的字不该冒出来）',
+    matchRecentAccounts([{ name: '小林同学' }], '林').length === 0);
+  check('一个都匹配不上就是空（不是「全都列出来」）', matchRecentAccounts([{ name: '小林' }], 'zz').length === 0);
+  check('本来就没有账号时是空', matchRecentAccounts([], '').length === 0);
+
+  const renamed = renameRememberedAccount([{ name: '小林' }, { name: 'alice' }], '小林', '张三');
+  check('换名字之后列表里那条也跟着换',
+    renamed.some((i) => i.name === '张三') && !renamed.some((i) => i.name === '小林'),
+    renamed.map((i) => i.name).join(','));
+  check('换完排到最前面（等于刚用过）', renamed[0].name === '张三');
+  check('换成列表里已经有的名字时不会出现两条',
+    renameRememberedAccount([{ name: 'a1' }, { name: 'a2' }], 'a1', 'a2').length === 1);
+
+  const storage = fakeStorage();
+  writeRecentAccounts([{ name: '小林', at: 1 }], storage);
+  check('写得进、读得回', readRecentAccounts(storage)[0].name === '小林');
+  check('**只存名字，不存密码**', !/password|passwd|密码/.test(storage.getItem(RECENT_ACCOUNTS_KEY)),
+    storage.getItem(RECENT_ACCOUNTS_KEY));
+  check('读到一份超长的旧数据时只取前几个',
+    (storage.setItem(RECENT_ACCOUNTS_KEY, JSON.stringify(Array.from({ length: 20 }, (_v, i) => ({ name: `x${i}` })))),
+    readRecentAccounts(storage).length === RECENT_ACCOUNTS_MAX) === true);
+  check('更老的格式（一串名字字符串）也认',
+    (storage.setItem(RECENT_ACCOUNTS_KEY, JSON.stringify(['小林'])), readRecentAccounts(storage)[0].name === '小林') === true);
+  check('名字前后带空白的脏数据会被清掉',
+    (storage.setItem(RECENT_ACCOUNTS_KEY, JSON.stringify([{ name: '  小林  ' }, { name: '' }, {}, ''])),
+    readRecentAccounts(storage).length === 1 && readRecentAccounts(storage)[0].name === '小林') === true);
+  check('存不下（配额满 / 隐私模式）时不抛异常',
+    (() => {
+      try {
+        writeRecentAccounts([{ name: 'x' }], { setItem() { throw new Error('满了'); } });
+        return true;
+      } catch {
+        return false;
+      }
+    })());
 }
 
 group('头像：上传的图 → 头像对象');

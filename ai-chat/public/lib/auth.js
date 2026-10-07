@@ -8,7 +8,7 @@
 // 那个文件服务端也 import。这里只负责「先说一遍，让用户不用等服务端来回」——
 // 服务端仍然会再拦一次，而且以它为准。
 
-import { avatarView, normalizeAvatar, validateName, validatePassword } from './auth-rules.js';
+import { avatarView, nameKey, normalizeAvatar, validateName, validatePassword } from './auth-rules.js';
 
 /** 头像上传的压缩参数：128px 的小图，够清楚，又小到能塞进账号文件 */
 export const AVATAR_MAX_EDGE = 128;
@@ -57,6 +57,7 @@ export function createAuthApi({ fetchImpl = globalThis.fetch, onUnauthorized = n
       call('/api/auth/login', { method: 'POST', body: { name, password, remember } }),
     logout: () => call('/api/auth/logout', { method: 'POST' }),
     setAvatar: (avatar) => call('/api/auth/avatar', { method: 'POST', body: { avatar } }),
+    rename: (name) => call('/api/auth/name', { method: 'POST', body: { name } }),
     changePassword: ({ oldPassword, newPassword, remember }) =>
       call('/api/auth/password', { method: 'POST', body: { oldPassword, newPassword, remember } }),
     snapshotMeta: () => call('/api/sessions/snapshot?meta=1'),
@@ -64,6 +65,77 @@ export function createAuthApi({ fetchImpl = globalThis.fetch, onUnauthorized = n
     putSnapshot: (snapshot, device) =>
       call('/api/sessions/snapshot', { method: 'PUT', body: { snapshot, device } }),
   };
+}
+
+/**
+ * 「最近登录过的账号」。
+ *
+ * 存在浏览器里（`duitanlu.accounts.v1`），**只存名字和时间戳** —— 不存密码、不存头像图。
+ * 用途只有一个：登录时点一下，不用再打一遍名字。
+ * 列表里那个小头像色块是从名字算出来的（首字母），所以这里不需要多存任何东西。
+ *
+ * 四个函数都是纯的（列表进来、列表出去），读写在两个薄 wrapper 里 ——
+ * 「去重 / 提前 / 封顶 / 前缀匹配」正是最容易写歪的地方，纯函数才好被单测和变异盯住。
+ */
+export const RECENT_ACCOUNTS_KEY = 'duitanlu.accounts.v1';
+export const RECENT_ACCOUNTS_MAX = 6;
+
+/** 读。脏数据（手改过的、旧版本留下的、根本不是数组的）一律当空，绝不让它把登录页炸掉 */
+export function readRecentAccounts(storage = globalThis.localStorage) {
+  try {
+    const raw = JSON.parse(storage?.getItem(RECENT_ACCOUNTS_KEY) ?? '[]');
+    if (!Array.isArray(raw)) return [];
+    return raw
+      // 早期只存名字字符串的那种也认（兼容一行的事，免得改过格式之后老数据变空）
+      .map((item) => (typeof item === 'string' ? { name: item, at: 0 } : item))
+      .filter((item) => item && typeof item.name === 'string' && item.name.trim())
+      .map((item) => ({ name: item.name.trim().slice(0, 40), at: Number(item.at) || 0 }))
+      .slice(0, RECENT_ACCOUNTS_MAX);
+  } catch {
+    return [];
+  }
+}
+
+export function writeRecentAccounts(list, storage = globalThis.localStorage) {
+  const clean = Array.isArray(list) ? list.slice(0, RECENT_ACCOUNTS_MAX) : [];
+  try {
+    storage?.setItem(RECENT_ACCOUNTS_KEY, JSON.stringify(clean));
+  } catch {
+    /* 存不下（配额满 / 隐私模式）不影响登录，只是下次要重新打一遍名字 */
+  }
+  return clean;
+}
+
+/**
+ * 记一个账号：已经在列表里就**提到最前面**（判重不分大小写，跟账号本身一个规矩），
+ * 超过上限就砍掉最旧的那条。
+ */
+export function rememberAccount(list, name, { at = Date.now(), max = RECENT_ACCOUNTS_MAX } = {}) {
+  const rows = Array.isArray(list) ? list : [];
+  const clean = String(name ?? '').trim();
+  if (!clean) return rows.slice(0, max);
+  const key = nameKey(clean);
+  return [{ name: clean, at }, ...rows.filter((item) => nameKey(item.name) !== key)].slice(0, max);
+}
+
+/** 换了名字之后，列表里那一条也要跟着换 —— 不然下次登录还摆着旧名字，点了还登不上去 */
+export function renameRememberedAccount(list, oldName, newName, { at = Date.now(), max = RECENT_ACCOUNTS_MAX } = {}) {
+  const rows = Array.isArray(list) ? list : [];
+  const oldKey = nameKey(oldName);
+  const rest = rows.filter((item) => nameKey(item.name) !== oldKey);
+  const clean = String(newName ?? '').trim();
+  return clean ? rememberAccount(rest, clean, { at, max }) : rest.slice(0, max);
+}
+
+/**
+ * 输入框里那几个字能匹配谁：**按前缀**（不分大小写）。
+ * 空输入 = 全都列出来（点一下名字格看到的就是「最近登录过的」）。
+ */
+export function matchRecentAccounts(list, query, { limit = RECENT_ACCOUNTS_MAX } = {}) {
+  const rows = Array.isArray(list) ? list : [];
+  const needle = nameKey(query);
+  const matched = needle ? rows.filter((item) => nameKey(item.name).startsWith(needle)) : rows;
+  return matched.slice(0, limit);
 }
 
 /**
@@ -100,11 +172,16 @@ export function paintAvatar(root, user) {
  * 提交之前先自己看一眼。
  * 返回一句给人看的话，空串表示「可以提交」。
  *
- * mode: 'login' | 'register' | 'password'
+ * mode: 'login' | 'register' | 'password' | 'name'
  * 登录**不查长度**：规则可能变过，老账号的密码长短不该在登录框上被拦下来
  *（那样人只会看到一个自己的密码明明是对的错误）。
  */
 export function authFormError({ mode, name, password, confirm = '', newPassword = '' }) {
+  if (mode === 'name') {
+    // 改名字只查名字：它是个显示用的名字，改它不要密码
+    const checked = validateName(name);
+    return checked.ok ? '' : checked.error;
+  }
   if (mode === 'password') {
     if (!password) return '请填原密码';
     const checked = validatePassword(newPassword, { name });

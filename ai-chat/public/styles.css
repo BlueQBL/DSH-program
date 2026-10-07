@@ -924,6 +924,52 @@ body[data-resizing="true"] {
   color: color-mix(in srgb, var(--ink) 48%, transparent);
 }
 
+/*
+ * 「最近登录过的账号」那一列。
+ *
+ * 它是**在文档流里**的（不是浮在输入框上面的绝对定位层）：卡片本来就窄、内容也少，
+ * 浮层要处理「压住下面的字段」「贴边被裁」这类问题，而这里多出来的几十像素
+ * 卡片自己撑得下（卡片有 max-height + overflow-y）。少一件事就少一类错位。
+ */
+.auth-accounts {
+  list-style: none;
+  margin: -4px 0 10px;
+  padding: 4px;
+  max-height: 172px;
+  overflow-y: auto;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--paper);
+}
+
+.auth-account {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  color: var(--ink);
+  background: none;
+  border: 0;
+  border-radius: 2px;
+  cursor: pointer;
+}
+.auth-account:hover,
+.auth-account[data-active="true"] {
+  background: var(--wash);
+}
+
+.auth-account-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---- 换头像 ---- */
 
 .avatar-preview {

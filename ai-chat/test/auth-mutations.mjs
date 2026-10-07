@@ -187,4 +187,100 @@ runner.run('快照没存上也显示成存好了', CLIENT, (src) =>
   src.replace("  if (failed) return '快照没存上（服务端没接住），下次改动会再试';\n", ''),
 );
 
+// ---------------------------------------------------------------- 换名字
+
+runner.run('换名字不查重（两个人的名字可以一样）', AUTH, (src) =>
+  src.replace(
+    "      if (users.some((u) => u.id !== id && u.nameKey === nextKey)) {\n        return { ok: false, code: 'name_taken', error: '这个名字已经有人用了' };\n      }\n",
+    '',
+  ),
+);
+
+runner.run('换名字查重时不排除自己（换回自己现在的名字会被自己拦住）', AUTH, (src) =>
+  src.replace('users.some((u) => u.id !== id && u.nameKey === nextKey)', 'users.some((u) => u.nameKey === nextKey)'),
+);
+
+runner.run('换名字不更新判重键（旧名字还占着、新名字谁都能抢）', AUTH, (src) =>
+  src.replace('      user.name = checked.name;\n      user.nameKey = nextKey;\n', '      user.name = checked.name;\n'),
+);
+
+runner.run('换名字不校验名字规则（空格、符号、超长全放进来）', AUTH, (src) =>
+  src.replace(
+    "      if (!checked.ok) return { ok: false, code: 'bad_name', error: checked.error };\n\n      const nextKey",
+    '\n      const nextKey',
+  ),
+);
+
+runner.run('换名字那一档不校验（空名字、非法字符都提交出去）', CLIENT, (src) =>
+  src.replace(
+    "  if (mode === 'name') {\n    // 改名字只查名字：它是个显示用的名字，改它不要密码\n    const checked = validateName(name);\n    return checked.ok ? '' : checked.error;\n  }",
+    "  if (mode === 'name') return '';",
+  ),
+);
+
+// ---------------------------------------------------------------- 最近登录过的账号
+
+runner.run('登录成功之后不记名字（下次登录列表还是空的）', CLIENT, (src) =>
+  src.replace(
+    '  const key = nameKey(clean);\n  return [{ name: clean, at }, ...rows.filter((item) => nameKey(item.name) !== key)].slice(0, max);',
+    '  const key = nameKey(clean);\n  void key;\n  return rows.slice(0, max);',
+  ),
+);
+
+runner.run('不去重（同一个账号在列表里出现两条）', CLIENT, (src) =>
+  src.replace(
+    '  return [{ name: clean, at }, ...rows.filter((item) => nameKey(item.name) !== key)].slice(0, max);',
+    '  return [{ name: clean, at }, ...rows].slice(0, max);',
+  ),
+);
+
+runner.run('判重看大小写（ALICE 和 alice 变成两个账号）', CLIENT, (src) =>
+  src.replace(
+    '  return [{ name: clean, at }, ...rows.filter((item) => nameKey(item.name) !== key)].slice(0, max);',
+    '  return [{ name: clean, at }, ...rows.filter((item) => item.name !== clean)].slice(0, max);',
+  ),
+);
+
+runner.run('不封顶（列表可以无限长）', CLIENT, (src) =>
+  src.replace(
+    '  return [{ name: clean, at }, ...rows.filter((item) => nameKey(item.name) !== key)].slice(0, max);',
+    '  return [{ name: clean, at }, ...rows.filter((item) => nameKey(item.name) !== key)];',
+  ),
+);
+
+runner.run('读的时候不封顶（一份超长的旧数据把列表撑爆）', CLIENT, (src) =>
+  src.replace(
+    '      .map((item) => ({ name: item.name.trim().slice(0, 40), at: Number(item.at) || 0 }))\n      .slice(0, RECENT_ACCOUNTS_MAX);',
+    '      .map((item) => ({ name: item.name.trim().slice(0, 40), at: Number(item.at) || 0 }));',
+  ),
+);
+
+runner.run('匹配用「包含」而不是前缀（打中间的字也冒出来）', CLIENT, (src) =>
+  src.replace(
+    '  const matched = needle ? rows.filter((item) => nameKey(item.name).startsWith(needle)) : rows;',
+    '  const matched = needle ? rows.filter((item) => nameKey(item.name).includes(needle)) : rows;',
+  ),
+);
+
+runner.run('匹配时不分大小写（打 AL 找不到 alice）', CLIENT, (src) =>
+  src.replace(
+    '  const matched = needle ? rows.filter((item) => nameKey(item.name).startsWith(needle)) : rows;',
+    "  const matched = needle ? rows.filter((item) => item.name.startsWith(needle)) : rows;",
+  ),
+);
+
+runner.run('空输入时什么都不列（点一下名字格看到一片空白）', CLIENT, (src) =>
+  src.replace(
+    '  const matched = needle ? rows.filter((item) => nameKey(item.name).startsWith(needle)) : rows;',
+    '  const matched = needle ? rows.filter((item) => nameKey(item.name).startsWith(needle)) : [];',
+  ),
+);
+
+runner.run('换名字之后名单里还是旧名字（下次点它登不上去）', CLIENT, (src) =>
+  src.replace(
+    '  const rest = rows.filter((item) => nameKey(item.name) !== oldKey);',
+    '  const rest = rows.slice();',
+  ),
+);
+
 runner.finish();

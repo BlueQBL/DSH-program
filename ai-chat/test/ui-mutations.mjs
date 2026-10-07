@@ -1264,8 +1264,75 @@ runner.run('账号菜单里不显示快照状态（用户不知道服务端到�
 );
 
 runner.run('Esc 关不掉登录面板', APP, (src) =>
+  // 目标跟着那一段的**结构**走（Esc 现在是两层：先收建议、再关面板）——
+  // 只打掉「关面板」那一句，第一层照旧；这一条就是靠「第二次 Esc 才关」抓到的
   src.replace(
-    '  if (!els.authOverlay.hidden) {\n    closeAuthPanel();\n    return;\n  }\n',
+    '    if (!els.authAccounts.hidden) {\n      hideAuthAccounts();\n      return;\n    }\n    closeAuthPanel();\n    return;\n  }',
+    '    if (!els.authAccounts.hidden) {\n      hideAuthAccounts();\n      return;\n    }\n    return;\n  }',
+  ),
+);
+
+// ---------------------------------------------------------------- 账号（换名字）
+
+runner.run('换名字面板不预填当前名字（让你从空白重新打一遍）', APP, (src) =>
+  src.replace("  if (isName) els.authName.value = authState.user?.name ?? '';\n", ''),
+);
+
+runner.run('换完名字不重画侧栏（名字换了，栏底还写着旧的）', APP, (src) =>
+  src.replace(
+    "      renderAuth();\n      closeAuthPanel();\n      flashHint(\n        data.unchanged ? '名字没变'",
+    "      closeAuthPanel();\n      flashHint(\n        data.unchanged ? '名字没变'",
+  ),
+);
+
+runner.run('账号菜单里的「换名字」不接任何东西（点了没反应）', APP, (src) =>
+  src.replace(
+    "  if (action === 'name') {\n    openAuthPanel('name', {\n      body: `给「${authState.user?.name ?? ''}」换个名字。它只是个显示用的名字（登录靠的是名字 + 密码，换完**别处还登着**，不会被踢下线）。`,\n    });\n  }\n",
+    '',
+  ),
+);
+
+// ---------------------------------------------------------------- 最近登录过的账号
+
+runner.run('登录成功之后不把名字记下来（下次还得全打一遍）', APP, (src) =>
+  src.replace(
+    "      closeAuthPanel();\n      rememberAccountName(data.user.name);\n      const welcome = await onSignedIn(data.user);\n      flashHint(signInHint(`已登录：",
+    '      closeAuthPanel();\n      const welcome = await onSignedIn(data.user);\n      flashHint(signInHint(`已登录：',
+  ),
+);
+
+runner.run('换名字之后名单里那条不跟着换（下次点它，名字是旧的）', APP, (src) =>
+  src.replace(
+    "      renameRememberedAccountName(authState.user?.name ?? '', data.user.name);\n",
+    '',
+  ),
+);
+
+runner.run('点一条建议不把光标送到密码格（还得自己点一下）', APP, (src) =>
+  src.replace(
+    '  els.authName.value = name;\n  hideAuthAccounts();\n  els.authPassword.focus?.();',
+    '  els.authName.value = name;\n  hideAuthAccounts();',
+  ),
+);
+
+runner.run('聚焦名字格不弹建议（这一列再也看不到了）', APP, (src) =>
+  src.replace("els.authName?.addEventListener('focus', showAuthAccounts);\n", ''),
+);
+
+runner.run('打字不跟着筛（列出来的永远是全部）', APP, (src) =>
+  src.replace("els.authName?.addEventListener('input', showAuthAccounts);\n", ''),
+);
+
+runner.run('回车永远提交表单、不选高亮那条（键盘选不中）', APP, (src) =>
+  src.replace(
+    "      if (event.key === 'Enter' && authActiveAccount >= 0) {",
+    '      if (false && authActiveAccount >= 0) {',
+  ),
+);
+
+runner.run('Esc 不先收建议（输错一个字就把整张卡片关了）', APP, (src) =>
+  src.replace(
+    '    if (!els.authAccounts.hidden) {\n      hideAuthAccounts();\n      return;\n    }\n',
     '',
   ),
 );

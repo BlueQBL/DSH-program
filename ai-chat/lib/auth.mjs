@@ -406,6 +406,45 @@ export function createUserStore({ file, clock = () => Date.now() } = {}) {
       return { ok: true, user };
     },
 
+    /**
+     * 换名字。
+     *
+     * 三件事写清楚：
+     *   · **查重要排除自己**，而且**必须排在「没变」之前** —— 顺序反了的话这段排除自己
+     *     就成了永远走不到的死代码（判重键相同的情况会在上一行就返回掉）。
+     *     排在前面它才是真的在干活：你换成自己现在的名字、或者只改个大小写，
+     *     都不该被自己拦下一句「这个名字已经有人用了」。
+     *   · **nameKey 要跟着改** —— 它才是判重用的那个键，忘了改等于旧名字还占着，
+     *     新名字谁都能抢。
+     *   · **不动 tokenVersion** —— 名字不是凭证，换了不该把别的设备踢下线
+     *     （令牌里带的是 uid，不是名字）。
+     *
+     * 也不要密码：这是个纯显示用的名字，写错了再写回来就行；
+     * 为它多问一次密码只会让人嫌烦，安全感一点没多（真正的凭证是密码和令牌）。
+     */
+    async rename(id, newName) {
+      const user = users.find((u) => u.id === id);
+      if (!user) return { ok: false, code: 'no_user' };
+      const checked = validateName(newName);
+      if (!checked.ok) return { ok: false, code: 'bad_name', error: checked.error };
+
+      const nextKey = nameKey(checked.name);
+      if (users.some((u) => u.id !== id && u.nameKey === nextKey)) {
+        return { ok: false, code: 'name_taken', error: '这个名字已经有人用了' };
+      }
+      // 一字不差就是没变（不写盘、界面也能说一句「名字没变」）
+      if (checked.name === user.name) return { ok: true, user, unchanged: true };
+
+      // 走到这儿就真的要改了。注意只改大小写也走这里：**名字按用户写的那样存**，
+      // 他说要 ZHANGSAN，就不该给他留 Zhangsan（第一版这里是直接返回「没变」，
+      // 测试立刻指出了问题：用户明明换了个写法，界面却回一句「名字没变」）。
+      user.name = checked.name;
+      user.nameKey = nextKey;
+      user.renamedAt = new Date(clock()).toISOString();
+      await persist();
+      return { ok: true, user };
+    },
+
     /** 只给测试用：把内存状态重新读一遍 */
     async reload() {
       loaded = false;

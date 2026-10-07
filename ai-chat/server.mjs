@@ -1358,6 +1358,24 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (pathname === '/api/auth/name' && req.method === 'POST') {
+      if (!sameOrigin(req)) {
+        writeJson(res, 403, { error: '跨站请求被拒绝' });
+        return;
+      }
+      const user = requireUser(req, res);
+      if (!user) return;
+      const body = await readJsonBody(req, 8 * 1024);
+      // 名字不是凭证：改它**不动 tokenVersion**，别处开着的页面照常待着
+      const result = await users.rename(user.id, body.name);
+      if (!result.ok) {
+        writeJson(res, result.code === 'no_user' ? 401 : 400, { error: result.error, code: result.code });
+        return;
+      }
+      writeJson(res, 200, { user: publicUser(result.user), unchanged: result.unchanged === true });
+      return;
+    }
+
     if (pathname === '/api/auth/password' && req.method === 'POST') {
       if (!sameOrigin(req)) {
         writeJson(res, 403, { error: '跨站请求被拒绝' });

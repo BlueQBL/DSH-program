@@ -255,6 +255,7 @@
             <!-- 菜单是 fixed 定位，跟会话行那个「⋯」菜单同一套（列表是 overflow-y: auto，absolute 会被裁掉） -->
             <span class="session-menu account-menu" id="account-menu" role="menu" hidden>
               <button type="button" class="icon-button session-menu-item" data-action="avatar" role="menuitem" title="换一个头像（emoji / 配色 / 传一张图）">换头像…</button>
+              <button type="button" class="icon-button session-menu-item" data-action="name" role="menuitem" title="换一个名字（只是个显示用的名字，换它不用密码）">换名字…</button>
               <button type="button" class="icon-button session-menu-item" data-action="password" role="menuitem" title="改密码（改完别处开着的页面会失效）">改密码…</button>
               <button type="button" class="icon-button session-menu-item" data-action="restore" role="menuitem" title="把服务端存的那份快照拉回来（会覆盖这个账号在本机的会话）">从服务端恢复…</button>
               <span class="account-snapshot" id="account-snapshot-note"></span>
@@ -722,6 +723,13 @@
           <span class="auth-label" id="auth-name-label">名字</span>
           <input type="text" id="auth-name" autocomplete="username" spellcheck="false" />
         </label>
+
+        <!--
+          最近登录过的账号：点一下名字格就出来，打几个字就筛（按前缀）。
+          点一条 = 把名字填进去 + 光标落到密码格 —— 这条路的目的就是「少打几个字」。
+          只有登录那一档才摆（注册、换名字、改密码都不该出现这个）。
+        -->
+        <ul class="auth-accounts" id="auth-accounts" role="listbox" aria-label="最近登录过的账号" hidden></ul>
 
         <label class="auth-field" id="auth-password-field">
           <span class="auth-label" id="auth-password-label">密码</span>

@@ -1084,6 +1084,30 @@ try {
   }
 
   {
+    // 改名字：不要密码、不改登录态（令牌里带的是 uid，不是名字）
+    const a = await authCall('/api/auth/register', { body: { name: '改名甲', password: 'rename-pass-1' } });
+    await authCall('/api/auth/register', { body: { name: '改名乙', password: 'rename-pass-2' } });
+
+    check('没登录不能改名', (await authCall('/api/auth/name', { body: { name: '随便' } })).status === 401);
+    check('名字不合法 → 400 bad_name',
+      (await authCall('/api/auth/name', { body: { name: 'a b' }, cookie: a.cookie })).data?.code === 'bad_name');
+    check('换成别人用了的名字 → 400 name_taken',
+      (await authCall('/api/auth/name', { body: { name: '改名乙' }, cookie: a.cookie })).data?.code === 'name_taken');
+
+    const renamed = await authCall('/api/auth/name', { body: { name: '新名字甲' }, cookie: a.cookie });
+    check('改名成功，回的就是新名字',
+      renamed.status === 200 && renamed.data?.user?.name === '新名字甲', JSON.stringify(renamed.data));
+    check('**改完之后那张票照样有效**（名字不是凭证，别处不该被踢下线）',
+      (await authCall('/api/auth/me', { method: 'GET', cookie: a.cookie })).data?.user?.name === '新名字甲');
+    check('新名字能登录',
+      (await authCall('/api/auth/login', { body: { name: '新名字甲', password: 'rename-pass-1' } })).status === 200);
+    check('旧名字登不上了（它已经不是这个人了）',
+      (await authCall('/api/auth/login', { body: { name: '改名甲', password: 'rename-pass-1' } })).status === 401);
+    check('**旧名字从此可以让给别人**（改完不再占着）',
+      (await authCall('/api/auth/register', { body: { name: '改名甲', password: 'reuse-pass-1' } })).status === 200);
+  }
+
+  {
     // 账号文件坏了：账号那几条路停用，但**聊天和本地模式照常**，
     // 而且绝不能把已有账号当成空（那等于让所有人都能拿原来的名字重新注册）
     const brokenDir = path.join(TEST_AUTH_DIR, 'broken');

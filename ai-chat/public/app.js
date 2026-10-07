@@ -29,14 +29,20 @@ import { supportsVision } from './lib/vision.js';
 import {
   AVATAR_MAX_EDGE,
   AVATAR_TARGET_CHARS,
+  RECENT_ACCOUNTS_MAX,
   authFormError,
   avatarFromUpload,
   createAuthApi,
+  matchRecentAccounts,
   paintAvatar,
+  readRecentAccounts,
+  rememberAccount,
+  renameRememberedAccount,
   restoreConfirmText,
   shouldPushSnapshot,
   snapshotNote,
   uploadErrorMessage,
+  writeRecentAccounts,
 } from './lib/auth.js';
 import { AVATAR_COLORS, AVATAR_EMOJI, normalizeAvatar, passwordHint } from './lib/auth-rules.js';
 import {
@@ -188,6 +194,7 @@ const els = {
   authSubmit: document.getElementById('auth-submit'),
   authCancel: document.getElementById('auth-cancel'),
   authClose: document.getElementById('auth-close'),
+  authAccounts: document.getElementById('auth-accounts'),
   avatarOverlay: document.getElementById('avatar-overlay'),
   avatarPreview: document.getElementById('avatar-preview'),
   avatarPreviewName: document.getElementById('avatar-preview-name'),
@@ -3783,8 +3790,14 @@ document.addEventListener('click', (event) => {
 
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
-  // 覆盖层最优先：开着面板时按 Esc 只关它（不顺手把别处的浮层一起收了）
+  // 覆盖层最优先：开着面板时按 Esc 只关它（不顺手把别处的浮层一起收了）。
+  // 面板里还要再分一层：名字格下面那列建议开着时，Esc 先把它收起来 ——
+  // 「按一下收起建议、再按一下才关面板」，不然输错一个字想重来就把整张卡片关了。
   if (!els.authOverlay.hidden) {
+    if (!els.authAccounts.hidden) {
+      hideAuthAccounts();
+      return;
+    }
     closeAuthPanel();
     return;
   }
@@ -4420,6 +4433,104 @@ function openAccountMenuFor() {
   menu.style.top = `${Math.round(Math.max(8, rect.top - height - 6))}px`;
 }
 
+// ---- 最近登录过的账号（名字格里那列建议）
+
+/** 现在列出来的那几条（点一条、或者回车选中的就是它） */
+let authAccountMatches = [];
+/** 键盘高亮到第几条（-1 = 没高亮，这时回车是「提交表单」） */
+let authActiveAccount = -1;
+let accountsHideTimer = null;
+
+function hideAuthAccounts() {
+  if (accountsHideTimer) {
+    clearTimeout(accountsHideTimer);
+    accountsHideTimer = null;
+  }
+  authAccountMatches = [];
+  authActiveAccount = -1;
+  els.authAccounts.replaceChildren();
+  els.authAccounts.hidden = true;
+}
+
+/**
+ * 延迟收起。
+ * 为什么不能立刻收：鼠标从名字格挪到下面那几条上时，名字格先收到 blur ——
+ * 立刻收的话手指还没点到，列表就没了（和标题浮层、右侧轮次列表是同一个坑）。
+ */
+function scheduleHideAuthAccounts() {
+  if (accountsHideTimer) clearTimeout(accountsHideTimer);
+  accountsHideTimer = setTimeout(hideAuthAccounts, 160);
+}
+
+/** 记一个账号（登录 / 注册成功之后）。存的是名字，不是密码 */
+function rememberAccountName(name) {
+  writeRecentAccounts(rememberAccount(readRecentAccounts(), name));
+}
+
+/** 换了名字：列表里那条也跟着换（不然下次点它，名字是旧的、登不上去） */
+function renameRememberedAccountName(oldName, newName) {
+  writeRecentAccounts(renameRememberedAccount(readRecentAccounts(), oldName, newName));
+}
+
+function paintAuthAccounts() {
+  const rows = authAccountMatches;
+  if (!rows.length) {
+    hideAuthAccounts();
+    return;
+  }
+  els.authAccounts.replaceChildren(...rows.map((item, index) => {
+    const li = document.createElement('li');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'auth-account';
+    button.dataset.account = item.name;
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', String(index === authActiveAccount));
+    button.dataset.active = String(index === authActiveAccount);
+
+    // 小块头像是**从名字算出来的**（首字母 + 配色），所以列表里不用存头像
+    const chip = document.createElement('span');
+    chip.className = 'avatar';
+    paintAvatar(chip, { name: item.name });
+
+    const label = document.createElement('span');
+    label.className = 'auth-account-name';
+    label.textContent = item.name;
+
+    button.append(chip, label);
+    button.addEventListener('click', () => pickAuthAccount(item.name));
+    li.append(button);
+    return li;
+  }));
+  els.authAccounts.hidden = false;
+}
+
+/** 按输入框里现有的字筛一遍（空输入 = 全部列出来） */
+function showAuthAccounts() {
+  if (authMode !== 'login') return;
+  authAccountMatches = matchRecentAccounts(readRecentAccounts(), els.authName.value);
+  authActiveAccount = -1;
+  paintAuthAccounts();
+}
+
+/** 点一条 / 回车选中：填进名字格，光标落到密码格上（这条路的目的是少打几个字） */
+function pickAuthAccount(name) {
+  els.authName.value = name;
+  hideAuthAccounts();
+  els.authPassword.focus?.();
+}
+
+/** 键盘在列表里上下走（焦点留在名字格上，跟 aria 的做法一致） */
+function moveAuthAccount(step) {
+  if (!authAccountMatches.length) return;
+  const current = authActiveAccount;
+  const next = current < 0
+    ? (step > 0 ? 0 : authAccountMatches.length - 1)
+    : (current + step + authAccountMatches.length) % authAccountMatches.length;
+  authActiveAccount = next;
+  paintAuthAccounts();
+}
+
 // ---- 登录 / 注册 / 改密码 / 恢复：同一个卡片，按模式换字段
 
 function showAuthError(text) {
@@ -4432,9 +4543,9 @@ function showAuthOk(text) {
   els.authOk.hidden = !text;
 }
 
-/** 密码那一行的提示：注册和改密码时给强度，登录时什么都不说 */
+/** 密码那一行的提示：注册和改密码时给强度，登录 / 改名 / 恢复时什么都不说 */
 function updateAuthHint() {
-  if (authMode === 'login' || authMode === 'restore') {
+  if (authMode === 'login' || authMode === 'restore' || authMode === 'name') {
     els.authHint.textContent = '';
     return;
   }
@@ -4450,26 +4561,29 @@ function openAuthPanel(mode = 'login', { body = '' } = {}) {
   authMode = mode;
   const isPassword = mode === 'password';
   const isRestore = mode === 'restore';
+  const isName = mode === 'name';
 
   els.authPanelTitle.textContent = {
     login: '登录',
     register: '注册',
     password: '改密码',
+    name: '换名字',
     restore: '从服务端恢复',
   }[mode] ?? '登录';
-  els.authTabs.hidden = isPassword || isRestore;
+  els.authTabs.hidden = isPassword || isRestore || isName;
   els.authTabLogin.setAttribute('aria-selected', String(mode === 'login'));
   els.authTabRegister.setAttribute('aria-selected', String(mode === 'register'));
   els.authBody.hidden = !body;
   els.authBody.textContent = body;
 
-  // 字段按模式摆：登录要名字+密码；注册多一个「再输一遍」；改密码要原密码+新密码+再输一遍
+  // 字段按模式摆：登录要名字+密码；注册多一个「再输一遍」；改密码要原密码+新密码+再输一遍；
+  // 改名字只要一个名字（**预填当前那个**，是来改的，不是来重打的）
   els.authNameField.hidden = isPassword || isRestore;
-  els.authPasswordField.hidden = isRestore;
+  els.authPasswordField.hidden = isRestore || isName;
   els.authNewField.hidden = !isPassword;
-  els.authConfirmField.hidden = mode === 'login' || isRestore;
-  els.authRememberRow.hidden = isRestore;
-  els.authNameLabel.textContent = '名字';
+  els.authConfirmField.hidden = mode === 'login' || isRestore || isName;
+  els.authRememberRow.hidden = isRestore || isName;
+  els.authNameLabel.textContent = isName ? '新名字' : '名字';
   els.authPasswordLabel.textContent = isPassword ? '原密码' : '密码';
   els.authConfirmLabel.textContent = '再输一遍';
 
@@ -4477,13 +4591,19 @@ function openAuthPanel(mode = 'login', { body = '' } = {}) {
     login: '登录',
     register: '注册',
     password: '改密码',
+    name: '换名字',
     restore: '用服务端那份覆盖本机',
   }[mode] ?? '登录';
+
+  // 改名字：把当前名字填进去，光标选中它 —— 打字就直接替换掉了
+  if (isName) els.authName.value = authState.user?.name ?? '';
 
   showAuthError('');
   showAuthOk('');
   els.authHint.textContent = '';
   els.authOverlay.hidden = false;
+  // 名字格一拿到焦点就会把「最近登录过的账号」摆出来（见 els.authName 上的 focus 处理）
+  hideAuthAccounts();
 
   if (isRestore) {
     els.authSubmit.focus?.();
@@ -4491,11 +4611,15 @@ function openAuthPanel(mode = 'login', { body = '' } = {}) {
   }
   // 打开就落在一个该填的格子上：改密码是「原密码」，其余是「名字」
   if (isPassword) els.authPassword.focus?.();
-  else els.authName.focus?.();
+  else {
+    els.authName.focus?.();
+    els.authName.select?.();
+  }
 }
 
 function closeAuthPanel() {
   els.authOverlay.hidden = true;
+  hideAuthAccounts();
   // 密码不进 DOM 留着：关掉就清干净（否则下次打开还挂着上一个人输的东西）
   els.authPassword.value = '';
   els.authNew.value = '';
@@ -4529,13 +4653,30 @@ async function submitAuthPanel() {
     if (authMode === 'register') {
       const data = await authApi.register({ name, password: oldPassword, remember });
       closeAuthPanel();
+      // 注册也算「这个账号我用过」：下次登录时它就躺在名字格下面，点一下就行
+      rememberAccountName(data.user.name);
       const welcome = await onSignedIn(data.user);
       flashHint(signInHint(`注册成功，欢迎 ${data.user.name}`, welcome), 5200);
     } else if (authMode === 'login') {
       const data = await authApi.login({ name, password: oldPassword, remember });
       closeAuthPanel();
+      rememberAccountName(data.user.name);
       const welcome = await onSignedIn(data.user);
       flashHint(signInHint(`已登录：${data.user.name}`, welcome), 5200);
+    } else if (authMode === 'name') {
+      const data = await authApi.rename(name);
+      // 列表里那条也要换成新名字：不然下次登录摆着旧名字，点了还登不上去
+      renameRememberedAccountName(authState.user?.name ?? '', data.user.name);
+      authState.user = data.user;
+      authState.notice = '';
+      // 侧栏那一行要重画：名字变了，**首字母头像的字和配色也跟着变**
+      //（它们是从名字算出来的，不是存下来的 —— 这正是当初不存它的原因）
+      renderAuth();
+      closeAuthPanel();
+      flashHint(
+        data.unchanged ? '名字没变' : `名字已改成「${data.user.name}」`,
+        2600,
+      );
     } else {
       const data = await authApi.changePassword({ oldPassword, newPassword, remember });
       authState.user = data.user;
@@ -4703,6 +4844,11 @@ els.accountMenu?.addEventListener('click', (event) => {
   if (!action) return;
   closeAccountMenu();
   if (action === 'avatar') openAvatarPanel();
+  if (action === 'name') {
+    openAuthPanel('name', {
+      body: `给「${authState.user?.name ?? ''}」换个名字。它只是个显示用的名字（登录靠的是名字 + 密码，换完**别处还登着**，不会被踢下线）。`,
+    });
+  }
   if (action === 'password') {
     openAuthPanel('password', {
       body: `给「${authState.user?.name ?? ''}」改密码。改完之后，别的设备上开着的页面会立刻失效。`,
@@ -4719,6 +4865,20 @@ els.authCancel?.addEventListener('click', closeAuthPanel);
 els.authClose?.addEventListener('click', closeAuthPanel);
 els.authPassword?.addEventListener('input', updateAuthHint);
 els.authNew?.addEventListener('input', updateAuthHint);
+
+// 名字格：点 / 聚焦就把「最近登录过的账号」摆出来，打字就跟着筛
+els.authName?.addEventListener('focus', showAuthAccounts);
+els.authName?.addEventListener('click', showAuthAccounts);
+els.authName?.addEventListener('input', showAuthAccounts);
+els.authName?.addEventListener('blur', scheduleHideAuthAccounts);
+// 鼠标挪进列表里时先别收（手指还没点到，列表没了就没法点了）
+els.authAccounts?.addEventListener('mouseenter', () => {
+  if (accountsHideTimer) {
+    clearTimeout(accountsHideTimer);
+    accountsHideTimer = null;
+  }
+});
+
 // 点卡片外面 = 关掉（覆盖层的惯例）。只在点到背景本身时关，点卡片内部不算
 els.authOverlay?.addEventListener('click', (event) => {
   if (event.target === els.authOverlay) closeAuthPanel();
@@ -4726,9 +4886,22 @@ els.authOverlay?.addEventListener('click', (event) => {
 els.avatarOverlay?.addEventListener('click', (event) => {
   if (event.target === els.avatarOverlay) closeAvatarPanel();
 });
-// 回车直接提交（表单里没有 <form>，所以自己接一下）
+// 回车直接提交（表单里没有 <form>，所以自己接一下）。
+// 但名字格上还多两件事：↑↓ 在建议列表里走、回车选中高亮的那一条（没高亮才是提交）。
 for (const input of [els.authName, els.authPassword, els.authNew, els.authConfirm]) {
   input?.addEventListener('keydown', (event) => {
+    if (input === els.authName && !els.authAccounts.hidden && authAccountMatches.length) {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault?.();
+        moveAuthAccount(event.key === 'ArrowDown' ? 1 : -1);
+        return;
+      }
+      if (event.key === 'Enter' && authActiveAccount >= 0) {
+        event.preventDefault?.();
+        pickAuthAccount(authAccountMatches[authActiveAccount].name);
+        return;
+      }
+    }
     if (event.key === 'Enter') void submitAuthPanel();
   });
 }

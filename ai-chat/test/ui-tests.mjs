@@ -117,6 +117,14 @@ function makeElement(tag = 'div', attrs = {}) {
       this.children.push(child);
       return child;
     },
+    /*
+     * `append(...)`（标准 DOM 里和 appendChild 的差别只在于能接字符串和多个参数）。
+     * 替身里补上它，是因为 app.js 用它是**正常写法** —— 让「用了标准 API」变成测试里的坑
+     * 是本末倒置（这次是「最近登录过的账号」那一段踩到的）。
+     */
+    append(...kids) {
+      for (const kid of kids) this.children.push(kid);
+    },
     replaceChildren(...kids) {
       this.children = kids;
     },
@@ -503,6 +511,14 @@ globalThis.fetch = async (url, init) => {
       if (!authUser) return { ok: false, status: 401, json: async () => ({ error: '需要先登录', code: 'unauthorized' }) };
       authUser = { ...authUser, avatar: body?.avatar ?? authUser.avatar };
       return ok({ user: authUser });
+    }
+    if (target.includes('/api/auth/name')) {
+      if (!authUser) return { ok: false, status: 401, json: async () => ({ error: '需要先登录', code: 'unauthorized' }) };
+      const next = String(body?.name ?? '');
+      const unchanged = next === authUser.name;
+      authUser = { ...authUser, name: next };
+      if (authAccount) authAccount.name = next;
+      return ok({ user: authUser, unchanged });
     }
     if (target.includes('/api/auth/password')) {
       if (!authUser) return { ok: false, status: 401, json: async () => ({ error: '需要先登录', code: 'unauthorized' }) };
@@ -4197,6 +4213,120 @@ console.log('\n㉕ 账号：注册 / 登录 / 头像 / 从服务端恢复');
     notebookOf(ACCOUNT_KEY)?.sessions?.length === 2 && pinnedFlag(ACCOUNT_KEY, 'loc_02') === true);
   check('退出有反馈，而且说明本地这本一直没动', /本地模式/.test(getEl('composer-hint').textContent), getEl('composer-hint').textContent);
 
+  // ---- 「最近登录过的账号」：点一下名字格就出来，打几个字就筛
+  //
+  // 名单是**上次登录留下的**，所以这里直接预置一份（真流程里由登录/注册成功时写入，
+  // 下面「登录之后记下来」那几条断言走的是真流程）。
+  storage.set('duitanlu.accounts.v1', JSON.stringify([
+    { name: '小林', at: 4 }, { name: 'Alice', at: 3 }, { name: '小明', at: 2 },
+    { name: '阿黄', at: 1 }, { name: 'bob', at: 0 },
+  ]));
+  const accountsList = () => getEl('auth-accounts');
+  const accountNames = () => accountsList().children.map((li) => li.children?.[0]?.dataset?.account ?? '');
+  const accountButtons = () => accountsList().children.map((li) => li.children?.[0]);
+
+  dispatch(getEl('account-signin'), 'click');
+  check('（准备）登录面板开着，名单还没出来（要先点名字格）', accountsList().hidden === true);
+  // 名字格里可能还留着上一段留下的字（比如刚才登录失败时打的）—— 先清掉，
+  // 不然「空输入 = 全都列出来」这一条会被那次筛选影响
+  getEl('auth-name').value = '';
+
+  dispatch(getEl('auth-name'), 'focus');
+  check('点/聚焦名字格：下面列出最近登录过的账号',
+    accountsList().hidden === false && accountNames().length === 5, accountNames().join(','));
+  check('最近的排最前面（顺序就是名单的顺序）', accountNames()[0] === '小林', accountNames().join(','));
+  // 替身里的 querySelector 不查 children（它给的是每个选择器的占位元素），
+  // 所以这里顺着 children 取那两块 —— 和 app.js 拼出来的结构一致
+  const firstChip = accountButtons()[0]?.children?.[0];
+  check('每一条都带一个小头像（从名字算出来的首字母）',
+    firstChip?.className === 'avatar'
+      && firstChip?.dataset?.kind === 'initial'
+      && firstChip?.querySelector?.('.avatar-text')?.textContent === '小',
+    `${firstChip?.className} / ${firstChip?.querySelector?.('.avatar-text')?.textContent}`);
+
+  getEl('auth-name').value = '小';
+  dispatch(getEl('auth-name'), 'input');
+  check('打一个字就筛（按前缀）', accountNames().join(',') === '小林,小明', accountNames().join(','));
+
+  getEl('auth-name').value = 'aL';
+  dispatch(getEl('auth-name'), 'input');
+  check('筛选不分大小写', accountNames().join(',') === 'Alice', accountNames().join(','));
+
+  getEl('auth-name').value = 'zzz';
+  dispatch(getEl('auth-name'), 'input');
+  check('一个都匹配不上就收起来（不是摆一个空框）', accountsList().hidden === true);
+
+  getEl('auth-name').value = '';
+  dispatch(getEl('auth-name'), 'input');
+  check('清空又全都回来', accountNames().length === 5, accountNames().join(','));
+
+  // 键盘：↑↓ 走、回车选中（没高亮时回车还是提交表单）
+  dispatch(getEl('auth-name'), 'keydown', { key: 'ArrowDown' });
+  check('按 ↓ 高亮第一条', accountButtons()[0]?.dataset?.active === 'true');
+  dispatch(getEl('auth-name'), 'keydown', { key: 'ArrowDown' });
+  check('再按一下走第二条', accountButtons()[1]?.dataset?.active === 'true' && accountButtons()[0]?.dataset?.active === 'false');
+  dispatch(getEl('auth-name'), 'keydown', { key: 'ArrowUp' });
+  check('↑ 回到第一条', accountButtons()[0]?.dataset?.active === 'true');
+  dispatch(getEl('auth-name'), 'keydown', { key: 'ArrowUp' });
+  check('已经在第一条了再往上 → 绕回最后一条（不会卡在那儿）',
+    accountButtons()[4]?.dataset?.active === 'true', JSON.stringify(accountNames()));
+  dispatch(getEl('auth-name'), 'keydown', { key: 'Enter' });
+  await settle();
+  check('回车选中高亮的那条：名字填进去、列表收起',
+    getEl('auth-name').value === 'bob' && accountsList().hidden === true, getEl('auth-name').value);
+  check('而且光标落到密码格上（这条路的目的是少打几个字）',
+    globalThis.document.activeElement === getEl('auth-password'));
+
+  // 鼠标点一条
+  getEl('auth-name').value = '';
+  dispatch(getEl('auth-name'), 'focus');
+  dispatch(accountButtons()[2], 'click');
+  await settle();
+  check('点一条也一样：填进去 + 收起',
+    getEl('auth-name').value === '小明' && accountsList().hidden === true, getEl('auth-name').value);
+
+  // Esc 分两层：先收建议，再关面板
+  dispatch(getEl('auth-name'), 'focus');
+  check('（准备）建议又出来了', accountsList().hidden === false);
+  for (const h of documentHandlers.filter((x) => x.type === 'keydown')) h.fn({ key: 'Escape' });
+  check('第一次 Esc 只收起建议（面板还开着 —— 输错了不该把整张卡片关掉）',
+    accountsList().hidden === true && getEl('auth-overlay').hidden === false);
+  for (const h of documentHandlers.filter((x) => x.type === 'keydown')) h.fn({ key: 'Escape' });
+  check('第二次 Esc 才关面板', getEl('auth-overlay').hidden === true);
+
+  // 其他几档不该出现这个列表
+  authUser = { id: 'u_test_1', name: '小林', createdAt: '2026-01-01T00:00:00.000Z', avatar: { kind: 'initial', color: null } };
+  dispatch(getEl('account-self'), 'click');
+  clickMenu('name');
+  dispatch(getEl('auth-name'), 'focus');
+  check('「换名字」那一档不摆「最近登录过的账号」（这里的名字不是用来登录的）',
+    accountsList().hidden === true);
+  dispatch(getEl('auth-close'), 'click');
+  authUser = null;
+
+  dispatch(getEl('account-signin'), 'click');
+  dispatch(getEl('auth-tab-register'), 'click');
+  dispatch(getEl('auth-name'), 'focus');
+  check('「注册」那一档也不摆', accountsList().hidden === true);
+  dispatch(getEl('auth-close'), 'click');
+
+  // ---- 真流程：登录成功之后把名字记下来
+  //（换名字之后名单跟着换那一条，放在后面「换名字」那一段里一起验 —— 那里才真的会改名）
+  //
+  // 先把名单换成**不含「小林」**的一份：上面那份种子里本来就有小林，
+  // 那样「登录有没有记下来」根本看不出来（变异把记录那行删掉也照样通过 —— 变异测试抓到的）。
+  storage.set('duitanlu.accounts.v1', JSON.stringify([{ name: '别的账号', at: 1 }]));
+  dispatch(getEl('account-signin'), 'click');
+  getEl('auth-name').value = '小林';
+  getEl('auth-password').value = 'correct-horse-1';
+  dispatch(getEl('auth-submit'), 'click');
+  await settle();
+  await settle();
+  check('（准备）又登录上了', getEl('account-self').hidden === false);
+  const rememberedAfterLogin = JSON.parse(storage.get('duitanlu.accounts.v1')).map((i) => i.name);
+  check('登录成功之后把名字记进「最近登录过的账号」（排在最前面）',
+    rememberedAfterLogin[0] === '小林', rememberedAfterLogin.join(','));
+
   // ---- 再登录一次：账号那本回来，本地这本不被再复制一遍
   dispatch(getEl('account-signin'), 'click');
   dispatch(getEl('auth-tab-login'), 'click');
@@ -4352,6 +4482,66 @@ console.log('\n㉕ 账号：注册 / 登录 / 头像 / 从服务端恢复');
     getEl('auth-overlay').hidden === true && /还没有这个账号的快照/.test(getEl('composer-hint').textContent),
     getEl('composer-hint').textContent);
   serverSnapshot = keepSnapshot;
+
+  // ---- 改名字
+  //
+  // 先换回首字母头像（点一个底色就是「首字母 + 这个颜色」）：这样改名之后
+  // 才看得出**字跟着名字变、颜色不变** —— 字是从名字算出来的，颜色是你选的、存下来的。
+  dispatch(getEl('account-self'), 'click');
+  clickMenu('avatar');
+  dispatch(getEl('avatar-colors').children[2], 'click');
+  dispatch(getEl('avatar-save'), 'click');
+  await settle();
+  await settle();
+  check('（准备）头像换回首字母那种，并选定了一个底色',
+    getEl('account-avatar').dataset.kind === 'initial'
+      && getEl('account-avatar').querySelector('.avatar-text').textContent === '小',
+    `${getEl('account-avatar').dataset.kind} / ${getEl('account-avatar').querySelector('.avatar-text').textContent}`);
+  const chosenColor = getEl('account-avatar').style.getPropertyValue('--avatar-bg');
+
+  // 先把名字格写成别的值：不然「预填」这件事根本看不出来（上一段登录时留下的
+  // '小林' 会一直在那个格子里，变异把预填那行删掉也照样通过 —— 变异测试抓到的）
+  getEl('auth-name').value = '上一段留下的值';
+  dispatch(getEl('account-self'), 'click');
+  clickMenu('name');
+  check('换名字面板：只剩一个名字格（不要密码），而且**预填了当前名字**',
+    getEl('auth-name-field').hidden === false && getEl('auth-password-field').hidden === true
+      && getEl('auth-confirm-field').hidden === true && getEl('auth-remember-row').hidden === true
+      && getEl('auth-name').value === '小林',
+    `${getEl('auth-name').value} / 密码格 hidden=${getEl('auth-password-field').hidden}`);
+  check('标题和按钮都写着「换名字」',
+    getEl('auth-panel-title').textContent === '换名字' && getEl('auth-submit').textContent === '换名字',
+    `${getEl('auth-panel-title').textContent} / ${getEl('auth-submit').textContent}`);
+
+  let nameCallsBefore = authCalls.length;
+  getEl('auth-name').value = 'a';
+  dispatch(getEl('auth-submit'), 'click');
+  await settle();
+  check('名字不合法：面板里出错误，而且一个请求都没发',
+    getEl('auth-error').hidden === false && authCalls.length === nameCallsBefore,
+    `${getEl('auth-error').textContent} / 请求 ${authCalls.length - nameCallsBefore} 次`);
+
+  getEl('auth-name').value = '张三';
+  dispatch(getEl('auth-submit'), 'click');
+  await settle();
+  await settle();
+  check('改名成功：面板关掉、侧栏换成新名字',
+    getEl('auth-overlay').hidden === true && getEl('account-name').textContent === '张三',
+    getEl('account-name').textContent);
+  check('**首字母头像的字跟着名字变**（它本来就是从名字算出来的）',
+    getEl('account-avatar').querySelector('.avatar-text').textContent === '张',
+    getEl('account-avatar').querySelector('.avatar-text').textContent);
+  check('**底色不变**（那个是你选的，存下来了）',
+    getEl('account-avatar').style.getPropertyValue('--avatar-bg') === chosenColor,
+    `${chosenColor} → ${getEl('account-avatar').style.getPropertyValue('--avatar-bg')}`);
+  check('发出去的正是新名字',
+    authCalls.some((c) => c.path.includes('/api/auth/name') && c.body?.name === '张三'),
+    JSON.stringify(authCalls.filter((c) => c.path.includes('/api/auth/name')).at(-1)?.body ?? null));
+  check('给了反馈，说的是新名字', /张三/.test(getEl('composer-hint').textContent), getEl('composer-hint').textContent);
+  const rememberedAfterRename = JSON.parse(storage.get('duitanlu.accounts.v1') ?? '[]').map((i) => i.name);
+  check('「最近登录过的账号」里那条也跟着换（不然下次点它，名字是旧的、登不上去）',
+    rememberedAfterRename.includes('张三') && !rememberedAfterRename.includes('小林'),
+    rememberedAfterRename.join(','));
 
   // ---- 票过期（401）：界面回到未登录，但**数据一条不丢**
   const notebookBefore = storage.get(ACCOUNT_KEY);
