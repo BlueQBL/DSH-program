@@ -440,6 +440,27 @@
     -->
     <div class="title-float" id="title-float" role="tooltip" hidden></div>
 
+    <!--
+      轮次导航：右侧那一列短杠，一轮一根（见 app.js 的 paintTurnNav）。
+
+      为什么在右边：左边已经排着「01/02」那样的页边序号和会话栏，短杠挤在那儿会跟序号抢位置；
+      右边本来就是留白（ChatGPT 的对话导航也在右边）。外形学豆包（细短杠，一轮一根，一百轮也只占
+      一条细线），信息量学 ChatGPT（hover 出这轮的问和答的开头）。
+
+      `.turn-tip` 是它的浮层：纯展示，`pointer-events: none` —— 鼠标要能穿过它，
+      否则从短杠挪到浮层的路上 hover 就断了，浮层会自己闪没。
+    -->
+    <nav class="turn-nav" id="turn-nav" aria-label="轮次导航" hidden></nav>
+    <div class="turn-tip" id="turn-tip" role="tooltip" hidden></div>
+    <!--
+      轮次多的时候改用这个列表（见 app.js 的 TURN_NAV_LIST_AT）：
+      短杠排到一定密度只好压紧，再压不下就得去滚那条细条 —— 而 26px 宽的细条本身不好滚 ✗。
+      列表比它宽、能正常滚、一条一轮写着那句话，点一下就过去。
+      注意它和 `.turn-tip` 正好相反：**它必须吃鼠标**（要点行），
+      所以它俩的 pointer-events 是反的，别照着抄。
+    -->
+    <div class="turn-list" id="turn-list" role="group" aria-label="各轮列表" hidden></div>
+
     <!-- 压缩标记：插在「最后一个被摘要覆盖的那一轮」后面 -->
     <template id="context-note-template">
       <li class="context-note" data-field="context-note">

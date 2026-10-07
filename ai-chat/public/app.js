@@ -152,6 +152,10 @@ const els = {
   blank: document.getElementById('blank-sheet'),
   starters: document.getElementById('starters'),
   exchangeTemplate: document.getElementById('exchange-template'),
+  // 轮次导航：右侧那列短杠 + 它的浮层 / 列表（见 paintTurnNav）
+  turnNav: document.getElementById('turn-nav'),
+  turnTip: document.getElementById('turn-tip'),
+  turnList: document.getElementById('turn-list'),
   reachBottom: document.getElementById('reach-bottom'),
   jumpBottom: document.getElementById('jump-bottom'),
 
@@ -573,6 +577,9 @@ function onViewportChange() {
     updatePinned();
     // 引用浮标是按屏幕坐标摆的，页面一滚它就会停在原地和选区错开
     hideQuoteFloat();
+    // 轮次导航：「当前轮」跟着滚动更新；浮层和列表都是按坐标摆的，滚了就收起
+    paintActiveTurn();
+    hideTurnHelp();
   } finally {
     handlingViewport = false;
   }
@@ -2246,6 +2253,349 @@ function maybeLoadEarlier() {
 
 window.addEventListener('scroll', maybeLoadEarlier, { passive: true });
 
+// ---------------------------------------------------------------- 轮次导航（右侧那列短杠）
+//
+// 一轮一根短杠：hover 那根变长并浮出这轮的「问」和「答」的开头，点一下跳过去。
+// 外形学豆包（细短杠，一百轮也只占一条细线），信息量学 ChatGPT（hover 出文字）。
+// **放在右边**：左边已经排着页边序号「01/02」和会话栏，短杠挤在那儿会跟序号抢位置。
+//
+// 两条纪律：
+//   · **它数的是全部轮次，不是画出来的那些**：正文只画最近 20 轮（见 TRANSCRIPT_PAGE），
+//     而导航要能带你去第 3 轮 —— 所以数据来自 store.messages，点的时候先扩窗再滚。
+//   · 「答」是**本地截断**（回答开头那一段，去掉 Markdown 标记），不是模型摘要：
+//     一轮一次模型调用太贵，界面上也照实写「答：…」，不假装那是摘要。
+// 出现条件：**至少 4 轮，而且正文比两屏还长**。
+//
+// 为什么不写死「超过 5 轮」：导航的价值是「省掉几屏滚动」，所以判据本该是**屏数**，不是轮数。
+// 按真实尺寸算：可视区约 700px（1080p 减去吸顶报头 116px、贴底输入区 90px），一轮典型 300–400px
+// （问 1–3 行 + 答常见 200–600px）⇒ 两屏 ≈ 1400px 正好落在**第 5 轮**上 —— 也就是说
+// 「5 轮」这个数是对的，它只是「两屏」在典型轮高下的结果。写成屏数之后：
+//   · 短回答的会话（每轮 150px）不会一上来就冒出一列短杠；
+//   · 长回答的会话（每轮 600px）两三轮就冒出来 —— 那正是最需要它的时候；
+//   · 窗口高度变了，判据跟着变。
+// 4 轮是下限：再短就没有「跳」的意义了。
+const TURN_NAV_MIN_TURNS = 4;
+const TURN_NAV_MIN_SCREENS = 2;
+const TURN_NAV_ACTIVE_AT = 0.35; // 节点顶端越过视口高度的这个比例，就算「正在看这一轮」
+const TURN_NAV_LEAD = 4; // 跳到很早的一轮时，往前多留几轮做上下文
+// 超过这么多轮就改出「列表」而不是单轮浮层：根距 27px（24px 热区 + 3px 缝）× 24 ≈ 650px，
+// 正好填满那一列的高度 —— 再多就得压紧、再往后只能去滚那条 26px 宽的细条（不好滚 ✗）。
+const TURN_NAV_LIST_AT = 24;
+// 落地的那一轮闪多久（要和 styles.css 里 `landed-fade` 那条动画的时长看齐）
+const TURN_NAV_LANDED_MS = 1400;
+
+/** 每一轮的可导航信息（编号、问、答），按会话里的顺序 */
+function turnNavItems() {
+  const messages = store.messages;
+  const items = [];
+  messages.forEach((message, index) => {
+    if (message.role !== 'assistant') return;
+    const question = messages[index - 1];
+    items.push({
+      number: items.length + 1,
+      question: String(question?.content ?? ''),
+      answer: String(message.content ?? ''),
+    });
+  });
+  return items;
+}
+
+/** 压成一行的短文字（浮层里用）：去掉 Markdown、空白折叠、超长截断 */
+function oneLine(text, max) {
+  const plain = markdownToPlain(String(text ?? '')).replace(/\s+/g, ' ').trim();
+  return plain.length > max ? `${plain.slice(0, max)}…` : plain;
+}
+
+/** 视口里「正在看」的那一轮（判定线见 TURN_NAV_ACTIVE_AT） */
+function currentTurnNumber() {
+  const nodes = [...els.exchanges.children].filter((node) => node.dataset?.turn);
+  if (!nodes.length) return 0;
+  const line = (Number(window.innerHeight) || 800) * TURN_NAV_ACTIVE_AT;
+  let current = Number(nodes[0].dataset.turn);
+  for (const node of nodes) {
+    if ((node.getBoundingClientRect?.().top ?? 0) <= line) current = Number(node.dataset.turn);
+  }
+  return current;
+}
+
+/** 把「当前轮」标到对应那根短杠上（滚动时跟着变） */
+function paintActiveTurn() {
+  const nav = els.turnNav;
+  if (!nav || nav.hidden) return;
+  const current = currentTurnNumber();
+  for (const tick of nav.children) {
+    if (Number(tick.dataset.turn) === current) tick.dataset.current = 'true';
+    else delete tick.dataset.current;
+  }
+  if (!els.turnList?.hidden) paintTurnList(current);
+}
+
+/** 重画那列短杠（轮数变了、换会话了都要重画） */
+function paintTurnNav() {
+  const nav = els.turnNav;
+  if (!nav) return;
+  const items = turnNavItems();
+  nav.dataset.turns = String(items.length);
+  // 「正文比两屏还长」是量出来的：这里读一次 scrollHeight（会让浏览器先排版一次，
+  // 但每次 render 只读一次，换来的是「短会话不出现、长回答的会话早点出现」）。
+  const viewport = Number(window.innerHeight) || 800;
+  const tall = (Number(els.exchanges?.scrollHeight) || 0) > viewport * TURN_NAV_MIN_SCREENS;
+  // 轮次太少、或者一屏就看得完：那它只是杂物，纯粹多一列东西要瞄
+  if (items.length < TURN_NAV_MIN_TURNS || !tall) {
+    nav.hidden = true;
+    nav.replaceChildren();
+    hideTurnHelp();
+    return;
+  }
+  /*
+   * 密到什么程度，决定 hover 出什么：
+   *   · 稀疏（≤24 轮）：一根短杠一根短杠地 hover，出**单轮浮层**（问 + 答）；
+   *   · 密集（>24 轮）：短杠已经压紧、再往后只能滚那条 26px 宽的细条（不好滚 ✗），
+   *     所以 hover 改成出**列表**（ChatGPT 那个形态）：每条一轮、能正常滚、点一下就过去。
+   * 24 这个数来自几何：根距 27px（24px 热区 + 3px 缝）× 24 ≈ 650px，正好填满那一列的高度。
+   */
+  const dense = items.length > TURN_NAV_LIST_AT;
+  nav.dataset.dense = dense ? 'true' : 'false';
+  if (!dense) hideTurnList(); // 从密变疏（换会话了）时，别留着一个开着的列表
+  nav.hidden = false;
+  nav.replaceChildren(
+    ...items.map((item) => {
+      const tick = document.createElement('button');
+      tick.type = 'button';
+      tick.className = 'turn-tick';
+      tick.dataset.turn = String(item.number);
+      tick.title = `第 ${item.number} 轮`;
+      // 无障碍：屏幕阅读器念的是「跳到第 7 轮：<那句话>」
+      tick.setAttribute(
+        'aria-label',
+        `跳到第 ${item.number} 轮：${oneLine(item.question, 30) || '（这一轮没有提问）'}`,
+      );
+      return tick;
+    }),
+  );
+  turnListBuilt = 0; // 轮次变了，列表要重建
+  paintActiveTurn();
+}
+
+let turnTipTimer = null;
+/** 列表是给多少轮建的（轮数变了才重建；200 轮时不该每次 hover 都重建一遍） */
+let turnListBuilt = 0;
+
+function hideTurnTip() {
+  if (els.turnTip) els.turnTip.hidden = true;
+}
+
+function hideTurnList() {
+  if (els.turnList) els.turnList.hidden = true;
+}
+
+/** 两种形态一起收（浮层和列表） */
+function hideTurnHelp() {
+  if (turnTipTimer) {
+    clearTimeout(turnTipTimer);
+    turnTipTimer = null;
+  }
+  hideTurnTip();
+  hideTurnList();
+}
+
+/**
+ * 延迟收起。
+ * 和会话标题那个浮层同一个理由：鼠标从短杠挪到内容上的路上会短暂离开短杠，
+ * 立刻收起的话根本读不完。浮层本身是 `pointer-events: none`（鼠标会穿过去），
+ * 列表则**吃鼠标**（要点行），所以这里给的宽限对两者都够用。
+ */
+function scheduleHideTurnHelp() {
+  if (turnTipTimer) clearTimeout(turnTipTimer);
+  turnTipTimer = setTimeout(() => {
+    turnTipTimer = null;
+    // 两种形态都要收：只收浮层的话，列表会一直挂在那儿（这条是新断言抓出来的）
+    hideTurnTip();
+    hideTurnList();
+  }, 160);
+}
+
+/** 浮出某一轮的「问 + 答开头」 */
+function showTurnTip(tick, number) {
+  const tip = els.turnTip;
+  const item = turnNavItems()[number - 1];
+  if (!tip || !item) return;
+  if (turnTipTimer) {
+    clearTimeout(turnTipTimer);
+    turnTipTimer = null;
+  }
+
+  const head = document.createElement('p');
+  head.className = 'turn-tip-head';
+  head.textContent = `第 ${item.number} 轮`;
+  const question = document.createElement('p');
+  question.className = 'turn-tip-q';
+  question.textContent = `问：${oneLine(item.question, 60) || '（没有提问）'}`;
+  const answer = document.createElement('p');
+  answer.className = 'turn-tip-a';
+  answer.textContent = `答：${oneLine(item.answer, 60) || '（这一轮还没有回答）'}`;
+  tip.replaceChildren(head, question, answer);
+  tip.hidden = false;
+
+  // 摆在短杠左边、纵向跟着它；贴到视口上下边就夹回来（和「⋯」菜单同一套纪律）
+  const rect = tick.getBoundingClientRect?.();
+  if (!rect) return;
+  const height = Number(tip.offsetHeight) || 96;
+  const viewport = Number(window.innerHeight) || 800;
+  const top = Math.min(Math.max(8, rect.top - 8), Math.max(8, viewport - height - 8));
+  tip.style.top = `${Math.round(top)}px`;
+  tip.style.right = `${Math.round((Number(window.innerWidth) || 1200) - rect.left + 12)}px`;
+}
+
+/**
+ * 密集模式用的那个列表：一条一轮（`第 N 轮 · 那句话`）。
+ *
+ * 只在轮数变了的时候重建（200 轮时不该每次 hover 都重建一遍）；
+ * 每次打开只更新「当前轮」和「hover 的那一轮」两个标记。
+ */
+function paintTurnList(hoverNumber = 0) {
+  const list = els.turnList;
+  if (!list) return;
+  const items = turnNavItems();
+  if (turnListBuilt !== items.length) {
+    list.replaceChildren(
+      ...items.map((item) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'turn-list-row';
+        row.dataset.turn = String(item.number);
+        // 行上放不下完整内容，用原生 title 兜住（浮层那一版是 hover 看内容，这里一行只够一句话）
+        row.title = `问：${oneLine(item.question, 100) || '（没有提问）'}\n答：${oneLine(item.answer, 100)}`;
+        const head = document.createElement('span');
+        head.className = 'turn-list-head';
+        head.textContent = `第 ${item.number} 轮`;
+        const text = document.createElement('span');
+        text.className = 'turn-list-text';
+        text.textContent = oneLine(item.question, 40) || '（没有提问）';
+        row.replaceChildren(head, text);
+        return row;
+      }),
+    );
+    turnListBuilt = items.length;
+  }
+
+  const current = currentTurnNumber();
+  for (const row of list.children) {
+    const n = Number(row.dataset.turn);
+    if (n === current) row.dataset.current = 'true';
+    else delete row.dataset.current;
+    if (hoverNumber && n === hoverNumber) row.dataset.hover = 'true';
+    else delete row.dataset.hover;
+  }
+  return current;
+}
+
+/** 打开列表（鼠标/焦点落在某一根短杠上时） */
+function showTurnList(number) {
+  const list = els.turnList;
+  if (!list) return;
+  hideTurnTip();
+  paintTurnList(number);
+  list.hidden = false;
+  // 把 hover 的那一行滚到列表中间：200 轮时列表是长条，不滚过去就等于没标
+  const row = [...list.children].find((child) => Number(child.dataset.turn) === number);
+  const offset = Number(row?.offsetTop);
+  if (row && Number.isFinite(offset)) {
+    list.scrollTop = Math.max(0, offset - (Number(list.clientHeight) || 0) / 2);
+  }
+}
+
+/**
+ * 跳到第 n 轮。
+ *
+ * 落点：**这一轮的开头**（不是中间）—— 跳过去就该从这一轮的提问读起。
+ * 用 `block: 'start'`，但真正的"开头"由 styles.css 里的 `scroll-margin-top` 定：
+ * 报头是吸顶且**不透明**的，直接把节点顶到视口最上沿，前一两行会被压在报头底下看不见。
+ * 那个属性就是为这种情况准备的（留出报头高度 + 一点呼吸缝）。
+ *
+ * 另外要紧的是**跨分页**：正文只画最近 20 轮，而导航数的是全部轮次 —— 目标在窗口之上时
+ * 得先把窗口扩到包含它（再往前多留几轮做上下文），否则 scrollIntoView 找不到那个节点，
+ * 用户看到的就是「点了没反应」。
+ */
+/**
+ * 取第 n 轮的节点。
+ * 直接翻 `children` 找，而不是拼 `querySelector('[data-turn="n"]')` ——
+ * 节点的身份就写在它自己的 dataset 上，少一层选择器解析（也少一处转义坑）。
+ */
+function turnNode(number) {
+  return [...els.exchanges.children].find((node) => node.dataset?.turn === String(number)) ?? null;
+}
+
+function revealTurn(number) {
+  const total = turnNavItems().length;
+  if (!Number.isFinite(number) || number < 1 || number > total) return;
+  const hidden = Math.max(0, total - transcriptWindow);
+  if (number <= hidden) transcriptWindow = total - number + 1 + TURN_NAV_LEAD;
+  render();
+  const node = turnNode(number);
+  if (node) markLandedTurn(node);
+  node?.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
+  hideTurnHelp();
+}
+
+/** 落地闪光的定时器（下一次跳转时先把它撤掉，免得旧的到时把新标记也删了） */
+let landedTimer = null;
+
+/**
+ * 落地的那一轮闪一下再淡出（跳很远时，正文里得有个「我到了」的反馈）。
+ *
+ * 这里**不手动去清旧的标记**：`revealTurn` 每次都先 `render()`，节点是整批重画的 ——
+ * 上一轮那个节点连同它的标记一起没了。
+ * （原先写过一段"遍历 children 删旧标记"的代码，变异测试证明它是**死代码**：
+ * 删掉它一条断言都不会失败。死代码比没有代码更糟，所以删了。
+ * 而断言「只有新的那一轮亮着」留着 —— 它守的是**将来**有人给跳转加
+ *「目标已经在视口里就不重画」那种优化：那时候旧标记会留下来，这条会立刻变红。）
+ */
+function markLandedTurn(node) {
+  if (landedTimer) {
+    clearTimeout(landedTimer);
+    landedTimer = null;
+  }
+  node.dataset.landed = 'true';
+  landedTimer = setTimeout(() => {
+    landedTimer = null;
+    delete node.dataset.landed;
+  }, TURN_NAV_LANDED_MS);
+}
+
+els.turnNav?.addEventListener('click', (event) => {
+  const tick = event.target.closest?.('[data-turn]');
+  if (!tick) return;
+  revealTurn(Number(tick.dataset.turn));
+});
+// hover 和键盘聚焦都要给内容：只做 hover 的话，键盘用户什么都看不到。
+// 出浮层还是出列表，看这一列现在密不密（见 paintTurnNav 里 dense 的说明）。
+for (const type of ['mouseover', 'focusin']) {
+  els.turnNav?.addEventListener(type, (event) => {
+    const tick = event.target.closest?.('[data-turn]');
+    if (!tick) return;
+    const number = Number(tick.dataset.turn);
+    if (els.turnNav.dataset.dense === 'true') showTurnList(number);
+    else showTurnTip(tick, number);
+  });
+}
+for (const type of ['mouseout', 'focusout']) {
+  els.turnNav?.addEventListener(type, scheduleHideTurnHelp);
+}
+// 列表自己会吃鼠标（要点行），所以鼠标进列表 = 取消收起，离开列表 = 延迟收起
+els.turnList?.addEventListener('mouseenter', () => {
+  if (turnTipTimer) {
+    clearTimeout(turnTipTimer);
+    turnTipTimer = null;
+  }
+});
+els.turnList?.addEventListener('mouseleave', scheduleHideTurnHelp);
+els.turnList?.addEventListener('click', (event) => {
+  const row = event.target.closest?.('[data-turn]');
+  if (!row) return;
+  revealTurn(Number(row.dataset.turn));
+});
+
 function render({ keepLive = false } = {}) {
   const assistants = store.messages.filter((m) => m.role === 'assistant');
   const isBlank = store.messages.length === 0;
@@ -2306,6 +2656,9 @@ function render({ keepLive = false } = {}) {
   });
 
   paintCompressButton();
+
+  // 轮次导航跟着会话走：轮数变了（新答完一轮、清空、换会话）就重画那列短杠
+  paintTurnNav();
 
   if (runtime.liveTurn) {
     const live = els.exchanges.querySelector(`[data-id="${runtime.liveTurn.id}"]`);

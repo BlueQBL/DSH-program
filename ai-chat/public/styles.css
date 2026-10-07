@@ -1432,6 +1432,187 @@ body[data-resizing="true"] {
   padding: 0;
 }
 
+/* ------------------------------------------------------------ 轮次导航（右侧那列短杠）
+ *
+ * 一轮一根，贴视口右缘、垂直居中。**平时很淡、很细**（10px × 2px），鼠标过去才明显 ——
+ * 它是个导航器，不该跟正文抢注意力。外形学豆包，信息量（hover 浮层）学 ChatGPT。
+ * 为什么放右边：左边排着页边序号「01/02」和会话栏，短杠挤在那儿会跟序号抢位置。
+ */
+
+.turn-nav {
+  position: fixed;
+  z-index: 3; /* 压着正文（1）、低于报头（4）—— 和会话栏同级 */
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  /* 一百轮也只占这一条细线：真装不下就在它自己的高度里滚（滚动条藏起来，免得抢视线） */
+  max-height: 76dvh;
+  overflow-y: auto;
+  scrollbar-width: none;
+  padding: 6px 4px;
+}
+.turn-nav::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * 一根短杠 = **看得见的那条线** + **一个大得多的可点区域**。
+ *
+ * 这两件事必须分开。第一版把按钮本身做成 10px × 2px、间距 4px ——
+ * 结果是「一轮一根排成一条虚线，鼠标像穿针」（用户原话：「线太密了，鼠标不好选中」）。
+ * 现在：按钮是 26px × 24px 的**整块热区**（够得着，也满足「可点目标不小于 24px」那条无障碍要求），
+ * 那条线用 ::before 画在右边 —— 看起来还是细的，点起来是宽的。
+ * 纵向走 flex-shrink：轮次少时一根占满 24px（排得开、不糊成一条虚线），
+ * 轮次多时自动压到 13px，再装不下才滚动。
+ */
+.turn-tick {
+  position: relative;
+  flex: 0 1 24px;
+  display: block;
+  width: 26px;
+  height: 24px;
+  min-height: 13px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+
+.turn-tick::before {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 12px;
+  height: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 30%, transparent);
+  transition: width 0.12s ease, background-color 0.12s ease;
+}
+
+/* hover / 键盘聚焦：热区亮一下（让人知道「这一块都能点」），线也长一截、变深 */
+.turn-tick:hover,
+.turn-tick:focus-visible {
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+}
+.turn-tick:hover::before,
+.turn-tick:focus-visible::before {
+  width: 24px;
+  background: var(--ink);
+}
+
+.turn-tick[data-current="true"]::before {
+  /* 当前正在看的那一轮：红墨，和「问」标、当前会话是同一套语言 */
+  width: 18px;
+  background: var(--accent);
+}
+.turn-tick:focus {
+  outline: none;
+}
+
+/* 浮层：这一轮的「问」和「答」的开头。
+   `pointer-events: none` 是必须的 —— 鼠标从短杠挪过来时不能被它自己挡住（否则 hover 断掉、浮层闪没）。 */
+.turn-tip {
+  position: fixed;
+  z-index: 5;
+  right: 42px;
+  width: 300px;
+  padding: 9px 11px;
+  background: var(--paper-lift);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  pointer-events: none;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--ink);
+}
+.turn-tip-head {
+  margin: 0 0 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: color-mix(in srgb, var(--ink) 50%, transparent);
+}
+.turn-tip-q {
+  margin: 0;
+}
+.turn-tip-a {
+  margin: 5px 0 0;
+  color: color-mix(in srgb, var(--ink) 70%, transparent);
+}
+
+/*
+ * 轮次多的时候改用列表（ChatGPT 那个形态，见 app.js 的 TURN_NAV_LIST_AT）。
+ *
+ * 和 `.turn-tip` 正好相反：**它必须吃鼠标**（要点行），所以这里没有 `pointer-events: none`。
+ * 它比那条细条宽得多、也能正常滚 —— 这正是它存在的理由：
+ * 短杠压到 13px 一根之后，谁都不想去滚那条 26px 宽的细条 ✗。
+ */
+.turn-list {
+  position: fixed;
+  z-index: 5;
+  top: 50%;
+  right: 42px;
+  transform: translateY(-50%);
+  width: 268px;
+  max-height: 76dvh;
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--paper-lift);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.turn-list-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  width: 100%;
+  padding: 5px 7px;
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.5;
+  text-align: left;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.turn-list-row:hover,
+.turn-list-row[data-hover="true"] {
+  background: var(--wash);
+}
+.turn-list-row[data-current="true"] {
+  /* 当前正在看的那一轮：和短杠上的红墨同一套语言 */
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.turn-list-head {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: color-mix(in srgb, var(--ink) 46%, transparent);
+}
+
+.turn-list-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .exchange {
   display: grid;
   /*
@@ -1446,6 +1627,37 @@ body[data-resizing="true"] {
   column-gap: var(--gap-col);
   position: relative;
   padding-bottom: 30px;
+  /*
+   * 点短杠跳过来时，落点是**这一轮的开头**（见 app.js 的 revealTurn）。
+   * `scroll-margin-top` 就是为吸顶头准备的：报头是 `position: sticky` 且**不透明**的，
+   * 不把这段高度让出来的话，跳过去的第一两行会被压在报头底下看不见 ✗。
+   * 报头高度是 JS 实测后写进 `--masthead-h` 的，所以这里跟着它走（12px 是呼吸缝）。
+   */
+  scroll-margin-top: calc(var(--masthead-h, 108px) + 12px);
+}
+
+/*
+ * 从轮次导航跳过来时，落地的那一轮**闪一下再淡出** ——
+ * 跳得很远时，光靠短杠上那个红点挪位不够，正文里得有个「我到了」的反馈。
+ *
+ * 用 CSS 动画而不是 JS 逐帧；文件末尾那条「减少动态效果」的全局规则
+ * （`animation-duration: 0.001ms !important`）会自动把它压掉，不用另写规则。
+ * 时长要和 app.js 里的 `TURN_NAV_LANDED_MS` 对上：那边负责到时把标记撤掉。
+ */
+@keyframes landed-fade {
+  0% {
+    background: color-mix(in srgb, var(--accent) 13%, transparent);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  100% {
+    background: transparent;
+    box-shadow: inset 0 0 0 transparent;
+  }
+}
+
+.exchange[data-landed="true"] {
+  animation: landed-fade 1.4s ease-out 1;
+  border-radius: var(--radius);
 }
 
 /* 贯穿一问一答的竖线，落在页边栏与正文栏之间 */
@@ -2454,6 +2666,11 @@ body[data-resizing="true"] {
   }
   /* 单列布局里没有「那道缝」可拖：会话栏是整幅宽的一段，调宽度没有意义 */
   .rail-resizer {
+    display: none;
+  }
+  /* 窄屏（单列）正文已经顶到两边，再钉一列短杠就成了压在字上的杂物 */
+  .turn-nav,
+  .turn-tip {
     display: none;
   }
   .session-list {

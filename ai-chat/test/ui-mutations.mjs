@@ -966,4 +966,153 @@ runner.run('会话栏拖拽的下限又回到 320px（正文被压成一条）',
   src.replace('const RAIL_TRANSCRIPT_MIN = 640;', 'const RAIL_TRANSCRIPT_MIN = 320;'),
 );
 
+// ---- 轮次导航（右侧那列短杠）
+//
+// 最容易坏的三件事：**数错轮次**（只数画出来的）、**点了没反应**（跨分页不扩窗）、
+// **浮层交互断掉**（hover 不长、浮层挡鼠标、滚动不收）。一条一条打掉一次。
+
+runner.run('轮次太少的会话也摆一列短杠（一屏看得完还添乱）', APP, (src) =>
+  src.replace('  if (items.length < TURN_NAV_MIN_TURNS || !tall) {', '  if (false) {'),
+);
+
+runner.run('正文不到两屏也摆一列短杠（判据退化成"只看轮数"）', APP, (src) =>
+  src.replace(
+    'const tall = (Number(els.exchanges?.scrollHeight) || 0) > viewport * TURN_NAV_MIN_SCREENS;',
+    'const tall = true;',
+  ),
+);
+
+runner.run('只给画出来的那些轮做短杠（第 3 轮根本点不到）', APP, (src) =>
+  src.replace(
+    '  const messages = store.messages;\n  const items = [];\n  messages.forEach((message, index) => {',
+    '  const messages = store.messages;\n  const items = [];\n  messages.slice(-40).forEach((message, index) => {',
+  ),
+);
+
+runner.run('答不做本地截断（把整段回答倒进浮层）', APP, (src) =>
+  src.replace('  return plain.length > max ? `${plain.slice(0, max)}…` : plain;', '  return plain;'),
+);
+
+runner.run('点短杠不跳（导航成了摆设）', APP, (src) =>
+  src.replace(
+    "els.turnNav?.addEventListener('click', (event) => {\n  const tick = event.target.closest?.('[data-turn]');\n  if (!tick) return;\n  revealTurn(Number(tick.dataset.turn));\n});\n",
+    '',
+  ),
+);
+
+runner.run('跨分页不扩窗（点第 3 轮 = 点了没反应）', APP, (src) =>
+  src.replace('  if (number <= hidden) transcriptWindow = total - number + 1 + TURN_NAV_LEAD;\n', ''),
+);
+
+runner.run('点已经画出来的轮次也重画一遍（白扩窗）', APP, (src) =>
+  src.replace('  if (number <= hidden)', '  if (true)'),
+);
+
+runner.run('滚动时「当前轮」不更新（高亮一直是进页面那一轮）', APP, (src) =>
+  src.replace('    // 轮次导航：「当前轮」跟着滚动更新；浮层和列表都是按坐标摆的，滚了就收起\n    paintActiveTurn();\n', ''),
+);
+
+runner.run('滚动了浮层不收起（它按屏幕坐标摆，会留在原地指错）', APP, (src) =>
+  src.replace('    hideTurnHelp();\n  } finally {', '  } finally {'),
+);
+
+runner.run('可点区域缩回那条线那么细（又变成"鼠标穿针"）', CSS, (src) =>
+  src.replace(
+    '  flex: 0 1 24px;\n  display: block;\n  width: 26px;\n  height: 24px;\n  min-height: 13px;',
+    '  flex: 0 1 2px;\n  display: block;\n  width: 12px;\n  height: 2px;\n  min-height: 2px;',
+  ),
+);
+
+runner.run('hover 时线不长（那一下的反馈没了）', CSS, (src) =>
+  src.replace('  width: 24px;\n  background: var(--ink);', '  width: 12px;\n  background: var(--ink);'),
+);
+
+runner.run('浮层挡住鼠标（从短杠挪过去 hover 就断，浮层闪没）', CSS, (src) =>
+  src.replace('  pointer-events: none;\n  font-size: 12.5px;', '  font-size: 12.5px;'),
+);
+
+runner.run('窄屏（单列）里也钉一列短杠（压在字上）', CSS, (src) =>
+  src.replace(
+    '  /* 窄屏（单列）正文已经顶到两边，再钉一列短杠就成了压在字上的杂物 */\n  .turn-nav,\n  .turn-tip {\n    display: none;\n  }\n',
+    '',
+  ),
+);
+
+runner.run('短杠不钉在视口上（跟着正文滚走）', CSS, (src) =>
+  src.replace(
+    '  position: fixed;\n  z-index: 3; /* 压着正文（1）、低于报头（4）—— 和会话栏同级 */',
+    '  position: absolute;\n  z-index: 3; /* 压着正文（1）、低于报头（4）—— 和会话栏同级 */',
+  ),
+);
+
+// ---- 轮次多了就换成"列表"（短杠 + 悬停展开成列表）
+//
+// 这一块守的是"两种形态各就各位"：该出列表时别只出一轮、该出单轮时别弹一整张列表，
+// 以及列表本身能不能用（标当前轮、标 hover 那一行、点得动、走开能收）。
+
+runner.run('轮次多了还是只出单轮浮层（一屏只看得到一轮的内容）', APP, (src) =>
+  src.replace('const dense = items.length > TURN_NAV_LIST_AT;', 'const dense = false;'),
+);
+
+runner.run('轮次不多也弹一整张列表（替掉了本来更轻的单轮浮层）', APP, (src) =>
+  src.replace('const dense = items.length > TURN_NAV_LIST_AT;', 'const dense = true;'),
+);
+
+runner.run('列表里不标「当前正在看的那一轮」', APP, (src) =>
+  src.replace('    if (n === current) row.dataset.current = \'true\';\n    else delete row.dataset.current;\n', ''),
+);
+
+runner.run('鼠标停在哪一根，列表不标那一行（45 条里不知道看哪条）', APP, (src) =>
+  src.replace('    if (hoverNumber && n === hoverNumber) row.dataset.hover = \'true\';\n    else delete row.dataset.hover;\n', ''),
+);
+
+runner.run('点列表里的一行不跳（列表成了只能看的东西）', APP, (src) =>
+  src.replace(
+    "els.turnList?.addEventListener('click', (event) => {\n  const row = event.target.closest?.('[data-turn]');\n  if (!row) return;\n  revealTurn(Number(row.dataset.turn));\n});\n",
+    '',
+  ),
+);
+
+runner.run('鼠标离开列表也不收（列表赖在那儿挡住正文）', APP, (src) =>
+  src.replace("els.turnList?.addEventListener('mouseleave', scheduleHideTurnHelp);\n", ''),
+);
+
+runner.run('列表不吃鼠标（点不到行）', CSS, (src) =>
+  src.replace('  width: 268px;\n  max-height: 76dvh;', '  pointer-events: none;\n  width: 268px;\n  max-height: 76dvh;'),
+);
+
+runner.run('列表不滚（轮次多了后面的根本看不到）', CSS, (src) =>
+  src.replace('  width: 268px;\n  max-height: 76dvh;\n  overflow-y: auto;', '  width: 268px;\n  max-height: 76dvh;\n  overflow-y: hidden;'),
+);
+
+runner.run('跳过去落在这一轮的中间（得从中间往上读）', APP, (src) =>
+  src.replace(
+    "node?.scrollIntoView?.({ block: 'start', behavior: 'smooth' });",
+    "node?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });",
+  ),
+);
+
+runner.run('落点不让开吸顶报头（跳过去前一两行被压在报头下面，等于没跳到开头）', CSS, (src) =>
+  src.replace('  scroll-margin-top: calc(var(--masthead-h, 108px) + 12px);\n', ''),
+);
+
+runner.run('落地不闪（跳了很远也不知道落在哪一轮）', APP, (src) =>
+  src.replace("  node.dataset.landed = 'true';\n", ''),
+);
+
+runner.run('跳转不重画（只在已有节点上滚动 —— 将来的"已经在视口里就不重画"优化）', APP, (src) =>
+  src.replace('  render();\n  const node = turnNode(number);', '  const node = turnNode(number);'),
+);
+
+runner.run('闪完不撤（下一轮跳过去还带着旧的高亮）', APP, (src) =>
+  src.replace(
+    '  landedTimer = setTimeout(() => {\n    landedTimer = null;\n    delete node.dataset.landed;\n  }, TURN_NAV_LANDED_MS);\n',
+    '',
+  ),
+);
+
+runner.run('落地闪光不做成动画（「减少动态效果」那条规则就压不掉它）', CSS, (src) =>
+  src.replace('  animation: landed-fade 1.4s ease-out 1;\n  border-radius: var(--radius);', '  border-radius: var(--radius);'),
+);
+
 runner.finish();

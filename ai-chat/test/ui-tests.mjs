@@ -3431,6 +3431,257 @@ console.log('\n㉒ 搜索会话：按标题或正文找，找到之后列表切�
   await new Promise((r) => setTimeout(r, 20));
 }
 
+console.log('\n㉓ 轮次导航：右侧那列短杠');
+
+{
+  const nav = () => getEl('turn-nav');
+  const tip = () => getEl('turn-tip');
+  const ticks = () => nav().children;
+  const list = () => getEl('turn-list');
+  const listRow = (number) => list().children.find((row) => Number(row.dataset.turn) === number);
+  const listRowText = (number) => (listRow(number)?.children ?? []).map((el) => el.textContent).join(' ');
+  const tickText = () => tip().children.map((p) => p.textContent).join('\n');
+  const turnNodes = () => getEl('exchanges').children.filter((node) => node.dataset?.turn);
+  const turnNumbers = () => turnNodes().map((node) => Number(node.dataset.turn));
+
+  const M = 60 * 1000;
+  const nowTs = Date.now();
+  function makeSession(id, turns) {
+    const messages = [];
+    for (let i = 1; i <= turns; i += 1) {
+      const q = `第 ${i} 个问题`;
+      // 回答故意写长：浮层里那句「答：…」必须是**本地截断**过的（结尾会有省略号）
+      const a = `第 ${i} 个回答`.repeat(20);
+      messages.push({
+        id: `${id}_u${i}`,
+        role: 'user',
+        content: q,
+        versions: [{ content: q, createdAt: 0, attachments: [], quote: null, feedback: null }],
+        versionCount: 1,
+      });
+      messages.push({
+        id: `${id}_a${i}`,
+        role: 'assistant',
+        content: a,
+        versions: [{ content: a, createdAt: 0, attachments: [], quote: null, feedback: null, status: 'done', model: 'gpt-4o' }],
+        versionCount: 1,
+      });
+    }
+    return { id, title: `${turns} 轮的会话`, createdAt: nowTs - 10 * 24 * 60 * M, updatedAt: nowTs - M, messages };
+  }
+  let seedSeq = 0;
+  function seedNav(turns) {
+    // 每次都是一个**新会话 id**：正文窗口是"按会话复位"的，用同一个 id 反复灌数据
+    // 不会把窗口复位（那正是设计如此），而这里往往需要"重新进来一次"的状态。
+    seedSeq += 1;
+    const id = `nav_${seedSeq}`;
+    const payload = { activeId: id, sessions: [makeSession(id, turns)] };
+    storage.set('duitanlu.sessions.v2', JSON.stringify(payload));
+    for (const h of windowHandlers.filter((x) => x.type === 'storage')) {
+      h.fn({ key: 'duitanlu.sessions.v2', newValue: JSON.stringify(payload) });
+    }
+    reloadActiveSession();
+  }
+
+  configMode = 'model';
+  chatMode = 'model';
+  chatStreams = true;
+
+  // 出现条件：**至少 4 轮，而且正文比两屏还长**（见 app.js 那段说明）。
+  // 替身不会排版，所以「正文多高」由测试直接给 —— 这样每条断言说的是同一件事：
+  // 「轮数够 + 够长」才出现。
+  const setHeight = (px) => {
+    getEl('exchanges').scrollHeight = px;
+  };
+  const viewport = () => Number(globalThis.window.innerHeight);
+
+  setHeight(5000);
+  seedNav(3);
+  await new Promise((r) => setTimeout(r, 60));
+  check('3 轮时不出（再长也不出：4 轮是下限）', nav().hidden === true, String(nav().hidden));
+
+  setHeight(viewport()); // 一屏高：视口 800px ⇒ 两屏要 1600px
+  seedNav(8);
+  await new Promise((r) => setTimeout(r, 60));
+  check('轮数够了、但正文不到两屏：也不出（一屏就看得完，导航只是装饰）',
+    nav().hidden === true, String(nav().hidden));
+
+  setHeight(viewport() * 4);
+  seedNav(12); // 12 轮：稀疏（≤24），所以 hover 出的是"单轮浮层"这一套
+  await new Promise((r) => setTimeout(r, 60));
+  check('正文超过两屏才出现，而且一轮一根',
+    nav().hidden === false && ticks().length === 12, `${ticks().length} 根 / hidden=${nav().hidden}`);
+  check('轮数不多时是「稀疏」模式（hover 出单轮浮层，不是列表）',
+    nav().dataset.dense === 'false', String(nav().dataset.dense));
+
+  const third = ticks()[2];
+  // 一律用 `?.`：短杠数量本身会有断言失败（例如变异把某些轮次漏掉），
+  // 这里不该因为「取不到那一根」就抛异常 —— 那样测试会中途崩掉，只留下一条崩溃记录，
+  // 看不清到底是哪条断言失败了。
+  check('每根短杠都记着自己对应第几轮', third?.dataset.turn === '3', String(third?.dataset.turn));
+  check('短杠的无障碍名字里带着那一轮的问',
+    String(third?.getAttribute('aria-label')).startsWith('跳到第 3 轮：')
+      && String(third?.getAttribute('aria-label')).includes('第 3 个问题'),
+    String(third?.getAttribute('aria-label')));
+
+  dispatch(nav(), 'mouseover', { target: third });
+  check('鼠标放到一根上：浮层出来', tip().hidden === false, String(tip().hidden));
+  check('浮层里写着第几轮', tickText().includes('第 3 轮'), tickText());
+  check('浮层里有那一轮的问', tickText().includes('问：第 3 个问题'), tickText());
+  check('浮层里的答是**本地截断**过的（结尾有省略号，不是整段回答倒进去）',
+    tickText().includes('答：第 3 个回答') && tickText().includes('…'), tickText().slice(-60));
+
+  dispatch(nav(), 'mouseout', { target: third });
+  check('鼠标刚离开时浮层还在（留时间读完，不是一挪开就没）', tip().hidden === false, String(tip().hidden));
+  await new Promise((r) => setTimeout(r, 240));
+  check('离开一小会儿之后收起', tip().hidden === true, String(tip().hidden));
+
+  // 当前轮高亮：替身没有真实排版，所以给节点安排"位置"再触发滚动。
+  // 注意：这时画出来的是最近 20 轮（第 26–45 轮），所以高亮的不是"第一根"而是第 26 根 ——
+  // 断言按**轮次号**去取那一根，别按个数取（我第一版就是按个数写错的）。
+  const nodes = turnNodes();
+  const place = (index) => nodes.forEach((node, i) => {
+    node.getBoundingClientRect = () => ({ top: i === index ? 10 : 4000 });
+  });
+  const firstShown = turnNumbers()[0];
+  const secondShown = turnNumbers()[1];
+  place(0);
+  for (const fn of scrollHandlers) fn({});
+  check(`「当前轮」跟着滚动更新（第 ${firstShown} 轮在视口里 → 对应那根高亮）`,
+    ticks()[firstShown - 1]?.dataset.current === 'true' && ticks()[secondShown - 1]?.dataset.current === undefined,
+    `${ticks()[firstShown - 1]?.dataset.current} / ${ticks()[secondShown - 1]?.dataset.current}`);
+  place(1);
+  for (const fn of scrollHandlers) fn({});
+  check(`滚到第 ${secondShown} 轮：高亮挪过去，上一根要放开`,
+    ticks()[secondShown - 1]?.dataset.current === 'true' && ticks()[firstShown - 1]?.dataset.current === undefined,
+    `${ticks()[firstShown - 1]?.dataset.current} / ${ticks()[secondShown - 1]?.dataset.current}`);
+
+  dispatch(nav(), 'mouseover', { target: ticks()[1] });
+  for (const fn of scrollHandlers) fn({});
+  check('滚一下浮层就收起（它按屏幕坐标摆，滚了就会指错轮次）', tip().hidden === true, String(tip().hidden));
+
+  // ---- 轮次一多（>24）就改出「列表」：短杠压紧之后，谁都不想去滚那条 26px 宽的细条
+  setHeight(viewport() * 15);
+  seedNav(45);
+  await new Promise((r) => setTimeout(r, 60));
+  check('45 轮的会话：短杠是 45 根（导航数的是全部轮次，不是画出来的那些）',
+    ticks().length === 45, `${ticks().length} 根`);
+  check('（对比）正文这时只画了 20 轮', turnNodes().length === 20, `${turnNodes().length} 轮`);
+  check('轮数多了就是「密集」模式（hover 该出列表）',
+    nav().dataset.dense === 'true', String(nav().dataset.dense));
+
+  dispatch(nav(), 'mouseover', { target: ticks()[2] });
+  check('密集时 hover 出的是**列表**（不是单轮浮层）',
+    list().hidden === false && tip().hidden === true, `列表 ${list().hidden} / 浮层 ${tip().hidden}`);
+  check('列表里一轮一条', list().children.length === 45, `${list().children.length} 条`);
+  check('列表里写着第几轮和那句话',
+    listRowText(3).includes('第 3 轮') && listRowText(3).includes('第 3 个问题'), listRowText(3));
+  check('鼠标停在哪一根，列表里那一行就标出来（不然一屏 45 条不知道看哪条）',
+    listRow(3)?.dataset.hover === 'true', String(listRow(3)?.dataset.hover));
+  check('列表里也标出「当前正在看的那一轮」',
+    list().children.some((row) => row.dataset.current === 'true'), '一条都没标');
+  dispatch(list(), 'mouseleave');
+  await new Promise((r) => setTimeout(r, 240));
+  check('离开列表一会儿之后收起', list().hidden === true, String(list().hidden));
+
+  // 列表里的行也能点 —— 和短杠是同一条路的两个入口
+  dispatch(nav(), 'mouseover', { target: ticks()[1] });
+  dispatch(list(), 'click', { target: listRow(4) });
+  check('点列表里的一行：同样跳到那一轮（跨分页也扩窗）',
+    turnNumbers().includes(4), `首个 ${turnNumbers()[0]}`);
+
+  // 点一根**没画出来**的短杠：这是最容易做成"点了没反应"的地方
+  //（先重来一次：上一个用例点过列表，窗口已经扩开了）
+  setHeight(viewport() * 15);
+  seedNav(45);
+  await new Promise((r) => setTimeout(r, 60));
+  check('（准备）第 3 轮这时没画出来', turnNumbers()[0] > 3, String(turnNumbers()[0]));
+  const beforeClick = turnNumbers();
+  dispatch(nav(), 'click', { target: ticks()[2] });
+  const afterClick = turnNumbers();
+  check('点第 3 轮：窗口先扩到能包含它（不然就是「点了没反应」）',
+    afterClick.includes(3), `首个 ${afterClick[0]}，共 ${afterClick.length} 轮`);
+  check('而且确实扩了窗（不是压根没动）', afterClick.length > beforeClick.length,
+    `${beforeClick.length} → ${afterClick.length} 轮`);
+  const nodeOf = (number) => turnNodes().find((node) => Number(node.dataset.turn) === number);
+  check('滚动委托给了第 3 轮那个节点',
+    nodeOf(3)?.__scrolledIntoView === true);
+  check('落点是这一轮的**开头**，不是中间（跳过去该从这一轮的提问读起）',
+    nodeOf(3)?.__scrollOptions?.block === 'start',
+    JSON.stringify(nodeOf(3)?.__scrollOptions ?? null));
+
+  // 落地闪光：跳很远时，正文里得有个「我到了」的反馈
+  const landed = () => turnNodes().filter((node) => node.dataset.landed === 'true').map((node) => node.dataset.turn);
+  check('落地的那一轮带上「闪一下」的标记', landed().join(',') === '3', landed().join(',') || '（没有）');
+  dispatch(nav(), 'click', { target: ticks()[8] });
+  check('又跳一轮：只有新的那一轮亮着（旧的要撤掉，不然好几轮一起闪）',
+    landed().join(',') === '9', landed().join(',') || '（没有）');
+  await new Promise((r) => setTimeout(r, 1600));
+  check('闪完自己撤掉（不留着，下次跳过去还是亮的）', landed().length === 0, landed().join(','));
+
+  // 点一根**已经画出来**的：不该白白重算窗口
+  //
+  // 注意断言要比"画出来的第一轮编号"变没变，而不是"画了多少轮"：对靠后的轮次来说，
+  // 变异版算出来的窗口宽度（total − number + 1 + LEAD）**正好等于**默认窗口，
+  // 按条数比是比不出来的 —— 我第一版就是那么写的，变异直接逃过去了。
+  setHeight(viewport() * 15);
+  seedNav(45);
+  await new Promise((r) => setTimeout(r, 60));
+  const firstBefore = turnNumbers()[0];
+  dispatch(nav(), 'click', { target: ticks()[39] }); // 第 40 轮：这时是画着的
+  check('点一根已经画出来的轮次：窗口不动（不白算一遍，也不会把上下文缩掉）',
+    turnNumbers()[0] === firstBefore, `第一轮 ${firstBefore} → ${turnNumbers()[0]}`);
+
+  tip().hidden = true;
+  list().hidden = true;
+  dispatch(nav(), 'focusin', { target: ticks()[0] });
+  check('键盘聚焦到某一根同样出内容（密集时出的是列表，不只是鼠标能用）',
+    list().hidden === false, String(list().hidden));
+
+  // ---- CSS 契约：替身不做命中测试，「变长」和「不挡鼠标」只能从样式表上守
+  //（这一段自己读一次样式表：上面几段里的 `css` 是各自块里的局部变量）
+  const css = readFileSync(path.resolve(PUBLIC, 'styles.css'), 'utf8');
+  const ruleOf = (selector) => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return css.match(new RegExp(`^${escaped}\\s*\\{[\\s\\S]*?\\n\\}`, 'm'))?.[0] ?? '';
+  };
+  const decl = (rule, prop) => {
+    const found = [...String(rule).matchAll(new RegExp(`(?:^|[;{\\s])${prop}\\s*:\\s*([^;]+);`, 'g'))];
+    return found.length ? found[found.length - 1][1].trim() : '';
+  };
+  const px = (rule, prop) => Number((decl(rule, prop) || '').replace('px', ''));
+  const baseRule = ruleOf('.turn-tick');
+  const barRule = css.match(/^\.turn-tick::before\s*\{[^}]*\n\}/m)?.[0] ?? '';
+  // 悬停那条是"两个选择器共用一个花括号"，用 `[^}]*` 限定在它自己的块里（`[\s\S]*?` 会跨到后面的规则去）
+  const hoverRule = css.match(/^\.turn-tick:hover::before,[^}]*\n\}/m)?.[0] ?? '';
+
+  check('**可点区域比看得见的线大得多**（26×24 的热区，线只有 12×2）',
+    px(baseRule, 'width') >= 24 && px(baseRule, 'height') >= 24
+      && px(barRule, 'width') === 12 && px(barRule, 'height') === 2,
+    `热区 ${decl(baseRule, 'width')}×${decl(baseRule, 'height')} / 线 ${decl(barRule, 'width')}×${decl(barRule, 'height')}`);
+  check('相邻两根之间有间距（轮次少时不糊成一条虚线）',
+    px(ruleOf('.turn-nav'), 'gap') >= 3, decl(ruleOf('.turn-nav'), 'gap'));
+  check('hover 时线长一截（那一下的反馈）',
+    px(hoverRule, 'width') > px(barRule, 'width'), `${decl(barRule, 'width')} → ${decl(hoverRule, 'width')}`);
+  check('浮层不吃鼠标（否则从短杠挪过去 hover 就断、浮层自己闪没）',
+    decl(ruleOf('.turn-tip'), 'pointer-events') === 'none', decl(ruleOf('.turn-tip'), 'pointer-events'));
+  check('列表**吃**鼠标（要能点行 —— 它和浮层正好相反，别照着抄）',
+    decl(ruleOf('.turn-list'), 'pointer-events') !== 'none', decl(ruleOf('.turn-list'), 'pointer-events') || '（没写 = 吃）');
+  check('列表自己能滚（轮次多了不至于看不到后面的）',
+    decl(ruleOf('.turn-list'), 'overflow-y') === 'auto', decl(ruleOf('.turn-list'), 'overflow-y'));
+  check('它钉在视口右侧（不跟着正文滚）',
+    decl(ruleOf('.turn-nav'), 'position') === 'fixed', decl(ruleOf('.turn-nav'), 'position'));
+  check('跳过去的落点要让开吸顶报头的高度（否则前一两行被压在报头下面）',
+    decl(ruleOf('.exchange'), 'scroll-margin-top').includes('var(--masthead-h'),
+    decl(ruleOf('.exchange'), 'scroll-margin-top'));
+  check('落地闪光是 CSS 动画（文件末尾那条「减少动态效果」的规则才能把它压掉）',
+    /@keyframes landed-fade/.test(css)
+      && /^\.exchange\[data-landed="true"\]\s*\{[^}]*animation:\s*landed-fade/m.test(css),
+    '找不到 landed-fade 动画/规则');
+  check('窄屏（单列）里不出现',
+    /@media \(max-width: 1000px\)[\s\S]*?\.turn-nav[\s\S]*?display:\s*none/.test(css));
+}
+
 console.log(`\n${'─'.repeat(52)}`);
 summaryPrinted = true;
 if (errors.length) {
