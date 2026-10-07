@@ -13,11 +13,12 @@ const APP = 'public/app.js';
 const CSS = 'public/styles.css';
 const HTML = 'public/index.html';
 const STORE = 'public/lib/store.js';
+const BG = 'public/lib/background.js';
 
 const runner = createMutationRunner({
   label: '界面状态',
   suite: 'test/ui-tests.mjs',
-  files: [APP, CSS, HTML, STORE],
+  files: [APP, CSS, HTML, STORE, BG],
 });
 
 // promptSave 现在分成三条分支（未改动 / 改过预设 / 自定义），每条各自收起面板。
@@ -441,7 +442,7 @@ runner.run('页数标到问题后面（长问题会把它挤到省略号外，�
 // 靶点要写足上下文：JS 的 String.replace 传字符串时**只替换第一处匹配** ——
 // `if (draft.kind === 'turns') {` 在 app.js 里出现两次（状态行那处在前、确认那处在后），
 // 只写这一行的话打到的是状态行，标题里说的「去调模型」根本没发生
-//（这条是我自己写的变异，被 .tmp-mutations/one-mutation.mjs 单条复核抓出来的）。
+//（这条是我自己写的变异，用 `MUT_FROM=n MUT_TO=n` 单条复核抓出来的。）
 runner.run('「原文」档也走摘要（选了原文却去调模型）', APP, (src) =>
   src.replace(
     "  if (draft.kind === 'turns') {\n    const plan = referencePlan({ source, kind: 'turns', numbers });",
@@ -1335,6 +1336,192 @@ runner.run('Esc 不先收建议（输错一个字就把整张卡片关了）', A
     '    if (!els.authAccounts.hidden) {\n      hideAuthAccounts();\n      return;\n    }\n',
     '',
   ),
+);
+
+// ---------------------------------------------------------------- 页面背景
+
+runner.run('不透明度不夹上限（能设成 500%）', BG, (src) =>
+  src.replace(
+    '  return Math.min(BG_OPACITY_MAX, Math.max(BG_OPACITY_MIN, number));',
+    '  return Math.max(BG_OPACITY_MIN, number);',
+  ),
+);
+
+runner.run('空白值当成 0（「没填」变成「全透明」，图像丢了）', BG, (src) =>
+  src.replace(
+    "  if (value === null || value === undefined || String(value).trim() === '') return BG_OPACITY_DEFAULT;\n",
+    '',
+  ),
+);
+
+runner.run('svg 也能当背景（那东西能带脚本）', BG, (src) =>
+  src.replace(
+    '  return /^data:image\\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(dataUrl);',
+    '  return /^data:image\\//.test(dataUrl);',
+  ),
+);
+
+runner.run('背景不查大小（一次上传就能把 localStorage 撑爆）', BG, (src) =>
+  src.replace(
+    "  if (typeof dataUrl !== 'string' || dataUrl.length > BG_IMAGE_MAX) return false;",
+    "  if (typeof dataUrl !== 'string') return false;",
+  ),
+);
+
+runner.run('平铺的那几张也当成铺满（点阵被拉成一屏大圆斑）', BG, (src) =>
+  src.replace(
+    "      size: preset.tile ? 'auto' : 'cover',\n      repeat: preset.tile ? 'repeat' : 'no-repeat',",
+    "      size: 'cover',\n      repeat: 'no-repeat',",
+  ),
+);
+
+runner.run('自己的图不铺满（留白或者重复）', BG, (src) =>
+  src.replace(
+    "      image: `url(\"${clean.dataUrl}\")`,\n      opacity: String(clean.opacity / 100),\n      size: 'cover',",
+    "      image: `url(\"${clean.dataUrl}\")`,\n      opacity: String(clean.opacity / 100),\n      size: 'auto',",
+  ),
+);
+
+runner.run('「不设背景」也说自己是 active（于是永远藏不起来）', BG, (src) =>
+  src.replace(
+    "  return { active: false, image: 'none', opacity: '0', size: 'cover', repeat: 'no-repeat', tone };",
+    "  return { active: true, image: 'none', opacity: '0', size: 'cover', repeat: 'no-repeat', tone };",
+  ),
+);
+
+runner.run('脏背景不回落（不认识的 id 也留着）', BG, (src) =>
+  src.replace("  if (raw?.kind === 'builtin' && presetById(raw.id)) {", "  if (raw?.kind === 'builtin') {"),
+);
+
+runner.run('存不下也说存上了（刷新之后图没了，用户不知道为什么）', BG, (src) =>
+  src.replace(
+    "    return { ok: false, background: clean };",
+    '    return { ok: true, background: clean };',
+  ),
+);
+
+runner.run('拖滑块的过程中就写盘（一秒几十次全量序列化）', APP, (src) =>
+  src.replace(
+    '  setBackground({ opacity: clampOpacity(els.bgOpacity.value) }, { persist: false });\n  els.bgOpacityNumber.value',
+    '  setBackground({ opacity: clampOpacity(els.bgOpacity.value) });\n  els.bgOpacityNumber.value',
+  ),
+);
+
+runner.run('数字格空着时当成 0（正在删掉重打时背景一黑一闪）', APP, (src) =>
+  src.replace(
+    "  const raw = els.bgOpacityNumber.value;\n  if (String(raw).trim() === '') return;",
+    '  const raw = els.bgOpacityNumber.value;',
+  ),
+);
+
+runner.run('换背景不更新预览（角上那行字还是旧的）', APP, (src) =>
+  src.replace("  els.bgPreviewNote.textContent = bgLabel(bgState.current);\n", ''),
+);
+
+runner.run('「取消」不还原（点了取消照样换成了新的）', APP, (src) =>
+  src.replace('    bgState.current = { ...bgState.origin };\n', ''),
+);
+
+runner.run('「不要背景」把不透明度也清了（下次选图要从头调）', APP, (src) =>
+  src.replace(
+    '  if (setBackground({ ...NO_BACKGROUND, opacity: bgState.current.opacity })) {',
+    '  if (setBackground({ ...NO_BACKGROUND })) {',
+  ),
+);
+
+runner.run('选中的那张不标出来（不知道自己挑的是哪张）', APP, (src) =>
+  src.replace(
+    "    item.el.setAttribute('aria-pressed', String(selected));\n    item.el.dataset.selected = String(selected);",
+    '    void selected;',
+  ),
+);
+
+runner.run('背景层用 z-index: -1（会被纸盖住，整张图看不见）', CSS, (src) =>
+  src.replace(
+    '  inset: 0;\n  z-index: 0;\n  pointer-events: none;\n  background-image: var(--bg-image, none);',
+    '  inset: 0;\n  z-index: -1;\n  pointer-events: none;\n  background-image: var(--bg-image, none);',
+  ),
+);
+
+runner.run('背景层吃鼠标（整页点不动）', CSS, (src) =>
+  src.replace(
+    '  z-index: 0;\n  pointer-events: none;\n  background-image: var(--bg-image, none);',
+    '  z-index: 0;\n  background-image: var(--bg-image, none);',
+  ),
+);
+
+runner.run('有背景时纸面不透（图只在两侧空当里看得见）', CSS, (src) =>
+  src.replace(
+    'html[data-bg="true"] {\n  --paper: color-mix(in srgb, #f5f2ec 84%, transparent);\n  --paper-lift: color-mix(in srgb, #fdfbf7 90%, transparent);\n}',
+    'html[data-bg="true"] {\n  --paper: #f5f2ec;\n  --paper-lift: #fdfbf7;\n}',
+  ),
+);
+
+// ---------------------------------------------------------------- 深色图配浅色字
+
+runner.run('相对亮度用平均值算（深蓝被当成中等亮度，配错字色）', BG, (src) =>
+  src.replace(
+    '  return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);',
+    '  return ((Number(r) || 0) + (Number(g) || 0) + (Number(b) || 0)) / 3 / 255;',
+  ),
+);
+
+runner.run('深浅判断不看**不透明度**（纯黑图放到 20% 也翻成浅色字）', BG, (src) =>
+  src.replace(
+    "  const luminance = effectiveLuminance(detected === 'dark' ? 0 : 1, opacity);",
+    "  const luminance = detected === 'dark' ? 0 : 1;",
+  ),
+);
+
+runner.run('用户钉死的不优先（自动永远赢）', BG, (src) =>
+  src.replace("  if (preference === 'dark' || preference === 'light') return preference;\n", ''),
+);
+
+runner.run('深浅判断反了（暗图配深色字 —— 正是用户抱怨的那件事）', BG, (src) =>
+  src.replace(
+    "  return luminance < TONE_THRESHOLD ? 'dark' : 'light';",
+    "  return luminance < TONE_THRESHOLD ? 'light' : 'dark';",
+  ),
+);
+
+runner.run('内置背景的深浅不看预设表（旧数据里留着 dark 就配错）', BG, (src) =>
+  src.replace(
+    "    return { kind: 'builtin', id: raw.id, dataUrl: '', opacity, tone, detected: presetById(raw.id).tone };",
+    "    return { kind: 'builtin', id: raw.id, dataUrl: '', opacity, tone, detected };",
+  ),
+);
+
+runner.run('量图方向反了（暗图当成亮图）', BG, (src) =>
+  src.replace(
+    "    return total / weight < threshold ? 'dark' : 'light';",
+    "    return total / weight < threshold ? 'light' : 'dark';",
+  ),
+);
+
+runner.run('量不出来时回 dark（把字翻成看不见，最坏的回落方向）', BG, (src) =>
+  src.replace(
+    '    if (!weight) return \'light\';\n    return total / weight < threshold',
+    '    if (!weight) return \'dark\';\n    return total / weight < threshold',
+  ),
+);
+
+runner.run('换背景不写 data-bg-tone（深浅那一套永远不生效）', APP, (src) =>
+  src.replace('  root.dataset.bgTone = view.tone;\n', ''),
+);
+
+runner.run('面板里的「文字颜色」不接（选了没反应）', APP, (src) =>
+  src.replace(
+    "els.bgTone?.addEventListener('change', () => {\n  const mode = TONE_MODES.includes(els.bgTone.value) ? els.bgTone.value : 'auto';\n  if (setBackground({ tone: mode })) {\n    syncBgToneControl();\n    flashHint(`文字：${bgToneNote(bgState.current, backgroundCss(bgState.current).tone)}`, 2400);\n  }\n});\n",
+    '',
+  ),
+);
+
+runner.run('深色档里不换 --ink（底变深了、字还是黑的）', CSS, (src) =>
+  src.replace('  --ink: #f2efe8;\n', '  --ink: #16161a;\n'),
+);
+
+runner.run('深色档里漏掉 --paper（面板还是浅纸，浅色字压在浅纸上）', CSS, (src) =>
+  src.replace('  --paper: color-mix(in srgb, #16161a 92%, transparent);\n', ''),
 );
 
 runner.finish();

@@ -44,6 +44,22 @@ import {
   uploadErrorMessage,
   writeRecentAccounts,
 } from './lib/auth.js';
+import {
+  BACKGROUND_PRESETS,
+  BG_MAX_EDGE,
+  BG_OPACITY_DEFAULT,
+  BG_TARGET_CHARS,
+  NO_BACKGROUND,
+  backgroundCss,
+  backgroundFromUpload,
+  backgroundUploadError,
+  clampOpacity,
+  readBackground,
+  sampleImageTone,
+  toneText,
+  TONE_MODES,
+  writeBackground,
+} from './lib/background.js';
 import { AVATAR_COLORS, AVATAR_EMOJI, normalizeAvatar, passwordHint } from './lib/auth-rules.js';
 import {
   copyFeedbackState,
@@ -158,6 +174,26 @@ const els = {
   // 列表收起（或窄屏）时，报头上的备用入口
   newSessionCompact: document.getElementById('new-session-compact'),
   exportAll: document.getElementById('export-all-button'),
+
+  // 页面背景：页面那一层 + 设置面板
+  bgLayer: document.getElementById('bg-layer'),
+  bgButton: document.getElementById('background-button'),
+  bgOverlay: document.getElementById('bg-overlay'),
+  bgPreview: document.getElementById('bg-preview'),
+  bgPreviewLayer: document.getElementById('bg-preview-layer'),
+  bgPreviewNote: document.getElementById('bg-preview-note'),
+  bgPresets: document.getElementById('bg-presets'),
+  bgFile: document.getElementById('bg-file'),
+  bgUpload: document.getElementById('bg-upload'),
+  bgOpacity: document.getElementById('bg-opacity'),
+  bgOpacityNumber: document.getElementById('bg-opacity-number'),
+  bgTone: document.getElementById('bg-tone'),
+  bgToneNote: document.getElementById('bg-tone-note'),
+  bgError: document.getElementById('bg-error'),
+  bgDone: document.getElementById('bg-done'),
+  bgReset: document.getElementById('bg-reset'),
+  bgCancel: document.getElementById('bg-cancel'),
+  bgClose: document.getElementById('bg-close'),
 
   // 账号（可选登录）：侧栏底下那一行 + 三个覆盖层面板
   accountRow: document.getElementById('account-row'),
@@ -3801,6 +3837,12 @@ document.addEventListener('keydown', (event) => {
     closeAuthPanel();
     return;
   }
+  if (!els.bgOverlay.hidden) {
+    // 背景面板里改的东西是**当场生效**的，所以 Esc 只是关掉（想反悔用面板里的「取消」）
+    writeBackground(bgState.current);
+    closeBackgroundPanel();
+    return;
+  }
   if (!els.avatarOverlay.hidden) {
     closeAvatarPanel();
     return;
@@ -4952,6 +4994,255 @@ window.addEventListener('pagehide', () => {
   }
 });
 
+// ---------------------------------------------------------------- 页面背景
+//
+// 三件事：把描述（用哪张图 + 多不透明）变成页面上的样式、给一个设置面板、
+// 以及**把「改了什么」和「存了什么」分开** ——
+// 拖滑块的时候只改样式（一秒几十次），松手（change）才落盘（见 lib/store.js 里同样的取舍）。
+//
+// 位置上的一个硬规矩写在 styles.css 的 .bg-layer 注释里：图必须在纸之上、正文之下。
+// 那不是审美问题 —— 换一个 z-index 它就整张被纸盖住，什么都看不见。
+
+const bgState = {
+  current: { ...NO_BACKGROUND },
+  /** 打开面板时的那一份：点「取消」就还原成它 */
+  origin: null,
+};
+/** 面板里那一排内置背景的按钮（留着引用，标记选中状态时不用查 DOM） */
+let bgPresetButtons = [];
+
+function showBgError(text) {
+  els.bgError.textContent = text;
+  els.bgError.hidden = !text;
+}
+
+/**
+ * 把当前的背景画到页面上，顺带把面板里的预览也画了。
+ * 变量写在 `<html>` 上（.bg-layer 和别处都能用），预览那一层用它自己的一套。
+ */
+function applyBackground() {
+  const view = backgroundCss(bgState.current);
+  const root = document.documentElement;
+  root.style.setProperty('--bg-image', view.image);
+  root.style.setProperty('--bg-size', view.size);
+  root.style.setProperty('--bg-repeat', view.repeat);
+  root.style.setProperty('--bg-opacity', view.opacity);
+  // 这一个开关决定「纸面要不要透一点」（见 styles.css 里那两个颜色混合的值）
+  root.dataset.bg = String(view.active);
+  els.bgLayer.dataset.active = String(view.active);
+
+  els.bgPreviewLayer.style.backgroundImage = view.image;
+  els.bgPreviewLayer.style.backgroundSize = view.size;
+  els.bgPreviewLayer.style.backgroundRepeat = view.repeat;
+  els.bgPreviewLayer.style.opacity = view.opacity;
+  els.bgPreviewNote.textContent = bgLabel(bgState.current);
+
+  // 深色图 → 整页翻成墨底纸字（见 styles.css 里 data-bg-tone="dark" 那一段）。
+  // 预览也跟着翻，否则预览会骗人。
+  root.dataset.bgTone = view.tone;
+  els.bgPreview.dataset.tone = view.tone;
+  els.bgToneNote.textContent = bgToneNote(bgState.current, view.tone);
+  markBgPresets();
+}
+
+/** 「自动」时把判断结果说出来（不然用户不知道自动到底选了哪一档） */
+function bgToneNote(background, resolved) {
+  const mode = background?.tone ?? 'auto';
+  if (mode === 'auto') return `按图判断：${toneText(resolved)}`;
+  return `你钉的：${toneText(resolved)}`;
+}
+
+/** 预览角上那行小字：「纸纹 · 40%」/「自己的图 · 65%」/「还没有背景」 */
+function bgLabel(background) {
+  const clean = backgroundCss(background);
+  if (!clean.active) return '还没有背景';
+  const preset = BACKGROUND_PRESETS.find((item) => item.id === background?.id);
+  const name = background?.kind === 'image' ? '自己的图' : (preset?.label ?? '背景');
+  return `${name} · ${clampOpacity(background?.opacity)}%`;
+}
+
+function markBgPresets() {
+  const current = bgState.current;
+  for (const item of bgPresetButtons) {
+    const selected = current.kind === 'builtin' && current.id === item.id;
+    item.el.setAttribute('aria-pressed', String(selected));
+    item.el.dataset.selected = String(selected);
+  }
+}
+
+/**
+ * 换一个背景。
+ * `persist: false` 用于**拖动中**：只改画面，松手才写盘。
+ */
+function setBackground(next, { persist = true } = {}) {
+  bgState.current = { ...bgState.current, ...next };
+  applyBackground();
+  if (!persist) return true;
+  const saved = writeBackground(bgState.current);
+  if (!saved.ok) {
+    // 落盘失败（配额满 / 隐私模式）要说出来：不然用户以为设好了，刷新之后却没了
+    showBgError('这张图没能存进浏览器（本地空间不够），现在能用，但刷新之后就没了 —— 换一张小一点的图吧');
+    return false;
+  }
+  showBgError('');
+  return true;
+}
+
+// ---- 面板
+
+function buildBgPresets() {
+  if (!els.bgPresets) return;
+  bgPresetButtons = BACKGROUND_PRESETS.map((preset) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'bg-preset';
+    button.dataset.preset = preset.id;
+    button.style.backgroundImage = `url("${preset.url}")`;
+    button.style.backgroundRepeat = preset.tile ? 'repeat' : 'no-repeat';
+    button.style.backgroundSize = preset.tile ? 'auto' : 'cover';
+    button.setAttribute('aria-label', `把背景换成${preset.label}`);
+    button.setAttribute('aria-pressed', 'false');
+
+    const label = document.createElement('span');
+    label.className = 'bg-preset-label';
+    label.textContent = preset.label;
+    button.append(label);
+
+    button.addEventListener('click', () => {
+      if (setBackground({ kind: 'builtin', id: preset.id, dataUrl: '' })) {
+        flashHint(`背景换成「${preset.label}」`, 1800);
+      }
+    });
+    return { el: button, id: preset.id };
+  });
+  els.bgPresets.replaceChildren(...bgPresetButtons.map((item) => item.el));
+}
+
+/** 滑块和数字是同一件事的两个入口：两边都要跟着当前值走 */
+function syncBgOpacityControls() {
+  const value = String(clampOpacity(bgState.current.opacity));
+  els.bgOpacity.value = value;
+  els.bgOpacityNumber.value = value;
+}
+
+function syncBgToneControl() {
+  els.bgTone.value = TONE_MODES.includes(bgState.current.tone) ? bgState.current.tone : 'auto';
+}
+
+function openBackgroundPanel() {
+  closeAccountMenu();
+  bgState.origin = { ...bgState.current };
+  if (!bgPresetButtons.length) buildBgPresets();
+  syncBgOpacityControls();
+  syncBgToneControl();
+  showBgError('');
+  applyBackground();
+  els.bgOverlay.hidden = false;
+  els.bgDone.focus?.();
+}
+
+function closeBackgroundPanel() {
+  els.bgOverlay.hidden = true;
+  showBgError('');
+}
+
+/** 取消：把面板打开时的那一份还原回去（包括立刻落盘 —— 不然刷新之后又变回来了） */
+function cancelBackground() {
+  if (bgState.origin) {
+    bgState.current = { ...bgState.origin };
+    bgState.origin = null;
+    applyBackground();
+    writeBackground(bgState.current);
+  }
+  closeBackgroundPanel();
+}
+
+// ---- 事件接线
+
+els.bgButton?.addEventListener('click', openBackgroundPanel);
+
+els.bgOpacity?.addEventListener('input', () => {
+  // 拖动中：只改画面（一秒几十次，写盘留给松手那一下）
+  setBackground({ opacity: clampOpacity(els.bgOpacity.value) }, { persist: false });
+  els.bgOpacityNumber.value = String(clampOpacity(els.bgOpacity.value));
+});
+els.bgOpacity?.addEventListener('change', () => {
+  setBackground({ opacity: clampOpacity(els.bgOpacity.value) });
+});
+
+els.bgOpacityNumber?.addEventListener('input', () => {
+  // 空着的时候**不动**：人正在删掉重打，这时候把它当 0 会把背景一黑一闪
+  const raw = els.bgOpacityNumber.value;
+  if (String(raw).trim() === '') return;
+  const value = clampOpacity(raw);
+  setBackground({ opacity: value }, { persist: false });
+  els.bgOpacity.value = String(value);
+});
+els.bgOpacityNumber?.addEventListener('change', () => {
+  const value = clampOpacity(els.bgOpacityNumber.value);
+  setBackground({ opacity: value });
+  syncBgOpacityControls();
+});
+els.bgOpacityNumber?.addEventListener('blur', () => {
+  // 失焦时把格子里的字**规整成真正生效的那个值**（填了 150 就是 100）
+  syncBgOpacityControls();
+});
+
+els.bgUpload?.addEventListener('click', () => els.bgFile?.click?.());
+els.bgFile?.addEventListener('change', async () => {
+  const file = els.bgFile.files?.[0];
+  if (!file) return;
+  showBgError('');
+  // 选完就清掉，不然再选同一张图不会触发 change（浏览器的值没变）
+  els.bgFile.value = '';
+  try {
+    const compressed = await compressImage(file, { maxEdge: BG_MAX_EDGE, targetChars: BG_TARGET_CHARS });
+    // 先量一下这张图有多亮：深色图要配浅色字（见 lib/background.js 的 resolveTone）
+    const detected = await sampleImageTone(compressed.dataUrl);
+    const background = backgroundFromUpload(compressed, bgState.current.opacity, {
+      detected,
+      // 用户在面板里钉过深浅就照他的；默认 auto
+      tone: bgState.current.tone,
+    });
+    if (!background) {
+      showBgError('这张图没能用：只支持 png / jpg / webp，而且压完不能超过 900KB');
+      return;
+    }
+    if (setBackground(background)) {
+      flashHint(detected === 'dark' ? '背景换成你自己的图了（深色图，字已转浅）' : '背景换成你自己的图了', 2600);
+    }
+  } catch (err) {
+    showBgError(backgroundUploadError(err));
+  }
+});
+
+// 文字颜色：自动 / 浅色字 / 深色字。用户钉死的永远优先。
+els.bgTone?.addEventListener('change', () => {
+  const mode = TONE_MODES.includes(els.bgTone.value) ? els.bgTone.value : 'auto';
+  if (setBackground({ tone: mode })) {
+    syncBgToneControl();
+    flashHint(`文字：${bgToneNote(bgState.current, backgroundCss(bgState.current).tone)}`, 2400);
+  }
+});
+
+els.bgReset?.addEventListener('click', () => {
+  // 「不要背景」只清掉图，**不透明度留着** —— 下次选图不用重新调
+  if (setBackground({ ...NO_BACKGROUND, opacity: bgState.current.opacity })) {
+    flashHint('背景已去掉（纸面回来了）', 2200);
+  }
+});
+
+els.bgDone?.addEventListener('click', () => {
+  writeBackground(bgState.current); // 滑块拖到一半就关面板的那种情况，这里补一次
+  bgState.origin = null;
+  closeBackgroundPanel();
+});
+els.bgCancel?.addEventListener('click', cancelBackground);
+els.bgClose?.addEventListener('click', closeBackgroundPanel);
+els.bgOverlay?.addEventListener('click', (event) => {
+  if (event.target === els.bgOverlay) closeBackgroundPanel();
+});
+
 // ---------------------------------------------------------------- 跨标签页同步
 window.addEventListener('storage', (event) => {
   // 只认**当前这本笔记本**那个键：登录之后键是 `…v2::<账号 id>`；
@@ -5049,6 +5340,14 @@ async function boot() {
   closeAvatarPanel();
   closeAccountMenu();
   els.accountMenu.hidden = true;
+  closeBackgroundPanel();
+
+  // 0.5) 背景先画上：它是整页的样子，晚一步就会看到「先闪一下没背景」
+  bgState.current = readBackground();
+  buildBgPresets();
+  syncBgOpacityControls();
+  syncBgToneControl();
+  applyBackground();
 
   // 1) 现在是谁（登录了就先换成他那本笔记本）
   await resolveAuth();

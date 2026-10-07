@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" width="1200" height="800" preserveAspectRatio="xMidYMid slice">
+  <!-- 远山：三层层叠的山影，越远越淡。铺满用 -->
+  <path d="M0 620 L 180 430 L 300 520 L 470 330 L 660 540 L 800 430 L 980 560 L 1200 400 L 1200 800 L 0 800 Z"
+        fill="#3a5a8c" fill-opacity="0.07" />
+  <path d="M0 690 L 160 560 L 320 640 L 500 500 L 700 660 L 880 580 L 1060 680 L 1200 600 L 1200 800 L 0 800 Z"
+        fill="#2f6f6b" fill-opacity="0.09" />
+  <path d="M0 750 L 200 690 L 420 740 L 640 680 L 860 745 L 1080 700 L 1200 740 L 1200 800 L 0 800 Z"
+        fill="#556069" fill-opacity="0.1" />
+</svg>

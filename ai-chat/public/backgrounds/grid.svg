@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="96" height="96">
+  <!-- 方格纸：每 24px 一格，每 96px 一条略重的线。平铺用 -->
+  <defs>
+    <pattern id="grid-fine" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M24 0 H0 V24" fill="none" stroke="#3a5a8c" stroke-opacity="0.09" stroke-width="0.7" />
+    </pattern>
+    <pattern id="grid-bold" width="96" height="96" patternUnits="userSpaceOnUse">
+      <path d="M96 0 H0 V96" fill="none" stroke="#3a5a8c" stroke-opacity="0.14" stroke-width="0.9" />
+    </pattern>
+  </defs>
+  <rect width="96" height="96" fill="url(#grid-fine)" />
+  <rect width="96" height="96" fill="url(#grid-bold)" />
+</svg>

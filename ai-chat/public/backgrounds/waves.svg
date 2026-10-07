@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" width="1200" height="800" preserveAspectRatio="xMidYMid slice">
+  <!--
+    水波：一层层压下去的横线，越往下越淡。
+    它是**铺满**的（cover），所以按 1200×800 的比例画 —— 宽屏上两边会被裁掉一点，
+    所以重要的形态放在中间区。
+  -->
+  <defs>
+    <linearGradient id="wave-fade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f6f6b" stop-opacity="0" />
+      <stop offset="0.35" stop-color="#2f6f6b" stop-opacity="0.16" />
+      <stop offset="1" stop-color="#2f6f6b" stop-opacity="0.03" />
+    </linearGradient>
+  </defs>
+  <g fill="none" stroke="url(#wave-fade)" stroke-width="1.6">
+    <path d="M-40 300 C 160 250, 300 350, 520 300 S 880 250, 1240 310" />
+    <path d="M-40 360 C 170 310, 310 410, 540 360 S 890 310, 1240 370" />
+    <path d="M-40 420 C 180 370, 320 470, 560 420 S 900 370, 1240 430" />
+    <path d="M-40 480 C 190 430, 330 530, 580 480 S 910 430, 1240 490" />
+    <path d="M-40 540 C 200 490, 340 590, 600 540 S 920 490, 1240 550" />
+    <path d="M-40 600 C 210 550, 350 650, 620 600 S 930 550, 1240 610" />
+  </g>
+</svg>

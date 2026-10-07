@@ -2105,11 +2105,16 @@ group('会话引用 · 另一个会话的内容当背景材料');
   });
   const { createStore } = await loadStore();
   const store = createStore();
-  check('空正文的材料当成没挂', store.sessions[0].reference === null);
+  // 按 **id 找**，不按下标：`store.sessions` 是按「最近使用」**排过序**的，
+  // 而这三条种子没有各自的 updatedAt（都取当前的 Date.now()）——
+  // 机器一忙，三次 Date.now() 落在不同毫秒里，顺序就变了，上一条断言会随机失败。
+  // （这条 flake 是在一次很忙的 npm test 里被撞到的：它跟被测代码无关，是测试自己不稳。）
+  const refOf = (id) => store.sessions.find((s) => s.id === id)?.reference ?? null;
+  check('空正文的材料当成没挂', refOf('sess1') === null);
   check('轮次号被夹在上限以内（脏数据不会让它变成一条引用链）',
-    store.sessions[1].reference.turns.length <= 3, JSON.stringify(store.sessions[1].reference.turns));
+    refOf('sess2').turns.length <= 3, JSON.stringify(refOf('sess2').turns));
   check('摘要档的轮次记录**不**受「原文最多 3 轮」那条限制（那 3 轮管的是材料，不是记录）',
-    store.sessions[2].reference.turns.length === 5, JSON.stringify(store.sessions[2].reference.turns));
+    refOf('sess3').turns.length === 5, JSON.stringify(refOf('sess3').turns));
 }
 
 {

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
+  <!--
+    纸纹：细纤维 + 几点杂质。
+    它是**平铺**的（400×400 一块），所以线条要极细极淡 —— 铺满一屏之后
+    任何一条稍微清楚一点的线都会变成噪音。透明度最后还要乘上用户调的背景不透明度。
+  -->
+  <defs>
+    <pattern id="paper-fiber" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M6 -4 V44 M18 -4 V44 M31 -4 V44" stroke="#8a7f6a" stroke-opacity="0.1" stroke-width="0.6" fill="none" />
+      <path d="M0 13 H40 M0 29 H40" stroke="#8a7f6a" stroke-opacity="0.05" stroke-width="0.5" fill="none" />
+      <circle cx="12" cy="9" r="0.7" fill="#8a7f6a" fill-opacity="0.12" />
+      <circle cx="27" cy="26" r="0.6" fill="#8a7f6a" fill-opacity="0.09" />
+      <circle cx="35" cy="5" r="0.5" fill="#b4472e" fill-opacity="0.06" />
+    </pattern>
+  </defs>
+  <rect width="400" height="400" fill="url(#paper-fiber)" />
+</svg>

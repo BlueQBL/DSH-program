@@ -15,6 +15,24 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 // 导出器是纯函数，直接拿它核对「窗口只管画、不管存」：画 20 轮，导出必须还是 45 轮
 import { toMarkdown } from '../public/lib/exporters.js';
+// 背景那套判断也是纯函数（描述 → CSS、不透明度夹取），在这里顺手核对一遍
+import {
+  BACKGROUND_PRESETS,
+  backgroundCss,
+  backgroundFromUpload,
+  backgroundUploadError,
+  clampOpacity,
+  effectiveLuminance,
+  isBackgroundImage,
+  normalizeBackground,
+  readBackground,
+  relativeLuminance,
+  resolveTone,
+  sampleImageTone,
+  toneText,
+  TONE_THRESHOLD,
+  writeBackground,
+} from '../public/lib/background.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.resolve(HERE, '../public');
@@ -273,7 +291,7 @@ globalThis.document = {
   querySelectorAll: () => [],
   documentElement: {
     scrollHeight: 1000,
-    // CSS 变量：记录下来供断言检查（报头高度会写进 --masthead-h）
+    // CSS 变量：记录下来供断言检查（报头高度会写进 --masthead-h，背景图写进 --bg-image）
     _vars: {},
     _varWrites: [],
     style: {
@@ -281,6 +299,19 @@ globalThis.document = {
         globalThis.document.documentElement._vars[name] = value;
         globalThis.document.documentElement._varWrites.push({ name, value });
       },
+    },
+    /*
+     * 真实的 documentElement 上 `dataset` 和 `setAttribute` 都有 —— app.js 用它挂
+     * 「这一页有没有背景」（`html[data-bg="true"]` 那条样式靠它生效）。
+     * 替身原来只有 scrollHeight 和 style，于是「用了标准 API」又变成测试里的坑。
+     */
+    dataset: {},
+    attributes: {},
+    setAttribute(name, value) {
+      globalThis.document.documentElement.attributes[name] = String(value);
+    },
+    getAttribute(name) {
+      return globalThis.document.documentElement.attributes[name];
     },
   },
 };
@@ -4592,6 +4623,377 @@ console.log('\n㉕ 账号：注册 / 登录 / 头像 / 从服务端恢复');
     /\.avatar\[data-kind="emoji"\]\s*\{[^}]*background:\s*var\(--wash\)/.test(css));
   check('上传的图裁成正方形铺满（不会拉变形）',
     decl(ruleOf('.avatar-img'), 'object-fit') === 'cover', decl(ruleOf('.avatar-img'), 'object-fit'));
+}
+
+console.log('\n㉖ 页面背景：内置的几张、自己的图、不透明度');
+
+{
+  /** 等一个 tick：上传那条路是异步的（要等压缩 promise 落定） */
+  const settleUi = () => new Promise((r) => setTimeout(r, 60));
+
+  // ---------------------------------------------------------------- 纯函数
+  check('不透明度：夹在 0–100 之间',
+    clampOpacity(-5) === 0 && clampOpacity(150) === 100 && clampOpacity('45') === 45);
+  check('不透明度：小数取整', clampOpacity(45.6) === 46 && clampOpacity(45.4) === 45);
+  check('不透明度：认不出来时回**默认值**，不是 0',
+    clampOpacity('abc') === 40 && clampOpacity(undefined) === 40 && clampOpacity(null) === 40,
+    String(clampOpacity('abc')));
+
+  check('内置背景：id 进白名单', normalizeBackground({ kind: 'builtin', id: 'grid' }).kind === 'builtin');
+  check('内置背景：不认识的 id 退成「不设背景」',
+    normalizeBackground({ kind: 'builtin', id: '不存在' }).kind === 'none');
+  const png = `data:image/png;base64,${'A'.repeat(64)}`;
+  check('自己的图：png / jpeg / webp 可以',
+    normalizeBackground({ kind: 'image', dataUrl: png }).kind === 'image'
+      && isBackgroundImage(png) === true);
+  check('svg 一律不收（svg 能带脚本）', isBackgroundImage('data:image/svg+xml;base64,PHN2Zz4=') === false);
+  check('gif / 外链 / javascript: 都不收',
+    isBackgroundImage('data:image/gif;base64,AAAA') === false
+      && isBackgroundImage('https://example.com/a.png') === false
+      && isBackgroundImage('javascript:alert(1)') === false);
+  check('太大的图不收（localStorage 一共才 5MB 左右）',
+    isBackgroundImage(`data:image/png;base64,${'A'.repeat(1.3 * 1024 * 1024)}`) === false);
+  check('退成「不设背景」时**不透明度保住**（下次选图不用重新调）',
+    normalizeBackground({ kind: 'builtin', id: '不存在', opacity: 66 }).opacity === 66);
+
+  const gridCss = backgroundCss({ kind: 'builtin', id: 'grid', opacity: 30 });
+  check('点阵 / 方格这种**平铺**的：按原尺寸走，不拉伸',
+    gridCss.size === 'auto' && gridCss.repeat === 'repeat', `${gridCss.size} / ${gridCss.repeat}`);
+  const hillsCss = backgroundCss({ kind: 'builtin', id: 'hills', opacity: 30 });
+  check('远山 / 水波这种**成幅**的：铺满、不重复',
+    hillsCss.size === 'cover' && hillsCss.repeat === 'no-repeat', `${hillsCss.size} / ${hillsCss.repeat}`);
+  check('路径写在 url("…") 里', /^url\("backgrounds\/hills\.svg"\)$/.test(hillsCss.image), hillsCss.image);
+  check('不透明度变成 0–1 的数字', gridCss.opacity === '0.3', gridCss.opacity);
+  check('自己的图：一律铺满', backgroundCss({ kind: 'image', dataUrl: png }).size === 'cover');
+  const noneCss = backgroundCss({ kind: 'none' });
+  check('「不设背景」是 active:false + image none（不是一张透明的图）',
+    noneCss.active === false && noneCss.image === 'none' && noneCss.opacity === '0');
+
+  check('内置背景有 5 张，id 不重复', BACKGROUND_PRESETS.length === 5
+    && new Set(BACKGROUND_PRESETS.map((p) => p.id)).size === 5);
+  check('每张都写清了是「平铺」还是「铺满」',
+    BACKGROUND_PRESETS.every((p) => typeof p.tile === 'boolean'));
+
+  const uploadPng = { dataUrl: png, mime: 'image/png' };
+  check('压过的图 → 背景描述', backgroundFromUpload(uploadPng, 55)?.kind === 'image');
+  check('上传时把当前的不透明度带过去', backgroundFromUpload(uploadPng, 55)?.opacity === 55);
+  check('gif 不收', backgroundFromUpload({ ...uploadPng, mime: 'image/gif' }) === null);
+  check('mime 和内容对不上也不收',
+    backgroundFromUpload({ dataUrl: 'data:image/svg+xml;base64,AA', mime: 'image/svg+xml' }) === null);
+  check('空的也不收', backgroundFromUpload(null) === null && backgroundFromUpload({}) === null);
+  check('上传失败会说人话（给出能照着做的）',
+    backgroundUploadError(new Error('只支持图片文件')).includes('png')
+      && backgroundUploadError(new Error('太大')).includes('900KB'));
+
+  const fakeStorage = () => ({
+    map: new Map(),
+    getItem(key) { return this.map.has(key) ? this.map.get(key) : null; },
+    setItem(key, value) { this.map.set(key, String(value)); },
+  });
+  const store = fakeStorage();
+  check('存得进读得回', (writeBackground({ kind: 'builtin', id: 'dots', opacity: 20 }, store).ok === true)
+    && readBackground(store).id === 'dots' && readBackground(store).opacity === 20);
+  check('坏数据当成「不设背景」（不炸）',
+    (store.setItem('duitanlu.background.v1', '{不是 JSON'), readBackground(store).kind === 'none') === true);
+  check('存不下时明确说没存上（别让用户以为设好了）',
+    writeBackground({ kind: 'builtin', id: 'dots' }, { setItem() { throw new Error('满了'); } }).ok === false);
+
+  // ---------------------------------------------------------------- 字的深浅（深色图要配浅色字）
+  check('相对亮度：白 1、黑 0',
+    Math.abs(relativeLuminance(255, 255, 255) - 1) < 0.001 && relativeLuminance(0, 0, 0) === 0);
+  check('**纯蓝比纯绿暗得多**（这就是"看着像深色"不能靠平均值判断的原因）',
+    relativeLuminance(0, 0, 255) < 0.1 && relativeLuminance(0, 255, 0) > 0.7,
+    `${relativeLuminance(0, 0, 255).toFixed(3)} vs ${relativeLuminance(0, 255, 0).toFixed(3)}`);
+  check('深红、深蓝都算暗（该配浅色字）',
+    relativeLuminance(120, 20, 20) < 0.1 && relativeLuminance(20, 30, 90) < 0.05);
+  check('米黄、浅绿都算亮（该配深色字）',
+    relativeLuminance(245, 240, 220) > 0.8 && relativeLuminance(200, 240, 200) > 0.7);
+
+  check('实际底色：图 0% 时就是纸', effectiveLuminance(0, 0) === 0.9);
+  check('实际底色：图 100% 时就是图自己', Math.abs(effectiveLuminance(0.1, 100) - 0.1) < 0.0001);
+  check('实际底色：一半一半就是混出来的中间值',
+    Math.abs(effectiveLuminance(0, 50) - 0.45) < 0.0001, String(effectiveLuminance(0, 50)));
+  check('实际底色：亮度值越界也不乱（夹在 0–1）',
+    effectiveLuminance(5, 100) === 1 && effectiveLuminance(-3, 100) === 0);
+
+  check('浅色图 → 深色字（也就是现在这个样子，一个像素都不变）',
+    resolveTone({ detected: 'light', preference: 'auto', opacity: 40 }) === 'light');
+  check('**深色图放在 40% → 仍然是深色字**（纸占六成，底色还是浅的）',
+    resolveTone({ detected: 'dark', preference: 'auto', opacity: 40 }) === 'light');
+  check('深色图放满 → 翻成浅色字',
+    resolveTone({ detected: 'dark', preference: 'auto', opacity: 100 }) === 'dark');
+  check('深色图放到 85% 也翻（那是算出来的界线，不是拍的）',
+    resolveTone({ detected: 'dark', preference: 'auto', opacity: 85 }) === 'dark');
+  // 界线两侧各验一次，但**不踩在阈值那个数上**：0.9×0.2 在浮点里是 0.1799999…，
+  // 正好卡在线上时哪一侧都能自圆其说（两边都约 4.5:1），钉死它只会做出一条爱抖的断言。
+  check('界线下方（75%）还在深色字那一侧',
+    resolveTone({ detected: 'dark', preference: 'auto', opacity: 75 }) === 'light',
+    String(effectiveLuminance(0, 75)));
+  check('分界线是 0.18（深墨字要 4.5:1 需底色 ≥ 0.21，纸色字要 ≤ 0.15，它落在两者之间）',
+    TONE_THRESHOLD > 0.15 && TONE_THRESHOLD < 0.21, String(TONE_THRESHOLD));
+  check('**用户钉死的永远优先**（自动判断总有它拿不准的图）',
+    resolveTone({ detected: 'light', preference: 'dark', opacity: 10 }) === 'dark'
+      && resolveTone({ detected: 'dark', preference: 'light', opacity: 100 }) === 'light');
+  check('参数缺省也不炸', resolveTone() === 'light' && resolveTone({}) === 'light');
+  check('给界面的一句话', toneText('dark') === '浅色字' && toneText('light') === '深色字');
+
+  check('内置那 5 张都标了「浅色」', BACKGROUND_PRESETS.every((preset) => preset.tone === 'light'));
+  check('规整：认不出的深浅选择回落到 auto',
+    normalizeBackground({ kind: 'builtin', id: 'grid', tone: '花里胡哨' }).tone === 'auto');
+  check('规整：认不出的检测结果回落到 light',
+    normalizeBackground({ kind: 'image', dataUrl: png, detected: '花里胡哨' }).detected === 'light');
+  check('**内置背景的深浅由预设表说了算**（旧数据里留着 dark 也不会配错）',
+    normalizeBackground({ kind: 'builtin', id: 'grid', detected: 'dark' }).detected === 'light');
+  check('自己的图：检测结果留着', normalizeBackground({ kind: 'image', dataUrl: png, detected: 'dark' }).detected === 'dark');
+  check('描述 → CSS 里带着深浅', backgroundCss({ kind: 'image', dataUrl: png, detected: 'dark', opacity: 100 }).tone === 'dark');
+  check('「不设背景」时是深色字（回纸面那套）', backgroundCss({ kind: 'none' }).tone === 'light');
+
+  // 量图有多亮：拿假 canvas 喂固定像素，验的是**判断方向**（暗图配浅色字）
+  const fakeImage = (pixels) => ({
+    ImageCtor: class {
+      set src(_value) {}
+      async decode() {}
+    },
+    createCanvas: () => ({
+      width: 0,
+      height: 0,
+      getContext: () => ({
+        drawImage() {},
+        getImageData: () => ({ data: new Uint8ClampedArray(pixels) }),
+      }),
+    }),
+  });
+  const flat = (r, g, b, alpha = 255) => Array.from({ length: 4 * 4 }, () => [r, g, b, alpha]).flat();
+
+  check('全黑的图 → dark（该配浅色字）',
+    (await sampleImageTone('data:image/png;base64,AA', fakeImage(flat(0, 0, 0)))) === 'dark');
+  check('全白的图 → light（该配深色字）',
+    (await sampleImageTone('data:image/png;base64,AA', fakeImage(flat(255, 255, 255)))) === 'light');
+  check('深蓝的图 → dark',
+    (await sampleImageTone('data:image/png;base64,AA', fakeImage(flat(10, 10, 90)))) === 'dark');
+  check('米黄的图 → light',
+    (await sampleImageTone('data:image/png;base64,AA', fakeImage(flat(246, 240, 214)))) === 'light');
+  check('全透明的图（等于没画）→ light（不翻成浅色字）',
+    (await sampleImageTone('data:image/png;base64,AA', fakeImage(flat(0, 0, 0, 0)))) === 'light');
+  check('**量不出来时回 light**（维持原样，而不是把字翻成看不见）',
+    (await sampleImageTone('data:image/png;base64,AA', {
+      ImageCtor: class { set src(_v) {} async decode() { throw new Error('解不开'); } },
+    })) === 'light');
+  check('没有 canvas 也不炸',
+    (await sampleImageTone('data:image/png;base64,AA', {
+      ImageCtor: class { set src(_v) {} async decode() {} },
+      createCanvas: () => null,
+    })) === 'light');
+
+  // ---------------------------------------------------------------- 接在页面上
+  const vars = () => globalThis.document.documentElement._vars;
+  const varsOf = (name) => vars()[name] ?? '';
+  const bgLayerEl = () => getEl('bg-layer');
+  const presets = () => getEl('bg-presets').children;
+  const previewLayer = () => getEl('bg-preview-layer');
+  const storedBg = () => JSON.parse(storage.get('duitanlu.background.v1') ?? 'null');
+
+  check('（准备）一开始没有背景：整层不参与、开关是 false',
+    bgLayerEl().dataset.active === 'false' && globalThis.document.documentElement.dataset.bg === 'false'
+      && varsOf('--bg-opacity') === '0',
+    `${bgLayerEl().dataset.active} / ${globalThis.document.documentElement.dataset.bg}`);
+
+  dispatch(getEl('background-button'), 'click');
+  check('点「背景…」出面板', getEl('bg-overlay').hidden === false);
+  check('面板里那 5 张内置背景都摆出来了',
+    presets().length === 5 && presets()[0]?.dataset?.preset === 'paper', String(presets().length));
+  check('预览写着「还没有背景」', getEl('bg-preview-note').textContent === '还没有背景',
+    getEl('bg-preview-note').textContent);
+
+  // 点一张平铺的（方格）
+  const gridButton = presets().find((b) => b.dataset.preset === 'grid');
+  dispatch(gridButton, 'click');
+  check('选「方格」：页面上那一层换成了它',
+    /backgrounds\/grid\.svg/.test(varsOf('--bg-image')), varsOf('--bg-image'));
+  check('平铺的用 auto + repeat', varsOf('--bg-size') === 'auto' && varsOf('--bg-repeat') === 'repeat');
+  check('这一页的开关打开了（纸面跟着透一点）',
+    globalThis.document.documentElement.dataset.bg === 'true' && bgLayerEl().dataset.active === 'true');
+  check('预览跟着变，角上写着「方格 · 40%」',
+    /backgrounds\/grid\.svg/.test(previewLayer().style.backgroundImage)
+      && getEl('bg-preview-note').textContent === '方格 · 40%',
+    getEl('bg-preview-note').textContent);
+  check('选中的那张按下了（aria-pressed）', gridButton.getAttribute('aria-pressed') === 'true');
+  check('当场就存下来了（不用等「完成」）', storedBg()?.id === 'grid', storage.get('duitanlu.background.v1'));
+
+  // 点一张铺满的（远山）：两种形态走的是两条路
+  const hillsButton = presets().find((b) => b.dataset.preset === 'hills');
+  dispatch(hillsButton, 'click');
+  check('选「远山」：铺满 + 不重复',
+    varsOf('--bg-size') === 'cover' && varsOf('--bg-repeat') === 'no-repeat');
+  check('上一张的按下状态放开了',
+    gridButton.getAttribute('aria-pressed') === 'false' && hillsButton.getAttribute('aria-pressed') === 'true');
+
+  // 不透明度：滑块拖 → 数字跟着走；松手才落盘
+  const storedBeforeDrag = storage.get('duitanlu.background.v1');
+  getEl('bg-opacity').value = '75';
+  dispatch(getEl('bg-opacity'), 'input');
+  check('拖滑块：页面上立刻变', varsOf('--bg-opacity') === '0.75', varsOf('--bg-opacity'));
+  check('拖滑块：右边那个数字跟着走', getEl('bg-opacity-number').value === '75',
+    getEl('bg-opacity-number').value);
+  check('拖的过程中**不写盘**（一秒几十次，写盘留给松手）',
+    storage.get('duitanlu.background.v1') === storedBeforeDrag);
+  dispatch(getEl('bg-opacity'), 'change');
+  check('松手才落盘', JSON.parse(storage.get('duitanlu.background.v1')).opacity === 75,
+    storage.get('duitanlu.background.v1'));
+
+  // 数字填 → 滑块跟着走
+  getEl('bg-opacity-number').value = '150';
+  dispatch(getEl('bg-opacity-number'), 'input');
+  check('直接填数字：夹到 100，滑块也跟着到顶',
+    varsOf('--bg-opacity') === '1' && getEl('bg-opacity').value === '100',
+    `${varsOf('--bg-opacity')} / ${getEl('bg-opacity').value}`);
+  dispatch(getEl('bg-opacity-number'), 'change');
+  check('填完落盘的是夹过的值（不是 150）',
+    JSON.parse(storage.get('duitanlu.background.v1')).opacity === 100);
+
+  getEl('bg-opacity-number').value = '';
+  dispatch(getEl('bg-opacity-number'), 'input');
+  check('格子被清空时不当作 0（人正在删掉重打，不该一黑一闪）',
+    varsOf('--bg-opacity') === '1', varsOf('--bg-opacity'));
+  getEl('bg-opacity-number').value = '20';
+  dispatch(getEl('bg-opacity-number'), 'blur');
+  check('失焦时把格子规整成真正生效的值', getEl('bg-opacity-number').value === '100',
+    getEl('bg-opacity-number').value);
+
+  // 上传：替身里没有 canvas，压缩必然失败 —— 要看的是「失败也说人话」
+  getEl('bg-file').files = [{ name: 'wall.png', type: 'image/png' }];
+  dispatch(getEl('bg-file'), 'change');
+  await settleUi();
+  check('上传处理不了时给一句能照着做的话（不崩）',
+    getEl('bg-error').hidden === false && /png|jpg|webp/.test(getEl('bg-error').textContent),
+    getEl('bg-error').textContent);
+
+  // 「不要背景」：只清掉图，不透明度留着
+  dispatch(getEl('bg-reset'), 'click');
+  check('点「不要背景」：整层收掉、开关关掉',
+    varsOf('--bg-image') === 'none' && globalThis.document.documentElement.dataset.bg === 'false'
+      && bgLayerEl().dataset.active === 'false');
+  check('但不透明度留着（下次选图不用重新调）',
+    JSON.parse(storage.get('duitanlu.background.v1')).opacity === 100,
+    storage.get('duitanlu.background.v1'));
+
+  // 取消：把打开面板时那一份还原回去
+  dispatch(presets().find((b) => b.dataset.preset === 'waves'), 'click');
+  check('（准备）换成了水波', /waves\.svg/.test(varsOf('--bg-image')));
+  dispatch(getEl('bg-cancel'), 'click');
+  check('点「取消」：回到打开面板时的样子（那时是「不要背景」）',
+    varsOf('--bg-image') === 'none' && getEl('bg-overlay').hidden === true, varsOf('--bg-image'));
+  check('取消也落盘了（不然刷新之后它又冒出来）',
+    JSON.parse(storage.get('duitanlu.background.v1')).kind === 'none');
+
+  // Esc：关面板但**保留**当前设置（想反悔用「取消」）
+  dispatch(getEl('background-button'), 'click');
+  dispatch(presets().find((b) => b.dataset.preset === 'dots'), 'click');
+  for (const h of documentHandlers.filter((x) => x.type === 'keydown')) h.fn({ key: 'Escape' });
+  check('Esc 关掉面板，但背景留着（面板里改的是当场生效的）',
+    getEl('bg-overlay').hidden === true && /dots\.svg/.test(varsOf('--bg-image')),
+    varsOf('--bg-image'));
+
+  // ---- 内置背景那 5 个 svg 文件
+  //
+  // 这一段的理由很实在：**我看不到渲染结果**。而少一个 `/>` 的 svg 在浏览器里
+  // 是「安静地什么都不画」—— 图上没图、也没有任何报错。所以至少把「文件在、
+  // 文档完整、图形元素自闭合、容器标签成对」验一遍。
+  const svgDir = path.resolve(PUBLIC, 'backgrounds');
+  const svgs = BACKGROUND_PRESETS.map((preset) => {
+    const name = path.basename(preset.url);
+    const file = path.join(svgDir, name);
+    return { name, text: existsSync(file) ? readFileSync(file, 'utf8') : '' };
+  });
+  check('5 个内置背景文件都在', svgs.every((s) => s.text.length > 0),
+    svgs.filter((s) => !s.text).map((s) => s.name).join(','));
+  check('每张都是一个完整的 svg 文档（以 <svg 开头、以 </svg> 收尾）',
+    svgs.every((s) => /^\s*<svg[\s>]/.test(s.text) && s.text.trimEnd().endsWith('</svg>')));
+  check('自闭合的图形元素真的自闭合了（漏一个 `/>` 就是安静地不画）',
+    svgs.every((s) => (s.text.match(/<(path|rect|circle|line)\b[^>]*>/g) ?? []).every((tag) => tag.endsWith('/>'))),
+    svgs.flatMap((s) => (s.text.match(/<(path|rect|circle|line)\b[^>]*>/g) ?? []).filter((tag) => !tag.endsWith('/>')))
+      .join(' | '));
+  check('容器标签成对出现（svg / defs / pattern / g / linearGradient）',
+    svgs.every((s) => ['svg', 'defs', 'pattern', 'g', 'linearGradient'].every(
+      (tag) => (s.text.match(new RegExp(`<${tag}\\b`, 'g')) ?? []).length
+        === (s.text.match(new RegExp(`</${tag}>`, 'g')) ?? []).length,
+    )),
+    svgs.map((s) => ['svg', 'defs', 'pattern', 'g', 'linearGradient']
+      .filter((tag) => (s.text.match(new RegExp(`<${tag}\\b`, 'g')) ?? []).length
+        !== (s.text.match(new RegExp(`</${tag}>`, 'g')) ?? []).length)
+      .map((tag) => `${s.name}:${tag}`).join(' ')).filter(Boolean).join(' | '));
+  check('平铺的那几张画的是 pattern（不是一整幅图）',
+    svgs.filter((s) => BACKGROUND_PRESETS.find((p) => path.basename(p.url) === s.name)?.tile)
+      .every((s) => s.text.includes('<pattern')));
+
+  // 文字深浅那一行：自动说了算，也可以自己钉死
+  check('面板里有「文字颜色」这一档，默认是自动',
+    getEl('bg-tone').value === 'auto' && globalThis.document.documentElement.dataset.bgTone === 'light',
+    `${getEl('bg-tone').value} / ${globalThis.document.documentElement.dataset.bgTone}`);
+  check('自动时把判断结果说出来（不然用户不知道自动选了哪一档）',
+    getEl('bg-tone-note').textContent.includes('按图判断'), getEl('bg-tone-note').textContent);
+  check('预览也跟着深浅走（预览骗人比没有预览还糟）',
+    getEl('bg-preview').dataset.tone === 'light');
+
+  getEl('bg-tone').value = 'dark';
+  dispatch(getEl('bg-tone'), 'change');
+  check('钉成「浅色字」：整页翻成墨底纸字',
+    globalThis.document.documentElement.dataset.bgTone === 'dark'
+      && getEl('bg-preview').dataset.tone === 'dark');
+  check('说明写着这是你钉的，不是自动判断的',
+    getEl('bg-tone-note').textContent.includes('你钉的'), getEl('bg-tone-note').textContent);
+  check('这个选择也落盘了', JSON.parse(storage.get('duitanlu.background.v1')).tone === 'dark');
+
+  getEl('bg-tone').value = 'auto';
+  dispatch(getEl('bg-tone'), 'change');
+  check('切回自动：又按图判断（这张是浅色纸纹 → 深色字）',
+    globalThis.document.documentElement.dataset.bgTone === 'light'
+      && JSON.parse(storage.get('duitanlu.background.v1')).tone === 'auto');
+
+  // ---- CSS 契约：替身不做渲染，层次只能从样式表上守
+  const css = readFileSync(path.resolve(PUBLIC, 'styles.css'), 'utf8');
+  const ruleOf = (selector) => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return css.match(new RegExp(`^${escaped}\\s*\\{[\\s\\S]*?\\n\\}`, 'm'))?.[0] ?? '';
+  };
+  const decl = (rule, prop) => {
+    const found = [...String(rule).matchAll(new RegExp(`(?:^|[;{\\s])${prop}\\s*:\\s*([^;]+);`, 'g'))];
+    return found.length ? found[found.length - 1][1].trim() : '';
+  };
+  const layerRule = ruleOf('.bg-layer');
+  check('背景那一层是钉在视口上的整屏层',
+    decl(layerRule, 'position') === 'fixed' && decl(layerRule, 'inset') === '0',
+    `${decl(layerRule, 'position')} / ${decl(layerRule, 'inset')}`);
+  check('**z-index 是 0**（负值会让它被纸盖住 —— 这是绘制顺序的硬规矩，不是调参）',
+    decl(layerRule, 'z-index') === '0', decl(layerRule, 'z-index'));
+  check('它不吃鼠标（否则整页点不动）', decl(layerRule, 'pointer-events') === 'none');
+  check('它盖不住正文：.page 的层级更高',
+    Number(decl(ruleOf('.page'), 'z-index')) > Number(decl(layerRule, 'z-index')),
+    `${decl(ruleOf('.page'), 'z-index')} vs ${decl(layerRule, 'z-index')}`);
+  check('有背景时才让纸面透一点（那一条挂在 html[data-bg="true"] 上）',
+    /html\[data-bg="true"\]\s*\{[^}]*--paper:\s*color-mix\(/.test(css)
+      && /html\[data-bg="true"\]\s*\{[^}]*--paper-lift:\s*color-mix\(/.test(css));
+  const darkToneRule = css.match(/html\[data-bg-tone="dark"\]\s*\{[^}]*\n\}/)?.[0] ?? '';
+  check('深色背景那一套只改**令牌**（纸、纸面、墨、红墨）',
+    ['--paper', '--paper-lift', '--ink', '--ink-soft', '--accent'].every((token) => darkToneRule.includes(`${token}:`)),
+    darkToneRule.slice(0, 120));
+  // 值也钉住：只查"有没有这一项"的话，把 --ink 又写回深色是抓不到的（那时候底是深的、字也是深的）
+  check('深色档里**纸变深、墨变浅**（两件事都要做，只做一半最糟）',
+    /--paper:\s*color-mix\(in srgb, #16161a/.test(darkToneRule)
+      && /--ink:\s*#f2efe8/.test(darkToneRule),
+    darkToneRule.slice(0, 160));
+  check('红墨在近黑底上会提亮一档（原来的 #c2402a 对比度只有 2.6:1）',
+    /--accent:\s*#e2705a/.test(darkToneRule));
+  check('**不去逐个改用到颜色的地方**：--rule / --wash 不重定义，它们是从 --ink 派生的',
+    !/--rule:|--wash:/.test(darkToneRule), darkToneRule);
+  check('预览在深色下也翻过来（.bg-preview[data-tone="dark"]）',
+    /\.bg-preview\[data-tone="dark"\]\s*\{[^}]*background:\s*#1b1b22/.test(css));
+  check('没有背景时那一层干脆不参与渲染',
+    /\.bg-layer\[data-active="false"\]\s*\{[^}]*display:\s*none/.test(css));
+  check('滑块和数字用的是原生控件（键盘、屏幕阅读器都白拿）',
+    /<input type="range" id="bg-opacity"/.test(html) && /<input type="number" id="bg-opacity-number"/.test(html));
+  check('数字格标了 aria-label（不然屏幕阅读器只读出一个数字）',
+    /id="bg-opacity-number"[^>]*aria-label/.test(html));
 }
 
 console.log(`\n${'─'.repeat(52)}`);

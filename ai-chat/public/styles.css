@@ -112,6 +112,80 @@ body::before {
   mask-image: linear-gradient(to bottom, transparent, #000 12%, #000 88%, transparent);
 }
 
+/*
+ * 背景图那一层（见 public/lib/background.js）。
+ *
+ * **它画在哪一层是这件事的全部**：
+ *   · `html` / `body` 的底色在最底下（画布 + body 的背景）；
+ *   · 这一层是 `position: fixed; z-index: 0` —— 和 body::before 那道稿纸横格同一层，
+ *     画在**所有正常流内容的背景之上、`.page`（z-index: 1）之下**；
+ *   · 于是图印在纸上、正文永远压在它上面 —— 这就是「背景不影响可读性」的根据。
+ *
+ * 试过 `z-index: -1`：负 z-index 的兄弟节点画在 **body 自己的背景之前**，
+ * 结果整张图被纸盖住，什么都看不见（这一条是 CSS 绘制顺序的硬规矩，不是调参能救的）。
+ *
+ * 尺寸和重复方式由 JS 写进变量：点阵要平铺、远山要铺满（见 backgroundCss）。
+ */
+.bg-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: var(--bg-image, none);
+  background-size: var(--bg-size, cover);
+  background-repeat: var(--bg-repeat, no-repeat);
+  background-position: center;
+  opacity: var(--bg-opacity, 0);
+  transition: opacity 0.18s ease;
+}
+/* 没设背景时整层收掉：省下一次全屏合成，也免得挡住将来新加的 body 级元素 */
+.bg-layer[data-active="false"] {
+  display: none;
+}
+
+/*
+ * 有背景的时候，纸和纸面稍微透一点，让图能从内容区里透出来 ——
+ * 否则图只在两侧的空当里看得见，那就不像「整页的背景」了。
+ *
+ * 这两个数是按**可读性**算出来的，不是随手写的：最坏情况是图的最暗处压在正文下面，
+ * 正文底色 ≈ 84% 的纸 ≈ #cecbc5，和 --ink（#16161a）的对比度仍在 9:1 上下，
+ * 远高于 WCAG AA 要求的 4.5:1。而用户手里的那个「不透明度」调的是**那张图**、
+ * 不是这层纸 —— 所以就算拉到 100%，字也照样看得清。
+ *
+ * 这一条只管**浅色图**；深色图走下面那套（data-bg-tone="dark"）。
+ */
+html[data-bg="true"] {
+  --paper: color-mix(in srgb, #f5f2ec 84%, transparent);
+  --paper-lift: color-mix(in srgb, #fdfbf7 90%, transparent);
+}
+
+/*
+ * 深色背景：整页翻成"墨底纸字"。
+ *
+ * 只改**四个颜色令牌**，别的一律不用动 —— 因为这一页的其它颜色全部是从它们派生的：
+ *   · --rule / --rule-strong / --wash / --shadow 都是 `color-mix(… var(--ink) …)`，
+ *     自定义属性在计算时替换，所以 --ink 一变成浅色，边框和悬停底色**跟着变浅**；
+ *   · 41 处 `var(--paper)` / `var(--paper-lift)`（正文底、输入框、卡片、菜单、报头）一起翻；
+ *   · 红墨（--accent）在近黑底上对比度只有 2.6:1，所以单独提亮一档，并把压在它上面的
+ *     字色（--accent-ink）换成深的。
+ *
+ * 也就是说「换一套配色」成本并不高，前提是不去逐个改用到颜色的地方 —— 那才是 41 处的坑。
+ *
+ * 纸用 92% 而不是更透：透太多的话，图会从**每个面板**里透出来，正文底下就没有稳定的底色了。
+ * 92% 的结果是「面板吃住字，图只在边缘和正文区可见」。
+ */
+html[data-bg-tone="dark"] {
+  --paper: color-mix(in srgb, #16161a 92%, transparent);
+  --paper-lift: color-mix(in srgb, #1e1e26 92%, transparent);
+  --ink: #f2efe8;
+  --ink-soft: #b9b6ae;
+  --accent: #e2705a;
+  --accent-ink: #1b1b22;
+  --success: #7fc39b;
+  --success-ink: #1b1b22;
+  --failure: #f0917c;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
@@ -123,7 +197,6 @@ body::before {
   white-space: nowrap;
   border: 0;
 }
-
 .skip-link {
   position: absolute;
   left: 12px;
@@ -968,6 +1041,181 @@ body[data-resizing="true"] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---- 背景面板（外形复用 .auth-overlay / .auth-card，见 index.html 的注释） ---- */
+
+.bg-card {
+  width: min(460px, 100%);
+}
+
+/* 预览：纸色打底 + 一层真页面那层（同一个 backgroundCss），所以看到的和页面一致 */
+.bg-preview {
+  position: relative;
+  height: 128px;
+  margin-bottom: 14px;
+  overflow: hidden;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background: var(--paper-lift);
+}
+.bg-preview-layer {
+  position: absolute;
+  inset: 0;
+  background-position: center;
+}
+.bg-preview-note {
+  position: absolute;
+  left: 8px;
+  bottom: 6px;
+  padding: 1px 6px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--paper-lift) 82%, transparent);
+  border-radius: 2px;
+}
+
+/*
+ * 预览跟着页面的深浅走。
+ * 不这么做的话，「深色图」的预览会是一块浅底 —— 预览骗人比没有预览还糟。
+ */
+.bg-preview[data-tone="dark"] {
+  background: #1b1b22;
+  border-color: color-mix(in srgb, #f2efe8 24%, transparent);
+}
+.bg-preview[data-tone="dark"] .bg-preview-note {
+  color: #f2efe8;
+  background: color-mix(in srgb, #1b1b22 82%, transparent);
+}
+
+/* 文字深浅那一行：和上面不透明度那一行同一种排法 */
+.bg-tone-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+#bg-tone {
+  flex: 0 0 auto;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--rule-strong);
+  border-radius: 2px;
+}
+#bg-tone:focus {
+  outline: none;
+  border-color: var(--ink);
+}
+.bg-tone-note {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  color: color-mix(in srgb, var(--ink) 55%, transparent);
+}
+
+.bg-section-title {
+  margin: 12px 0 6px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  color: color-mix(in srgb, var(--ink) 48%, transparent);
+}
+
+.bg-presets {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+}
+.bg-preset {
+  position: relative;
+  height: 56px;
+  padding: 0;
+  overflow: hidden;
+  cursor: pointer;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background-color: var(--paper-lift);
+  background-position: center;
+  background-size: cover;
+}
+.bg-preset:hover {
+  border-color: var(--rule-strong);
+}
+.bg-preset[aria-pressed="true"] {
+  border-color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--ink);
+}
+.bg-preset-label {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 2px 4px;
+  font-size: 10.5px;
+  text-align: center;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--paper-lift) 80%, transparent);
+}
+
+.bg-upload-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+.bg-upload-note {
+  font-size: 11.5px;
+  color: color-mix(in srgb, var(--ink) 45%, transparent);
+}
+
+/* 不透明度：滑块和数字是同一件事的两个入口，所以并排摆、中间不留空 */
+.bg-opacity-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+.bg-opacity-label {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  color: color-mix(in srgb, var(--ink) 48%, transparent);
+}
+#bg-opacity {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+.bg-opacity-number {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+#bg-opacity-number {
+  width: 58px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 13px;
+  text-align: right;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--rule-strong);
+  border-radius: 2px;
+}
+#bg-opacity-number:focus {
+  outline: none;
+  border-color: var(--ink);
+}
+.bg-percent {
+  font-size: 12px;
+  color: var(--ink-soft);
 }
 
 /* ---- 换头像 ---- */

@@ -12,6 +12,14 @@
   <body>
     <a class="skip-link" href="#composer-input">跳到输入框</a>
 
+    <!--
+      背景图那一层。它夹在「纸」和「内容」之间：
+        html / body 的底色（纸）在最底下 → 这一层 → body::before 的稿纸横格 → .page 里的内容。
+      所以它看起来是**印在纸上**的，而不是糊在内容前面（正文永远在它上面，可读性不受影响）。
+      透明度由 JS 写进 --bg-opacity（0 就是不显示）。
+    -->
+    <div class="bg-layer" id="bg-layer" aria-hidden="true"></div>
+
     <div class="page">
       <header class="masthead">
         <!--
@@ -219,6 +227,13 @@
           </div>
           <div class="rail-foot">
             <button type="button" class="link-button" id="export-all-button">导出全部</button>
+            <!--
+              页面背景（见 public/lib/background.js）。
+              放在栏底和「导出全部」并排：这两件都是**整个页面**的事（不属于某一条会话），
+              而栏底那一块本来就是「全局零碎」的地方。角色 / 模型 / 提示词在正文顶上，
+              那些是**这一条会话**的设置，不该混在一起。
+            -->
+            <button type="button" class="link-button" id="background-button">背景…</button>
           </div>
 
           <!--
@@ -801,6 +816,74 @@
           <button type="button" class="solid-button" id="avatar-save">保存</button>
           <button type="button" class="ghost-button" id="avatar-cancel">取消</button>
         </div>
+      </div>
+    </div>
+
+    <!--
+      页面背景。用的是和登录 / 换头像**同一张卡片**的样子（`class="auth-overlay bg-overlay"`）——
+      和会话菜单与账号菜单共用 `.session-menu` 是一个路子：同一套外形只写一遍，
+      各处的差异挂在各自那个类上，不另起一套长得一样的样式。
+
+      面板里四件事：内置的几张、传一张自己的、不透明度（滑块 + 数字两向联动）、换回默认。
+      改动的效果是**当场生效**的（透明度拖到哪儿就长什么样），「取消」把面板打开时的那一份还原回去。
+    -->
+    <div class="auth-overlay" id="bg-overlay" hidden>
+      <div class="auth-card bg-card" role="dialog" aria-modal="true" aria-labelledby="bg-title">
+        <div class="auth-head">
+          <span class="auth-panel-title" id="bg-title">页面背景</span>
+          <button type="button" class="prompt-close" id="bg-close" title="关掉（保留当前的背景）" aria-label="关闭">×</button>
+        </div>
+
+        <!-- 预览：画的就是真页面那一层（同一个 backgroundCss），所见即所得 -->
+        <div class="bg-preview" id="bg-preview" aria-hidden="true">
+          <span class="bg-preview-layer" id="bg-preview-layer"></span>
+          <span class="bg-preview-note" id="bg-preview-note"></span>
+        </div>
+
+        <div class="bg-section-title">选一张</div>
+        <div class="bg-presets" id="bg-presets" role="group" aria-label="内置背景"></div>
+
+        <div class="bg-upload-row">
+          <input type="file" id="bg-file" accept="image/png,image/jpeg,image/webp" hidden />
+          <button type="button" class="ghost-button" id="bg-upload">传一张自己的图…</button>
+          <span class="bg-upload-note">会压到长边 2400px（png / jpg / webp，压完不超过 900KB）</span>
+        </div>
+
+        <div class="bg-opacity-row">
+          <label class="bg-opacity-label" for="bg-opacity">不透明度</label>
+          <!-- 滑块和右边的数字是同一件事的两个入口：拖滑块数字跟着变，改数字滑块跟着走 -->
+          <input type="range" id="bg-opacity" min="0" max="100" step="1" value="40" aria-label="背景不透明度（拖动）" />
+          <span class="bg-opacity-number">
+            <input type="number" id="bg-opacity-number" min="0" max="100" step="1" value="40" aria-label="背景不透明度（直接填数字）" />
+            <span class="bg-percent">%</span>
+          </span>
+        </div>
+
+        <!--
+          文字颜色：**只有两档**（深色字 / 浅色字）+ 一个「自动」。
+          自动是按这张图**有多亮**算的（相对亮度，不是"看着像深色"），而且把不透明度也算进去 ——
+          纯黑图放到 20% 时底色其实是浅的，那就该继续用深色字。
+          用户钉死的永远优先：自动判断总会遇到它拿不准的图（一半黑一半白、或者正卡在中间调）。
+        -->
+        <div class="bg-tone-row">
+          <label class="bg-opacity-label" for="bg-tone">文字</label>
+          <select id="bg-tone" aria-label="文字颜色（深色字 / 浅色字 / 自动）">
+            <option value="auto">自动（按图判断）</option>
+            <option value="dark">浅色字（配深色图）</option>
+            <option value="light">深色字（配浅色图）</option>
+          </select>
+          <span class="bg-tone-note" id="bg-tone-note"></span>
+        </div>
+
+        <p class="auth-error" id="bg-error" hidden></p>
+
+        <div class="auth-actions">
+          <button type="button" class="solid-button" id="bg-done">完成</button>
+          <button type="button" class="ghost-button" id="bg-reset">不要背景</button>
+          <button type="button" class="ghost-button" id="bg-cancel">取消</button>
+        </div>
+
+        <p class="auth-note">背景是印在纸上的：正文永远在它上面。深色图会自动换成浅色字（也可以自己钉死）。这一页的设置存在这个浏览器里。</p>
       </div>
     </div>
 
