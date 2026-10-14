@@ -136,6 +136,7 @@ http://localhost:5173
 | **番茄钟 · 专注计时** | `pomodoro/` | 零依赖 HTML + CSS + 原生 JS + Node 服务 | `cd pomodoro && node server.js` → http://127.0.0.1:5230 |
 | **云图 · 天气台** | `cloud-atlas/` | 零依赖 HTML + CSS + 原生 JS + Node 服务（含 API 代理） | `cd cloud-atlas && node server.js` → http://127.0.0.1:5240 |
 | **对谈录 · AI 聊天助手** | `ai-chat/` | 零依赖 HTML + CSS + 原生 JS + Node 服务（SSE 流式 + 本地持久化） | `cd ai-chat && node server.mjs` → http://127.0.0.1:5250 |
+| **三易 · 智能写作台** | `writing-assistant/` | 零依赖 HTML + CSS + 原生 JS + Node 服务（六种写作模式 + SSE 多稿并推 + 逐处朱批 + 留档） | `cd writing-assistant && node server.js` → http://127.0.0.1:5260 |
 
 后续新增项目会继续追加到本表。
 

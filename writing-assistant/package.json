@@ -1,0 +1,35 @@
+{
+  "name": "writing-assistant",
+  "version": "1.0.0",
+  "private": true,
+  "description": "三易 · 智能写作台：多模式写作（续写/改写/文案/邮件/摘要/大纲）、创意度与篇幅可调、一次多稿、一键朱批润色、历史留档（零依赖 Node + 原生前端）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node test/modes.test.js && node test/polisher.test.js && node test/mock-writer.test.js && node test/store.test.js && node test/core.test.js && node test/models.test.js && node test/server.test.js && node test/upstream.test.js && node test/readme.test.js && node scripts/check-wiring.js",
+    "test:modes": "node test/modes.test.js",
+    "test:polisher": "node test/polisher.test.js",
+    "test:writer": "node test/mock-writer.test.js",
+    "test:store": "node test/store.test.js",
+    "test:core": "node test/core.test.js",
+    "test:models": "node test/models.test.js",
+    "test:server": "node test/server.test.js",
+    "test:upstream": "node test/upstream.test.js",
+    "test:docs": "node test/readme.test.js",
+    "check:wiring": "node scripts/check-wiring.js",
+    "fake:upstream": "node scripts/fake-upstream.js",
+    "shot": "node scripts/capture.js"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "keywords": [
+    "writing",
+    "assistant",
+    "deepseek",
+    "sse",
+    "zero-dependency"
+  ],
+  "license": "MIT"
+}

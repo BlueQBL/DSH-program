@@ -180,11 +180,15 @@ for (const level of ['high', 'medium']) {
 }
 
 // 顺带点出容易被误提交的运行时数据目录
-const noisy = scanned.filter((s) => /(^|\/)(data|logs?|\.screens|cache)\//.test(s.rel));
+// 注意：path.relative 在 Windows 上给的是反斜杠，不归一化的话这段检查永远不会触发
+const noisy = scanned.filter((s) => /(^|\/)(data|logs?|\.screens|cache)\//.test(s.rel.split(path.sep).join('/')));
 if (noisy.length) {
   console.log('── 运行时数据目录（应确认已在 .gitignore 中）──');
-  const dirs = [...new Set(noisy.map((n) => n.rel.split('/').slice(0, 2).join('/')))];
-  for (const d of dirs) console.log(`  ${d}/  （${noisy.filter((n) => n.rel.startsWith(d)).length} 个文件）`);
+  const dirs = [...new Set(noisy.map((n) => n.rel.split(path.sep).slice(0, 2).join('/')))];
+  for (const d of dirs) {
+    const count = noisy.filter((n) => n.rel.split(path.sep).slice(0, 2).join('/') === d).length;
+    console.log(`  ${d}/  （${count} 个文件）`);
+  }
   console.log('');
 }
 

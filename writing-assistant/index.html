@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>三易 · 智能写作台</title>
+<meta name="description" content="智能写作助手：续写、改写、文案、邮件、摘要、大纲六种模式，创意度与篇幅可调，一次起稿多份成稿，一键朱批优化语法与表达，全部结果自动留档。">
+<meta name="color-scheme" content="light">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f6f7f2'/%3E%3Cg stroke='%23a8bfae' stroke-width='1.2'%3E%3Cpath d='M0 8h32M0 16h32M0 24h32'/%3E%3Cpath d='M8 0v32M16 0v32M24 0v32'/%3E%3C/g%3E%3Crect x='9' y='9' width='6' height='6' fill='%23b23a2b'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<a class="skip" href="#desk">跳到写作台</a>
+
+<header class="masthead">
+  <div class="brand">
+    <span class="brand__name">三易</span>
+    <span class="brand__sub">智能写作台</span>
+  </div>
+
+  <nav class="modes" id="modes" aria-label="写作模式"></nav>
+
+  <div class="masthead__side">
+    <label class="picker" id="picker">
+      <span class="picker__label">模型</span>
+      <select id="model-select" aria-label="选择成稿模型" disabled>
+        <option value="">正在探测…</option>
+      </select>
+    </label>
+    <span class="engine" id="engine" title="当前成稿方式">正在连接…</span>
+    <button type="button" class="ghost-btn" id="open-history">
+      写作留档<span class="ghost-btn__count" id="history-count">0</span>
+    </button>
+  </div>
+</header>
+
+<main class="desk" id="desk">
+
+  <!-- 原稿：一张可以写的稿纸 -->
+  <section class="compose" aria-label="原稿">
+    <div class="sheet sheet--input" id="input-sheet">
+      <div class="sheet__tab">原稿</div>
+      <div class="sheet__body">
+        <label class="sheet__label" for="material" id="material-label">原稿开头</label>
+        <textarea id="material" rows="8" spellcheck="false"
+          placeholder="把你已经写好的开头或段落粘进来，我接着往下写……"
+          aria-describedby="material-hint"></textarea>
+      </div>
+      <div class="sheet__foot">
+        <span class="sheet__hint" id="material-hint"></span>
+        <span class="sheet__count" id="material-count">0 字</span>
+      </div>
+    </div>
+
+    <div class="compose__bar">
+      <p class="compose__params" id="param-summary"></p>
+      <div class="compose__actions">
+        <button type="button" class="btn btn--ghost" id="polish-input">一键优化语法与表达</button>
+        <button type="button" class="btn btn--primary" id="generate">
+          <span class="btn__ink">起稿</span>
+          <span class="btn__kbd">Ctrl + Enter</span>
+        </button>
+      </div>
+    </div>
+
+    <p class="notice" id="notice" role="status" aria-live="polite"></p>
+  </section>
+
+  <!-- 朱批：一键优化后的对照与逐条采纳 -->
+  <section class="polish" id="polish" aria-label="朱批" hidden>
+    <div class="polish__head">
+      <h2 class="polish__title">
+        朱批
+        <span class="polish__target" id="polish-target"></span>
+      </h2>
+      <p class="polish__summary" id="polish-summary"></p>
+      <div class="polish__actions">
+        <button type="button" class="btn btn--small btn--zhu" id="polish-accept-all">全部采纳</button>
+        <button type="button" class="btn btn--small btn--line" id="polish-revert-all">全部还原</button>
+        <button type="button" class="btn btn--small btn--line" id="polish-copy">复制润色稿</button>
+        <button type="button" class="btn btn--small btn--line" id="polish-close">收起</button>
+      </div>
+    </div>
+    <div class="sheet sheet--marked">
+      <div class="sheet__body">
+        <div class="marktext" id="polish-text"></div>
+      </div>
+      <ol class="annotations" id="polish-notes"></ol>
+    </div>
+  </section>
+
+  <!-- 成稿：一次起稿，多张稿片并排 -->
+  <section class="drafts" id="drafts" aria-label="生成的稿子">
+    <div class="drafts__empty" id="drafts-empty">
+      <p class="drafts__lead">写下的第一笔，剩下的交给它。</p>
+      <p class="drafts__sub">选一种模式，粘一段素材，一次会给你几份不一样的稿子。</p>
+      <div class="drafts__examples" id="drafts-examples"></div>
+    </div>
+  </section>
+
+  <!-- 参数栏 -->
+  <aside class="panel" aria-label="生成参数">
+    <h2 class="panel__title">参数</h2>
+    <div class="panel__block" id="ctl-creativity"></div>
+    <div class="panel__block" id="ctl-length"></div>
+    <div class="panel__block" id="ctl-versions"></div>
+    <div class="panel__block" id="ctl-tone"></div>
+    <div class="panel__block" id="ctl-fields"></div>
+    <p class="panel__engine" id="panel-engine"></p>
+  </aside>
+
+</main>
+
+<!-- 写作留档 -->
+<aside class="drawer" id="drawer" aria-label="写作留档" aria-hidden="true" inert hidden>
+  <header class="drawer__head">
+    <h2 class="drawer__title">写作留档</h2>
+    <span class="drawer__count" id="drawer-count">0 篇</span>
+    <button type="button" class="icon-btn" id="close-history" aria-label="关闭写作留档">✕</button>
+  </header>
+
+  <div class="drawer__tools">
+    <input type="search" id="history-q" placeholder="搜标题、素材或正文" aria-label="搜索留档">
+    <label class="switch">
+      <input type="checkbox" id="history-starred">
+      <span>只看星标</span>
+    </label>
+  </div>
+
+  <nav class="chips chips--toolbar" id="history-modes" aria-label="按模式筛选"></nav>
+
+  <div class="drawer__list" id="history-list"></div>
+
+  <footer class="drawer__foot">
+    <div class="export">
+      <span class="export__label">导出</span>
+      <button type="button" class="btn btn--small btn--line" data-export="md">Markdown</button>
+      <button type="button" class="btn btn--small btn--line" data-export="txt">纯文本</button>
+      <button type="button" class="btn btn--small btn--line" data-export="json">JSON</button>
+    </div>
+    <button type="button" class="danger-link" id="clear-history">清空留档</button>
+  </footer>
+</aside>
+<div class="scrim" id="scrim" hidden></div>
+
+<div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+<script src="lib/modes.js"></script>
+<script src="lib/record.js"></script>
+<script src="lib/polisher.js"></script>
+<script src="lib/mock-writer.js"></script>
+<script src="js/core.js"></script>
+<script src="js/api.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
