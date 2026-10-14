@@ -54,6 +54,7 @@
   /* ── 全局状态 ───────────────────────────────────────────── */
   let api = null;
   let state = Core.createState();
+  let workspaces = new Map();   // 每个板块一份工作区：换板块时互不串台
   let runCtrl = null;
   let polish = null;          // {source, label, before, edits, accepted:Set, stats, engine, note}
   const view = {
@@ -113,19 +114,53 @@
             class: 'mode',
             'aria-current': String(mode.id === state.mode),
             title: mode.tagline,
-            onclick: () => {
-              if (state.busy) return;
-              state = Core.setMode(state, mode.id);
-              polish = null;
-              renderAll();
-              persistUI();
-              dom.material.focus();
-            },
+            onclick: () => switchToMode(mode.id),
           },
           [h('span', { class: 'mode__mark', text: mode.mark }), h('span', { text: mode.name })]
         )
       );
     });
+  }
+
+  /**
+   * 换板块：每个板块有自己的工作区（原稿、成稿、朱批），互不串台。
+   * 切回用过的板块会把它自己那份装回来，而不是清空——来回对照着改稿是常态，
+   * 每次清空会白丢一次工作；首次进入某个板块时它本来就是空的。
+   */
+  function switchToMode(modeId) {
+    if (state.busy || modeId === state.mode) return;
+    // 界面上的朱批视图也是这个板块的「活」：先放回 state 再存档，
+    // 否则切走一趟回来，稿子和原稿都在、朱批却没了（留档里那份还在，但视图丢了）
+    state = Object.assign({}, state, { polish });
+    const moved = Core.switchWorkspace(state, modeId, workspaces);
+    state = moved.state;
+    workspaces = moved.workspaces;
+    polish = state.polish || null;
+    renderAll();
+    persistUI();
+    dom.material.focus();
+    if (moved.restored && Core.hasWork(state)) {
+      notice(`${Modes.getMode(state.mode).name} · 你上次在这里的稿子还在。想从头写就点「清空」。`, 'info');
+    } else {
+      notice('');
+    }
+  }
+
+  /** 清空当前板块的工作区：原稿、成稿、朱批一起清，参数不动 */
+  function clearWorkspace() {
+    if (state.busy) return;
+    if (!Core.hasWork(state) && !polish) {
+      notice('这个板块本来就是空的。');
+      return;
+    }
+    if (!window.confirm('清空当前板块的原稿与成稿？留档里的不受影响。')) return;
+    state = Core.clearWork(state);
+    workspaces.delete(state.mode);
+    polish = null;
+    renderAll();
+    persistUI();
+    notice('已清空，可以从头写。');
+    dom.material.focus();
   }
 
   /* ── 画：参数栏 ─────────────────────────────────────────── */
@@ -840,6 +875,8 @@
             note: '来自留档',
           }
         : null;
+      // 载入的稿子归到它自己的板块：当前板块先存档，再把这份放进对应板块的工作区
+      workspaces.set(state.mode, Core.snapshot(state));
       view.openedId = id;
       closeDrawer();
       renderAll();
@@ -1019,6 +1056,7 @@
     dom.materialHint = $('#material-hint');
     dom.materialCount = $('#material-count');
     dom.paramSummary = $('#param-summary');
+    dom.clearWork = $('#clear-work');
     dom.polishInput = $('#polish-input');
     dom.generate = $('#generate');
     dom.generateInk = $('.btn__ink', $('#generate'));
@@ -1140,6 +1178,7 @@
     });
 
     dom.generate.addEventListener('click', generate);
+    dom.clearWork.addEventListener('click', clearWorkspace);
     dom.polishInput.addEventListener('click', () => runPolish({ source: 'input', label: '原稿', text: state.material }));
     dom.polishNotes.addEventListener('click', onAnnotationClick);
 

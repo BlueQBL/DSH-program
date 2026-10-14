@@ -185,6 +185,121 @@ group('能不能起稿', () => {
   ok(!Core.canGenerate(busy), '成稿中不能再按');
 });
 
+console.log('板块工作区');
+
+/** 造一个「某板块已经有原稿与成稿」的工作区 */
+function worked(mode, material, text) {
+  let s = Core.createState({ mode, material });
+  s = Core.beginRun(s, [{ index: 0, angleId: 'a0', angleLabel: Modes.angleOf(mode, 0).label }]);
+  s = Core.finishVersion(s, 0, { text, engine: 'offline' });
+  return Core.endRun(s, {});
+}
+
+group('首次进入某个板块：原稿和成稿都是空的', () => {
+  const c = worked('continue', '续写的开头。', '续写的成稿。');
+  const moved = Core.switchWorkspace(c, 'rewrite', new Map());
+  eq(moved.state.mode, 'rewrite', '模式切过去了');
+  eq(moved.state.material, '', '原稿是空的（不带上一个板块的内容）');
+  eq(moved.state.versions, [], '成稿也是空的（不挂着别人家的稿片）');
+  eq(moved.restored, false, '没东西可恢复');
+  eq(Core.hasWork(moved.state), false, '判定为空工作区');
+});
+
+group('切回用过的板块：把它自己那份原稿与成稿装回来', () => {
+  const c = worked('continue', '续写的开头。', '续写的成稿。');
+  let r = Core.switchWorkspace(c, 'rewrite', new Map());
+  r.state = Object.assign({}, r.state, { material: '改写的原文。' });
+
+  const back = Core.switchWorkspace(r.state, 'continue', r.workspaces);
+  eq(back.state.mode, 'continue', '切回续写');
+  eq(back.state.material, '续写的开头。', '原稿是续写自己那份');
+  eq(back.state.versions.length, 1, '成稿也回来了');
+  eq(back.state.versions[0].text, '续写的成稿。', '成的还是那一稿');
+  eq(back.restored, true, '标记为「恢复」而不是新建');
+
+  const again = Core.switchWorkspace(back.state, 'rewrite', back.workspaces);
+  eq(again.state.material, '改写的原文。', '改写那份也没被续写覆盖');
+  eq(again.state.versions.length, 0, '改写仍然没有成稿');
+});
+
+group('板块之间互不污染：一边改原稿，另一边不受影响', () => {
+  const c = worked('continue', '续写的开头。', '续写的成稿。');
+  const r1 = Core.switchWorkspace(c, 'summary', new Map());
+  r1.state = Object.assign({}, r1.state, { material: '要被摘要的长文。' });
+  const r2 = Core.switchWorkspace(r1.state, 'continue', r1.workspaces);
+  r2.state = Object.assign({}, r2.state, { material: '续写改了原稿。' });
+  const r3 = Core.switchWorkspace(r2.state, 'summary', r2.workspaces);
+  eq(r3.state.material, '要被摘要的长文。', '摘要那份没被改动');
+  const r4 = Core.switchWorkspace(r3.state, 'continue', r3.workspaces);
+  eq(r4.state.material, '续写改了原稿。', '续写那份改对了');
+});
+
+group('采用稿、朱批、留档关联都跟着板块走', () => {
+  let c = worked('continue', '续写的开头。', '续写的成稿。');
+  c = Core.adopt(c, 0);
+  c = Object.assign({}, c, {
+    savedId: 'd_abc123',
+    polish: { source: 'version:0', before: 'a', after: 'b', edits: [{ id: 'e1' }], accepted: new Set(['e1']) },
+  });
+  const r = Core.switchWorkspace(c, 'outline', new Map());
+  eq(r.state.adopted, -1, '新板块没有采用稿');
+  eq(r.state.polish, null, '新板块没有朱批');
+  eq(r.state.savedId, '', '新板块没有留档关联');
+
+  const back = Core.switchWorkspace(r.state, 'continue', r.workspaces);
+  eq(back.state.adopted, 0, '采用稿回来了');
+  eq(back.state.savedId, 'd_abc123', '留档关联回来了（采纳状态还能同步回那一篇）');
+  eq(back.state.polish.after, 'b', '朱批稿回来了');
+  eq(Array.from(back.state.polish.accepted), ['e1'], '采纳情况（Set）能往返');
+});
+
+group('参数跟着人走，专属字段跟着板块走', () => {
+  let c = Core.createState({ mode: 'continue', material: '续写开头。' });
+  c = Core.setParam(c, { creativity: 1.4, length: 'long' });
+  c = Core.setField(c, 'direction', 'turn');
+  const r = Core.switchWorkspace(c, 'copywriting', new Map());
+  eq(r.state.params.creativity, 1.4, '创意度是人的偏好，跨板块保持');
+  eq(r.state.params.length, 'long', '篇幅也一样');
+  eq(r.state.fields.platform, 'xiaohongshu', '专属字段换成新板块的默认值');
+  eq(r.state.fields.direction, undefined, '看不到上一个板块的专属字段');
+  eq(r.state.params.tone, Modes.defaultTone('copywriting'), '语气换成新板块的');
+
+  const back = Core.switchWorkspace(r.state, 'continue', r.workspaces);
+  eq(back.state.fields.direction, 'turn', '切回来时续写自己的专属设置还在');
+  eq(back.state.params.creativity, 1.4, '创意度没被改掉');
+});
+
+group('快照是拷贝：之后改当前状态，不会改到已存的快照', () => {
+  const c = worked('continue', '续写的开头。', '续写的成稿。');
+  const snap = Core.snapshot(c);
+  const before = snap.fields.direction;
+  c.versions[0].text = '被就地改掉了';
+  c.fields.direction = 'close';
+  eq(snap.versions[0].text, '续写的成稿。', '快照里的成稿没被跟着改');
+  eq(snap.fields.direction, before, '快照里的字段还是当时那个值');
+  eq(c.fields.direction, 'close', '当前状态确实改了');
+});
+
+group('清空工作区：清掉活，保留参数与专属设置', () => {
+  let c = worked('copywriting', '一款折叠电煮锅', '文案成稿。');
+  c = Core.setParam(c, { creativity: 1.1 });
+  const cleared = Core.clearWork(c);
+  eq(cleared.material, '', '原稿清了');
+  eq(cleared.versions, [], '成稿清了');
+  eq(cleared.adopted, -1, '采用状态清了');
+  eq(cleared.savedId, '', '留档关联断了（留档本身不动）');
+  eq(cleared.params.creativity, 1.1, '创意度保留');
+  eq(cleared.fields.platform, 'xiaohongshu', '专属设置保留');
+  eq(Core.hasWork(cleared), false, '判定为空');
+});
+
+group('切到同一个板块：原样返回，不做无意义的重建', () => {
+  const c = worked('email', '通知客户延期', '邮件成稿。');
+  const r = Core.switchWorkspace(c, 'email', new Map());
+  eq(r.state, c, '返回同一个对象');
+  eq(r.restored, false, '不算恢复');
+});
+
 console.log('稿子与记录');
 
 group('字数：空白不算，上万字换个说法', () => {

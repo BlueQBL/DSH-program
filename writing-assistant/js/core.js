@@ -104,6 +104,90 @@
     return next;
   }
 
+  /* ── 板块工作区 ─────────────────────────────────────────── */
+  /*
+   * 六个板块各自独立的「活」：原稿、成稿、采用稿、朱批、留档关联。
+   * 换板块时先把当前这份存下来、再把目标板块那份装回去，两边不串台。
+   *
+   * 为什么不做成「一切换就清空」：来回对照着改稿是常态（续写不满意 → 去改写试
+   * 一遍 → 回续写接着调），每次清空会白丢一次工作。参数（创意度/篇幅）不跟着
+   * 板块走 —— 那是人的偏好，不是活。
+   */
+
+  function snapshot(state) {
+    return {
+      material: String(state.material || ''),
+      fields: Object.assign({}, state.fields),
+      tone: state.params.tone,
+      versionsCount: state.params.versions,
+      versions: state.versions.map((v) => Object.assign({}, v)),
+      adopted: state.adopted,
+      polish: state.polish
+        ? Object.assign({}, state.polish, {
+            accepted: Array.from(state.polish.accepted || []),
+          })
+        : null,
+      savedId: state.savedId || '',
+      engineModel: state.engineModel || '',
+    };
+  }
+
+  /** 空工作区：清掉「活」，保留当前板块的专属设置与参数 */
+  function clearWork(state) {
+    return Object.assign({}, state, {
+      material: '',
+      versions: [],
+      adopted: -1,
+      polish: null,
+      savedId: '',
+      engineModel: '',
+      notice: '',
+      busy: false,
+    });
+  }
+
+  /** 把存下来的工作区装回当前状态（板块必须已经是目标板块） */
+  function restore(state, snap) {
+    const saved = snap && typeof snap === 'object' ? snap : {};
+    const mode = state.mode;
+    const next = Object.assign({}, clearWork(state), {
+      material: typeof saved.material === 'string' ? saved.material : '',
+      fields: Object.assign({}, state.fields, saved.fields || {}),
+      versions: (saved.versions || []).map((v, i) => Object.assign({}, v, { index: i })),
+      adopted: Number.isInteger(saved.adopted) ? saved.adopted : -1,
+      savedId: saved.savedId || '',
+      engineModel: saved.engineModel || '',
+      polish: saved.polish
+        ? Object.assign({}, saved.polish, { accepted: new Set(saved.polish.accepted || []) })
+        : null,
+    });
+    next.params = Object.assign({}, state.params, {
+      tone: Modes.toneOf(mode, saved.tone).value,
+      versions: Math.round(Modes.clamp(
+        saved.versionsCount === undefined ? state.params.versions : saved.versionsCount,
+        1,
+        Modes.angleCount(mode)
+      )),
+    });
+    return next;
+  }
+
+  /** 换板块：存下当前这份，装上目标那份（没有就给它一个空的） */
+  function switchWorkspace(state, target, workspaces) {
+    const mode = Modes.getMode(target).id;
+    if (mode === state.mode) return { state, workspaces, restored: false };
+    const store = workspaces instanceof Map ? workspaces : new Map();
+    store.set(state.mode, snapshot(state));
+    const moved = setMode(state, mode);
+    const saved = store.get(mode);
+    return { state: saved ? restore(moved, saved) : clearWork(moved), workspaces: store, restored: Boolean(saved) };
+  }
+
+  /** 这个工作区里有没有东西（决定切换时要不要提示「上次的还在」） */
+  function hasWork(state) {
+    return Boolean(String(state.material || '').trim() || state.versions.length);
+  }
+
   function setParam(state, patch) {
     const next = Object.assign({}, state);
     const params = Object.assign({}, state.params, patch || {});
@@ -476,6 +560,11 @@
     createState,
     resolvedParams,
     setMode,
+    snapshot,
+    clearWork,
+    restore,
+    switchWorkspace,
+    hasWork,
     setParam,
     setField,
     beginRun,
