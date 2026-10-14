@@ -174,11 +174,6 @@ $env:AI_BASE_URL="https://api.openai-hk.com/v1"
 node server.js
 ```
 
-> **不设 `AI_BASE_URL` 时，默认打的是 DeepSeek 官网**（`https://api.deepseek.com/v1`）。
-> 代码里只写死了这一个默认值，没有任何平台被硬编进去（`test/models.test.js` 会检查
-> `lib/llm.js` 里只有一个上游地址字面量）。所以拿别家平台的 Key 却忘了设地址，
-> 会得到 401——错误提示里会直接把这件事说明白，不会让你去查一个没问题的 Key。
-
 ### 6.2 启动时自动探测哪个模型能用
 
 聚合平台的模型列表里常混着向量、语音、画图、审核模型，而 `AI_MODEL` 写的那一个
@@ -384,27 +379,6 @@ node scripts/capture.js marked     # 只拍一种
   浏览器只拿得到它真正要跑的那几个共享模块（`modes` / `record` / `polisher` / `mock-writer`）。
 - 留档是纯文本，随时可以 `rm -rf data/` 重来；界面上「清空留档」需要二次确认。
 
-### API Key 的进出
-
-- **只从环境变量读**（`DEEPSEEK_API_KEY` / `OPENAI_API_KEY`），代码里没有任何写死的 Key；
-  仓库自带的密钥扫描器 `node ../tools/scan-secrets.mjs .` 扫本项目是 **0 命中**。
-- **浏览器从头到尾不接触 Key**：`js/` 与 `index.html` 里没有 `apiKey`、没有 `Bearer`、
-  没有 `Authorization`——所有上游请求都由服务端发出，页面只跟本机 `/api/*` 打交道。
-  所以界面上不存在「显示 Key」的位置：它根本没有这个数据。
-- Key 只出现在服务端进程内存里、只出现在发给上游的 `Authorization` 请求头里，
-  **不写日志、不落盘、不进任何接口响应**（`/api/health`、`/api/models`、`/api/engine/test`
-  都只回模型名与上游地址）。
-- 上游返回的错误正文要给人看（否则没法排查），所以**出口统一脱敏**：
-  当前 Key 的原串、`Bearer xxx`、`sk-` / `hk-` / `rk-` / JWT / AWS / Google 等形态一律抹成 `***`，
-  之后才进日志与界面。即使某个中转平台把请求头回带进错误体，页面上也看不到 Key。
-
-上面这些不是承诺，是断言：`test/upstream.test.js` 里有一组用例把
-**所有接口的响应 + 浏览器能取到的每个文件**逐个拉下来扫一遍，确认里面既不出现 Key，
-也不出现 `Authorization` 值、`apiKey` 字段，更没有 `process.env` 这类服务端代码；
-另有一个「会把 Authorization 回带进错误体」的假模型专门验证脱敏。
-
----
-
 ## 12. 无障碍与兼容
 
 - 全部键盘可用，焦点有 2px 描边；`Ctrl/Cmd+Enter` 起稿、`Esc` 关闭抽屉。
@@ -460,14 +434,4 @@ node scripts/capture.js marked     # 只拍一种
 
 ---
 
-## 15. 与仓库里其它项目的关系
-
-| 项目 | 关系 |
-| --- | --- |
-| `ai-chat/` | 同样的「上游 SSE + 本地留档 + 无 Key 走离线」骨架；本项目把「一次多稿」和「逐处朱批」做深了 |
-| `markdown-notes/` | 同样的「纯逻辑 js 模块 + Node 测试」分层，共用 `.screens` 截图与接线检查的做法 |
-| `todo-app/` `ledger/` | 同样的窄服务器 + 原生前端结构，端口按仓库顺序取下一个（5260） |
-
----
-
-MIT
+## MIT
