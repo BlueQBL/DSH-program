@@ -116,7 +116,7 @@ function parseFrame(frame) {
     eq(data.app, 'writing-assistant', '应用标识');
     eq(data.engine.live, false, '测试环境强制离线');
     eq(data.engine.model, '离线引擎', '离线时模型名');
-    eq(data.modes.length, 6, '六种模式');
+    eq(data.modes.length, 10, '十个板块');
     eq(data.modes[0].mark, '续', '模式的稿签单字');
     ok(typeof data.history.count === 'number', '带留档篇数');
   });
@@ -177,11 +177,11 @@ function parseFrame(frame) {
     const escape = await fetch(base + '/..%2F..%2Fpackage.json');
     eq(escape.status, 403, '越界路径被挡住');
     // 服务端专用代码不给浏览器取：上游接入、留档落盘、服务本身
-    for (const path of ['/server.js', '/lib/llm.js', '/lib/store.js']) {
+    for (const path of ['/server.js', '/lib/llm.js', '/lib/store.js', '/lib/template-store.js']) {
       eq((await fetch(base + path)).status, 403, `${path} 取不到`);
     }
     // 前后端共用的纯函数模块要取得到（页面靠它们跑）
-    for (const path of ['/lib/modes.js', '/lib/record.js', '/lib/polisher.js', '/lib/mock-writer.js']) {
+    for (const path of ['/lib/modes.js', '/lib/record.js', '/lib/polisher.js', '/lib/mock-writer.js', '/lib/template.js']) {
       eq((await fetch(base + path)).status, 200, `${path} 取得到`);
     }
     const missing = await fetch(base + '/不存在的文件.txt');
@@ -286,10 +286,10 @@ function parseFrame(frame) {
     const meta = out.events.find((e) => e.event === 'meta').payload;
     eq(meta.params.mode, 'email', '模式保留');
     eq(meta.params.creativity, 1.6, '创意度封顶');
-    eq(meta.params.versions, 3, '版本数不超过该模式的角度数');
+    eq(meta.params.versions, 4, '版本数被夹到该板块的角度数上限');
     eq(meta.params.length, 'medium', '非法篇幅退回中篇');
     const done = out.events.find((e) => e.event === 'done').payload;
-    eq(done.versions.length, 3, '按规整后的数量成稿');
+    eq(done.versions.length, 4, '按规整后的数量成稿');
   });
 
   await group('起稿：没素材直接拒绝', async () => {
@@ -381,7 +381,7 @@ function parseFrame(frame) {
     eq(list.items[0].mark, '文', '带稿签单字');
     eq(list.items[0].versions, 2, '带版本数');
     eq(list.items[0].text, undefined, '摘要里不带正文');
-    ok(list.modes.length === 6, '带各模式计数');
+    ok(list.modes.length === 10, '带各板块计数');
 
     const byMode = await (await fetch(base + '/api/history?mode=copywriting')).json();
     eq(byMode.total, 1, '按模式筛得到');
@@ -483,6 +483,77 @@ function parseFrame(frame) {
     const names = await fsp.readdir(path.join(DATA_DIR, 'history'));
     ok(names.some((n) => n.startsWith('d_') && n.endsWith('.json')), '有稿件文件');
     eq(names.filter((n) => n.endsWith('.tmp')).length, 0, '没有临时文件残留');
+  });
+
+  let templateId = '';
+
+  await group('模板库：建、列、改、删（离线模式也能用，它只是存储）', async () => {
+    const bad = await post('/api/templates', { template: { name: 'x', system: '短' } });
+    eq(bad.status, 400, '校验不过时 400');
+    eq(bad.json.field, 'name', '指明了是哪个字段的问题');
+
+    const created = await post('/api/templates', {
+      template: {
+        name: '产品周报',
+        mark: '周',
+        system: '你是资深产品经理，替团队写周报，只输出正文，分进展、问题、下周计划三块。',
+        outputHint: '每块不超过五条',
+      },
+    });
+    eq(created.status, 201, '创建成功');
+    templateId = created.json.template.id;
+    ok(/^t_/.test(templateId), '生成了模板 id');
+
+    const list = await (await fetch(base + '/api/templates')).json();
+    eq(list.total, 1, '列表里有一个');
+    eq(list.items[0].modeId, 'tpl_' + templateId, '带板块 id');
+    ok(list.templates[0].system.includes('产品经理'), '完整记录也返回（浏览器注册板块要用）');
+
+    const renamed = await fetch(base + '/api/templates/' + templateId, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ template: { tagline: '每周同步' } }),
+    });
+    eq(renamed.status, 200, '改成功');
+    eq((await renamed.json()).template.tagline, '每周同步', '改到了');
+    eq((await fetch(base + '/api/templates/t_不存在', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 404, '改不存在的 404');
+  });
+
+  await group('模板注册成板块：留档列表里能看到这个板块', async () => {
+    const list = await (await fetch(base + '/api/history')).json();
+    const custom = list.modes.filter((m) => m.id.indexOf('tpl_') === 0);
+    eq(custom.length, 1, '多出来一个自定义板块');
+    eq(custom[0].name, '产品周报', '板块名就是模板名');
+    eq(custom[0].mark, '周', '稿签单字也对');
+  });
+
+  await group('带模板起稿：meta 里能看出用的是哪个模板', async () => {
+    const out = await collect('/api/generate', {
+      params: { mode: 'tpl_' + templateId, length: 'short', versions: 2 },
+      material: { input: '这周上线了新版搜索，顺手修了三个线上问题' },
+      template: {
+        id: templateId,
+        name: '产品周报',
+        system: '你是资深产品经理，替团队写周报，只输出正文，分进展、问题、下周计划三块。',
+        outputHint: '每块不超过五条',
+      },
+    });
+    eq(out.status, 200, '起稿成功');
+    const meta = out.events.find((e) => e.event === 'meta');
+    eq(meta.payload.mode, 'tpl_' + templateId, '用的是自定义板块');
+    eq(meta.payload.template.name, '产品周报', 'meta 里带了模板名');
+    eq(meta.payload.versions.length, 2, '自定义板块也有多个角度');
+    const done = out.events.find((e) => e.event === 'done').payload;
+    ok(done.versions[0].text.length > 20, '离线引擎给出了内容（它自己会说明做不了自定义提示词）');
+  });
+
+  await group('删掉模板后板块也消失', async () => {
+    const del = await fetch(base + '/api/templates/' + templateId, { method: 'DELETE' });
+    eq(del.status, 200, '删除成功');
+    eq((await fetch(base + '/api/templates/' + templateId, { method: 'DELETE' })).status, 404, '重复删除 404');
+    const list = await (await fetch(base + '/api/history')).json();
+    eq(list.modes.filter((m) => m.id.indexOf('tpl_') === 0).length, 0, '自定义板块没了');
+    eq(list.modes.length, 10, '只剩十个内置板块');
   });
 
   await app.close();

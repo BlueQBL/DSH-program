@@ -40,23 +40,42 @@
     return items.map((t) => '- ' + t).join('\n');
   }
 
+  /** 模板字段只认这四样，别的一律忽略（模板可能来自浏览器，不信任它的形状） */
+  function customBlock(template) {
+    if (!template || typeof template !== 'object') return null;
+    const system = String(template.system || '').trim();
+    if (!system) return null;
+    return {
+      id: String(template.id || '').slice(0, 40),
+      name: String(template.name || '自定义模板').slice(0, 24),
+      system: system.slice(0, Modes.LIMITS.templateSystemMax),
+      outputHint: String(template.outputHint || '').slice(0, Modes.LIMITS.templateNoteMax),
+    };
+  }
+
   /**
    * 系统提示：角色 + 本次任务的硬约束。
    * @param {object} params 已经过 Modes.normalizeParams 的参数
+   * @param {object} [template] 自定义模板：有 system 时用它替代默认的角色与任务说明
    */
-  function systemPrompt(params) {
+  function systemPrompt(params, template) {
     const p = Modes.normalizeParams(params);
     const mode = Modes.getMode(p.mode);
     const tone = Modes.toneOf(mode, p.tone);
+    const custom = customBlock(template);
 
     const lines = [];
-    lines.push(ROLE);
+    lines.push(custom ? custom.system : ROLE);
     lines.push('');
-    lines.push(`本次任务：${mode.name}（${mode.tagline}）。`);
+    lines.push(custom ? `本次任务：按用户自己写的模板「${custom.name}」来写。` : `本次任务：${mode.name}（${mode.tagline}）。`);
     lines.push(`语气要求：${tone.label}——${tone.brief}`);
     lines.push(`创意度：${creativityWord(p.creativity)}`);
     lines.push(`篇幅：全文约 ${p.chars} 字（可以有 ±15% 浮动，不要为了凑字数注水）。`);
-    lines.push(`输出要求：${mode.outputHint}`);
+    if (custom) {
+      if (custom.outputHint) lines.push(`输出要求：${custom.outputHint}`);
+    } else {
+      lines.push(`输出要求：${mode.outputHint}`);
+    }
     lines.push('');
     lines.push('硬性要求：');
     lines.push(bulletList(TABOOS));
@@ -66,15 +85,16 @@
   /**
    * 单个版本的用户提示。多版本时用 angle 拉开差异，而不是只调温度。
    */
-  function userPrompt(params, material, versionIndex) {
+  function userPrompt(params, material, versionIndex, template) {
     const p = Modes.normalizeParams(params);
     const mode = Modes.getMode(p.mode);
+    const custom = customBlock(template);
     const angle = Modes.angleOf(mode, versionIndex == null ? 0 : versionIndex);
     const source = String((material && material.input) || '').trim();
     const fields = p.fields || {};
 
     const parts = [];
-    parts.push(`【写作模式】${mode.name}`);
+    parts.push(custom ? `【模板】${custom.name}` : `【写作模式】${mode.name}`);
     parts.push(`【本稿角度】${angle.label}：${angle.brief}`);
 
     const extras = [];
@@ -94,10 +114,10 @@
   }
 
   /** 生成一次请求的完整消息体（单版本） */
-  function buildMessages(params, material, versionIndex) {
+  function buildMessages(params, material, versionIndex, template) {
     return [
-      { role: 'system', content: systemPrompt(params) },
-      { role: 'user', content: userPrompt(params, material, versionIndex) },
+      { role: 'system', content: systemPrompt(params, template) },
+      { role: 'user', content: userPrompt(params, material, versionIndex, template) },
     ];
   }
 

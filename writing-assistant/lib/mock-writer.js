@@ -1,7 +1,9 @@
 /*! 三易 · 智能写作台 —— 离线写作引擎（mock-writer.js）
  *
  * 没配大模型 Key 时，服务端把同一个请求转到这儿：模式、角度、语气、篇幅都不变，
- * 用纯规则 + 素材特征拼出一篇能直接用的中文稿，保证演示时六个模式都有像样的产出。
+ * 用纯规则 + 素材特征拼出一篇能直接用的中文稿，保证演示时十个内置模式都有像样的产出。
+ * 其中翻译（translate）与自定义模板（tpl_xxx）离线引擎做不到，这类请求返回的是
+ * 「如实说明 + 原样保留的原文」——假装译过或拿内置模式的稿子充数，比承认做不到更糟。
  *
  * 三条设计原则（决定了代码为什么长这样）：
  *   1. 句子不是空模板——关键词、数字、原句的语气都会从素材里抽出来织进产出，
@@ -347,6 +349,22 @@
     story: { prefer: ['那天', '第一次', '后来'], particle: '' },
     polite: { prefer: ['麻烦', '感谢', '方便', '如果', '辛苦'], particle: '' },
     direct: { prefer: [], particle: '', short: true },
+    /* 学术论文的四种语气 */
+    rigorous: { prefer: ['在一定程度上', '可以认为', '口径', '边界', '关联', '稳健', '有待'], particle: '' },
+    critical: { prefer: ['不足', '停留', '忽略', '高估', '低估', '难以', '分歧'], particle: '' },
+    applied: { prefer: ['实践', '落地', '可操作', '成本', '决策', '问题'], particle: '' },
+    /* 工作报告的四种语气 */
+    bluf: { prefer: ['结论', '待决策', '需要拍板', '依据'], particle: '' },
+    data: { prefer: ['数据', '口径', '来源', '指标', '记录'], particle: '' },
+    /* 小说的四种语气 */
+    restrained: { prefer: ['停', '没有', '不动', '站', '抬手', '收回去'], particle: '' },
+    lyric: { prefer: ['雨', '光', '影子', '风', '慢慢', '一层'], particle: '' },
+    tense: { prefer: [], particle: '', short: true },
+    light: { prefer: ['笑', '半圈', '顺手', '又'], particle: '' },
+    /* 翻译的四种语气（离线引擎不译，只影响说明里的口径） */
+    literal: { prefer: [], particle: '' },
+    natural: { prefer: [], particle: '' },
+    localized: { prefer: [], particle: '' },
   };
 
   function voiceOf(tone) {
@@ -360,6 +378,10 @@
     email: '这次要沟通的事',
     summary: '这份材料',
     outline: '这篇文章',
+    academic: '这项研究关注的问题',
+    report: '这次要汇报的事',
+    fiction: '这个故事',
+    translate: '这段原文',
   };
 
   function makeCtx(p, mode, angle, src, rnd) {
@@ -464,6 +486,26 @@
     if (!list || list.length < 2) return (list || []).slice();
     const k = Math.floor(rnd() * list.length);
     return list.slice(k).concat(list.slice(0, k));
+  }
+
+  /**
+   * 按语气"挑选"句子，但保持原来的先后次序。
+   * 论文、报告这类文本，句子顺序本身就是论证（背景→缺口→问题），
+   * 像续写那样整池重排会把论证打散，所以这里只换内容、不动顺序。
+   */
+  function selectByTone(rnd, sentences, voice, want) {
+    const list = sentences || [];
+    const scored = list.map((s, i) => {
+      let score = rnd() * 0.35;
+      (voice.prefer || []).forEach((w) => {
+        if (s.indexOf(w) >= 0) score += 1;
+      });
+      if (voice.short) score += Math.max(0, (40 - charCount(s)) / 60);
+      return { s, score, i };
+    });
+    scored.sort((a, b) => b.score - a.score || a.i - b.i);
+    const keep = Math.max(1, Math.min(list.length, want || list.length));
+    return scored.slice(0, keep).map((o) => o.i).sort((a, b) => a - b).map((i) => list[i]);
   }
 
   function pushUnique(list, item) {
@@ -1482,7 +1524,1197 @@
   }
 
   /* ══════════════════════════════════════════════════════════
-   * 十一、入口：compose
+   * 十一、学术论文语料（academic）
+   * ══════════════════════════════════════════════════════════ */
+
+  /* 学术写作的四条硬规矩，决定了下面的语料为什么长这样：
+     1. 不编文献、不编数据、不编作者与期刊：需要引用的地方一律写「（相关研究，年份）」，
+        再补一句提醒，把补出处的活留给用户；
+     2. 不写「综上所述」「值得注意的是」这类空转句，每一句都要给出可核查的内容；
+     3. 一切数量表述只走 {num} 槽位，数值来自素材；素材没给就整句丢掉，不替用户估；
+     4. 用科研写作的常规说法（样本量、编码、口径、稳健性），不堆形容词。 */
+
+  const ACADEMIC_SECTION_LABEL = {
+    abstract: '摘要',
+    intro: '引言',
+    review: '文献综述',
+    method: '研究方法',
+    result: '结果与讨论',
+    conclusion: '结论与展望',
+  };
+
+  const ACADEMIC_GENRE_LABEL = { journal: '期刊论文', thesis: '学位论文', conference: '会议论文' };
+
+  /* 每个部分的第一句：角度不同，起点就不同 */
+  const ACADEMIC_OPEN = {
+    abstract: {
+      structure: ['摘要：本研究以用户提供的材料为基础，围绕{kw}讨论它的表现形态、影响条件与适用范围。'],
+      dialogue: ['摘要：围绕{kw}，既有讨论存在两种解释，本研究说明它们各自成立的条件。'],
+      evidence: ['摘要：本研究以用户提供的材料为唯一证据来源，回答与{kw}相关的问题。'],
+      limits: ['摘要：本研究只回答材料能够支持的部分，适用范围写在结尾。'],
+    },
+    intro: {
+      structure: ['这一部分先交代{kw}的边界与研究缺口，再说明本研究的落点。'],
+      dialogue: ['关于{kw}，已有研究分成方向相近而结论不同的两支，本文从这里接下去。'],
+      evidence: ['讨论{kw}之前，先把可以核查的材料交代清楚。'],
+      limits: ['这一部分要说明的是：本文能回答什么，以及在什么范围内回答。'],
+    },
+    review: {
+      structure: ['这一部分按时间维度梳理{kw}的既有研究，再说清分歧出在哪里。'],
+      dialogue: ['把{kw}的既有研究放在一起看，分歧比共识更值得说明。'],
+      evidence: ['既有研究的证据等级差别很大，先按材料类型分开看。'],
+      limits: ['综述范围限定在与{kw}直接相关的讨论，边缘问题只在必要时提及。'],
+    },
+    method: {
+      structure: ['研究设计按四个要素说明：对象、工具、步骤、变量。'],
+      dialogue: ['在方法上，本研究沿用本领域通行的做法，差别只在编码规则。'],
+      evidence: ['材料的来源与处理方式是这一部分的重点，交代清楚之后再谈分析。'],
+      limits: ['方法上的边界提前说明：本研究能够测量的范围是有限的。'],
+    },
+    result: {
+      structure: ['结果按先事实、后解释的顺序展开。'],
+      dialogue: ['这一部分把本研究的发现放回既有判断中比较。'],
+      evidence: ['先给出材料本身的记录，再做分组对照与稳定性检查。'],
+      limits: ['结果的适用范围在讨论里一并说明，不外推到材料之外。'],
+    },
+    conclusion: {
+      structure: ['结论部分回到开篇提出的问题，逐一给出材料能够支持的回答。'],
+      dialogue: ['本文的判断与既有研究的关系需要说明：补充多于推翻。'],
+      evidence: ['结论的每一条都对应材料中的记录，其余留作待补。'],
+      limits: ['结论之后紧接局限与展望，这两部分写在一起。'],
+    },
+  };
+
+  const ACADEMIC_BODY = {
+    abstract: [
+      '与既有讨论相比，本文把重点放在条件的可检验性上，而不是重复描述现象。',
+      '方法上以材料为基础：先界定核心概念与观察指标，再按统一规则编码，最后做分组对照。',
+      '分析分两步：先给出材料中的分布，再检查结论对测量口径变化的敏感性。',
+      '结果显示，材料中与{kw}有关的几个指标之间存在稳定关联，关联的方向与已有判断一致。',
+      '强度上的差别大于方向上的差别，这部分差异更可能来自测量口径。',
+      '结论是：在材料覆盖的范围内可以支持上述判断，超出这个范围需要新的证据。',
+      '本研究的限度在于样本构成与观察窗口，下一步应补充纵向材料与外部样本的验证。',
+    ],
+    intro: [
+      '近十余年间，围绕{kw}的讨论从现象描述转向机制解释，但概念的边界始终不统一。',
+      '在这一领域里，与{kw}相关的现象常被当作结果来处理，较少讨论它作为过程的性质。',
+      '实践中的变化让问题变得更具体：讨论的对象从“要不要做”变成了“怎样才能站得住”。',
+      '既有研究提供了不少描述性材料，但在因果方向的判断上仍存在分歧。',
+      '分歧的来源不只在于样本：测量工具、观察窗口与编码规则都存在系统差别。',
+      '有一个环节被普遍跳过：不同研究在用同一份材料回答不同的问题。',
+      '本研究要回答三个层次的问题：与{kw}相关的现象呈什么形态、哪些条件影响它、这些条件怎样起作用。',
+      '本文的立场是把判断限定在材料能够支撑的范围内，需要外推的地方单独标出。',
+      '与以往研究的差别在于，本研究把测量口径作为分析对象之一。',
+      '这项工作的价值未必在于给出新结论，而在于让已有的分歧变得可以检验。',
+      '把讨论范围收窄之后，问题就从“有没有关系”变成了“关系在什么条件下成立”。',
+    ],
+    review: [
+      '关于{kw}的研究大致可以归为三类，划分标准是研究者如何处理时间维度。',
+      '第一类研究把与{kw}相关的现象视为静态结果，用截面材料比较不同群体之间的差异。',
+      '第二类研究引入过程视角，关注它在不同阶段的形态变化，代价是观察规模普遍偏小。',
+      '第三类研究转向机制，试图说明中间环节如何起作用，目前仍以个案为主。',
+      '从结论看，三类的方向大体一致，分歧集中在强度与适用条件上。',
+      '分歧的来源不止在样本：测量工具、编码规则与统计口径也存在系统差别。',
+      '一个尚未解决的问题是，多数研究把自陈材料与行为记录当作可以互换的证据。',
+      '把两类证据分开处理，比强行合并更稳妥，本文采用前一种做法。',
+      '既有综述多以主题归类，较少讨论不同测量口径之间能不能换算。',
+      '按照这条脉络，{kw}的讨论正在从“是否存在”转向“在什么条件下更强或更弱”。',
+      '上述归类基于本领域常用的划分方式，换成另一个标准可以得到另一种分法。',
+    ],
+    method: [
+      '研究采用与{genreLabel}体例相符的设计：以材料中的对象为分析单位，按统一口径编码后做对照。',
+      '核心概念沿用本领域较为通行的界定，操作化时把它拆成三个可观察的指标。',
+      '材料中可以直接引用的记录包括{num}，本研究按原样引用，未做换算。',
+      '编码分两轮：第一轮按预设类目，第二轮针对无法归类的部分补充类目并回头重编。',
+      '为保证一致性，同一份材料按同一套规则重复编码一次，不一致的地方单独记录。',
+      '分析分为两步：先给出分布，再做分组对照，最后检查结论对口径变化的敏感性。',
+      '变量的测量尽量使用材料中的原始记录，避免在编码阶段引入研究者的判断。',
+      '涉及因果的表述一律写成关联，除非材料能够支持时间先后。',
+      '方法上的局限先说明一次：观察窗口有限，横断面设计无法排除反向因果。',
+      '材料涉及的个人信息在整理时做了去标识处理，引用原话时只保留与研究问题相关的部分。',
+      '材料的规模与口径以原始记录为准；本研究不补估缺失的取值，缺的地方标注出来。',
+      '为减少判断的随意性，所有编码都保留原始出处，便于他人复核。',
+    ],
+    result: [
+      '结果先从描述性信息说起：就{kw}而言，材料中的记录分布并不均匀，集中出现在观察窗口的后半段。',
+      '分组对照显示，差异的方向与预期一致，幅度小于既有研究的估计。',
+      '与既有研究一致的是关联的方向，不一致的是强度，差异更可能来自测量口径。',
+      '有一组结果不符合上述模式：个别材料的取值与整体趋势相反。',
+      '把这几个例子单独看，它们共享一个特征：记录方式与其他材料不同。',
+      '讨论部分对这两点给出解释：前者属于口径问题，后者更像是材料构成造成的。',
+      '换一种口径重算一遍，主要结论没有变化，这一点提高了判断的可信度。',
+      '稳健性检查只能说明结论对当前材料稳定，不能替代外部样本的验证。',
+      '材料里出现的{num}这类记录，如果来自抽样就可以支持推广，如果不是就只能描述这批对象。',
+      '还有一个解释没有被排除：观察到的关联可能来自同时变化的第三个因素。',
+    ],
+    conclusion: [
+      '回到开篇提出的问题，材料能够支持的回答是：与{kw}有关的差异与条件相关，而这些条件是可观察的。',
+      '这在理论上意味着把测量口径当作解释的一部分；在实践上，它意味着先统一口径再谈效果。',
+      '本研究的局限有三条：样本的代表性、观察窗口的长度、以及关键变量依赖间接测量。',
+      '这些局限不推翻结论，但划定了它的适用范围，超出范围需要重新检验。',
+      '下一步可以沿两个方向推进：补充纵向材料，以及把编码规则放到另一批材料上复现。',
+      '如果能做到复现，关于{kw}的分歧有可能收敛；在此之前，强判断都应当保留。',
+      '对实践的建议只有一条：先把口径写下来，再比较结果，否则比较本身没有意义。',
+      '本文没有解决的是因果方向的问题，这需要设计上的改变，而不是更多的材料。',
+      '后续研究如果能把口径统一，现在的分歧至少有一部分会被证明是测量造成的。',
+    ],
+  };
+
+  /* 四个角度的动线差异：结构、对话、证据、边界 */
+  const ACADEMIC_ANGLE = {
+    structure: [
+      '按惯例先界定对象：这里讨论的{kw}限于材料覆盖的范围，暂不作推广。',
+      '本文的论证分两层：先看材料内部是否一致，再看与已有判断的差别有多大。',
+      '这一部分的小结只回答一个问题：现有证据支持到哪一步。',
+    ],
+    dialogue: [
+      '与（相关研究，年份）的判断相比，本研究在测量口径上做了调整。',
+      '把这一判断放回文献脉络里，它补充的是条件，而不是推翻既有结论。',
+      '引用位置在此保留：（相关研究，年份）；具体文献需要你自己补上，这里不替你编造。',
+      '既有讨论多停在这一步，本文多做的是一件事：把口径差异当作解释的一部分。',
+    ],
+    evidence: [
+      '上面的每一步判断都能在材料里找到对应记录，没有把推测写成事实。',
+      '凡涉及数量的表述都以材料中的原始记录为准，材料没有给的留作待补。',
+      '换成另一种口径重算，结论的方向不变，幅度有变化。',
+      '如果后续材料能支持时间先后，这里的关联才有条件改写为因果表述。',
+    ],
+    limits: [
+      '上述判断有明确的边界：材料之外的对象、更早或更晚的时段，都需要重新检验。',
+      '适用条件是观察窗口足够长、前后口径一致；条件不成立时，结论会更弱。',
+      '结论的强度受测量方式限制：它描述的是关联，不是机制。',
+      '推广之前需要新的样本；在此之前，这里给出的只是一个有条件成立的判断。',
+    ],
+  };
+
+  const ACADEMIC_CLOSE = {
+    abstract: ['结论只覆盖材料能够支持的范围，推广需要新的证据。'],
+    intro: ['后文按综述、方法、结果、结论的顺序展开，剩下的问题交给后面的部分回答。'],
+    review: ['这些分歧也正是本文把测量口径作为分析对象的理由。'],
+    method: ['按这套设计得到的结果写在下一部分，讨论随后展开。'],
+    result: ['以上是材料支持的部分，其余解释放在讨论里，并标明各自的依据。'],
+    conclusion: ['到这里可以收一下：剩下的工作属于下一轮研究。'],
+  };
+
+  /* 体例只改紧凑程度，不往正文里塞写作说明 */
+  const ACADEMIC_GENRE_EXTRA = {
+    journal: [],
+    thesis: ['为使论证完整，这里把两轮编码中不一致的地方一并保留下来。', '学位论文的篇幅允许展开，因此把操作化的细节写全，方便复核。'],
+    conference: ['与既有工作相比，本文的新意集中在一点：把测量口径当作分析对象。'],
+  };
+
+  /* 任何一个部分都可能用到的判断句：长篇幅时用来把论证铺开，
+     不是套话——每一句都在说研究本身的方法与限度。 */
+  const ACADEMIC_SHARED = [
+    '口径一旦变了，同一批材料会得出不同的强度，这一点必须在结果里交代清楚。',
+    '把判断限定在材料范围内不是保守，而是让结论可以被别人复现。',
+    '需要引用的地方只留位置，具体文献由作者补上，避免出处出现差错。',
+    '同一份材料在不同研究里的编码结果并不一致，这正是分歧的来源之一。',
+    '本研究不打算给出普适的结论，只想把条件写清楚，让后来的研究可以检验。',
+    '理论与经验在这里互相约束：概念决定看什么，材料决定能说什么。',
+    '如果后续材料与现有判断冲突，需要修改的是判断，而不是记录。',
+    '把不确定的地方写出来，比用模糊的措辞掩盖更诚实，也便于继续研究。',
+    '这一部分的判断都可以被证伪：换一批材料、换一个口径，结论就可能变化。',
+    '研究的时间跨度决定了能观察到什么，解释结果时要把这一点一并考虑。',
+  ];
+
+  const ACADEMIC_TONE = {
+    rigorous: {
+      prefer: ['在一定程度上', '可以认为', '口径', '边界', '关联'],
+      lead: ['先把范围限定好：下面的判断只在材料能够支持的地方成立。'],
+    },
+    plain: {
+      prefer: ['简单', '具体', '例子', '看得见'],
+      lead: ['把话说简单一点：这件事的关键落在几个看得见的指标上。'],
+    },
+    critical: {
+      prefer: ['不足', '停留', '忽略', '高估', '低估'],
+      lead: ['既有研究在这一步上普遍做了简化，代价是结论之间的可比性。'],
+    },
+    applied: {
+      prefer: ['实践', '落地', '可操作', '成本', '决策'],
+      lead: ['从实际问题出发，这一部分要回答的是怎么做才不至于白做。'],
+    },
+  };
+
+  function academicVoice(p, ctx) {
+    const table = ACADEMIC_TONE[p.tone];
+    if (!table) return ctx.voice;
+    return {
+      prefer: (table.prefer || []).concat(ctx.voice.prefer || []),
+      lead: table.lead || [],
+      short: ctx.voice.short,
+    };
+  }
+
+  /** 数据驱动的角度：先摆材料里能核查的东西，再谈判断 */
+  function academicEvidenceLines(ctx) {
+    const out = [];
+    if (ctx.nums.length) {
+      out.push(`材料中可以直接核查的记录是：${ctx.nums.slice(0, 3).join('、')}，本文的判断以此为起点。`);
+    }
+    out.push('每一步判断都对应材料里的一条记录，没有把推测写成事实。');
+    return out;
+  }
+
+  function academicDialogueLines() {
+    return [
+      '与（相关研究，年份）的判断相比，本研究在测量口径上做了调整。',
+      '引用位置在此保留：（相关研究，年份）；具体文献需要你自己补上，这里不替你编造。',
+    ];
+  }
+
+  function composeAcademic(p, mode, angle, ctx, target) {
+    const section = ACADEMIC_SECTION_LABEL[ctx.fields.section] ? ctx.fields.section : 'intro';
+    const genre = ACADEMIC_GENRE_LABEL[ctx.fields.genre] ? ctx.fields.genre : 'journal';
+    const rnd = ctx.rnd;
+    const voice = academicVoice(p, ctx);
+    const actx = Object.assign({}, ctx, {
+      genreLabel: ACADEMIC_GENRE_LABEL[genre],
+      sectionLabel: ACADEMIC_SECTION_LABEL[section],
+    });
+    // 摘要有它自己的长度惯例（二百字上下），不跟着"短/中/长"档位放大；
+    // 其余部分按体例缩放：学位论文铺得开，会议论文压得紧。
+    const budget = section === 'abstract'
+      ? Math.max(180, Math.min(260, Math.round(target * 0.9)))
+      : Math.max(140, Math.round(target * (genre === 'thesis' ? 1.08 : genre === 'conference' ? 0.84 : 1)));
+
+    const blocks = [];
+    const openPool = (ACADEMIC_OPEN[section] || {})[angle.id] || (ACADEMIC_OPEN[section] || {}).structure || [];
+    const open = pick(rnd, poolLines(openPool, actx));
+    if (open) pushUnique(blocks, open);
+
+    // 摘要是一段话，范围声明与领域说明这类交代不进摘要，正文里才需要
+    if (section !== 'abstract') {
+      const lead = pick(rnd, poolLines(voice.lead || [], actx));
+      if (lead) pushUnique(blocks, lead);
+      if (actx.fields.discipline) {
+        pushUnique(blocks, `本部分所属领域为${clip(actx.fields.discipline, 16)}，术语与体例按该领域的通行做法处理。`);
+      }
+    }
+
+    if (angle.id === 'evidence') {
+      academicEvidenceLines(actx).forEach((s) => pushUnique(blocks, s));
+    } else if (angle.id === 'dialogue') {
+      academicDialogueLines().forEach((s) => pushUnique(blocks, s));
+    }
+
+    // 正文按原顺序读才成论证：语气只决定"先写哪几句"，不把顺序打散；
+    // 长篇（900 字档）要求把这一部分的材料用尽，短篇才按语气挑重点。
+    const bodyAll = poolLines(ACADEMIC_BODY[section], actx);
+    const wantBody = budget >= 640 ? bodyAll.length : Math.max(3, Math.ceil(bodyAll.length * 0.62));
+    const body = selectByTone(rnd, bodyAll, voice, wantBody);
+    const rest = bodyAll.filter((s) => body.indexOf(s) < 0);
+    // 挑剩的句子跟在正文后面而不是塞进"补白"，免得"结果先从描述性信息说起"这种
+    // 本该开头的句子被排到最后去
+    body.concat(rest).forEach((s) => pushUnique(blocks, s));
+
+    const angleLines = poolLines(ACADEMIC_ANGLE[angle.id] || ACADEMIC_ANGLE.structure, actx);
+    const genreExtra = poolLines(ACADEMIC_GENRE_EXTRA[genre] || [], actx);
+    const shared = poolLines(ACADEMIC_SHARED, actx);
+    if (budget >= 640) {
+      shared.forEach((s) => pushUnique(blocks, s));
+    }
+
+    // 角度决定动线：局限角度把边界条件提到前面，证据角度先摆可核查的记录
+    const groups = angle.id === 'limits' ? [angleLines.slice(0, 1), angleLines.slice(1), genreExtra]
+      : angle.id === 'evidence' ? [genreExtra, angleLines]
+        : angle.id === 'dialogue' ? [angleLines, genreExtra]
+          : [genreExtra, angleLines];
+    groups.forEach((group) => {
+      group.forEach((s) => pushUnique(blocks, s));
+    });
+
+    // 摘要的关键词一行要在最后，所以它不进 fitTarget，单独接上
+    const keywordLine = section === 'abstract' ? `关键词：${(actx.kws[0] || actx.kw)}；测量口径；分组对照；边界条件。` : '';
+    const reserve = poolLines(ACADEMIC_CLOSE[section] || [], actx).concat(angleLines, shared);
+    const kept = fitTarget(blocks, budget - charCount(keywordLine), reserve);
+    if (!kept.length) return '';
+    const text = (section === 'abstract' ? kept.join('') : joinParagraphs(kept, [2, 3, 3])) + keywordLine;
+    return text;
+  }
+
+  /* ══════════════════════════════════════════════════════════
+   * 十二、工作报告语料（report）
+   * ══════════════════════════════════════════════════════════ */
+
+  /* 报告的规矩同样硬：
+     数字与时间只能来自素材，材料没给的写「（待补）」，不替用户估；
+     每条要点先给结论再给依据；结尾一定是「下一步」，并留责任人占位。 */
+
+  const REPORT_HEADING = {
+    conclusion: '结论',
+    decision: '待决策项',
+    data: '数据与口径',
+    risk: '问题与风险',
+    next: '下一步',
+    goal: '目标',
+    progress: '主要进展',
+    findings: '主要发现',
+    problem: '要解决的问题',
+    cause: '原因',
+    suggestion: '建议',
+    compare: '对比',
+    trend: '趋势',
+    reusable: '可复用的做法',
+    items: '本期事项',
+    todo: '待办',
+  };
+
+  /* 四个角度就是四套章节动线 */
+  const REPORT_PLAN = {
+    bluf: ['conclusion', 'decision', 'data', 'risk', 'next'],
+    timeline: ['goal', 'progress', 'findings', 'risk', 'next'],
+    psr: ['problem', 'cause', 'suggestion', 'next'],
+    compare: ['compare', 'data', 'cause', 'next'],
+  };
+
+  /* 这几节适合先摆素材里的原话：报告的依据本来就是材料 */
+  const REPORT_FACT_ROLES = { findings: 1, progress: 1, data: 1, compare: 1 };
+
+  const REPORT_POOL = {
+    conclusion: [
+      '结论：从材料看，{kw}的推进是稳的，没有出现需要立刻止损的信号。',
+      '结论：主要工作已经完成，剩下的部分以收尾与交付为主。',
+      '结论：本期没有新增风险点，原有问题按既定办法在处理。',
+      '结论：{kw}的问题不在执行速度，而在前置条件没有定清楚。',
+      '结论：整体符合预期，偏差集中在需要多方确认的那几个环节。',
+      '结论：可以按现有安排继续推进，不必调整大方向。',
+    ],
+    decision: [
+      '需要拍板的是两件事：一是要不要按现有口径继续推进，二是资源的追加量。',
+      '请确认：是否接受当前的时间安排；若不接受，请同时确认可以让出的范围。',
+      '待决策项：口径统一的做法由谁定，定完之后谁负责在材料上落一遍。',
+      '需要拍板的只有一处：收窄范围保证按期完成，还是保范围、接受顺延。',
+      '需要你定的是牵头人：这件事涉及两个以上部门，没有牵头人会一直拖着。',
+    ],
+    data: [
+      '数据来源：你提供的材料；{num}这一项按原文照录，没有做二次加工。',
+      '涉及比率的判断都标了来源，没有来源的地方留空，避免出现看起来精确的假数字。',
+      '统计口径与上期保持一致，换过口径的指标单独标注，便于横向比较。',
+      '数据缺口已经列在下面，补齐之后结论可能需要修正。',
+    ],
+    risk: [
+      '风险有两个：一是时间被压缩后质量下降，二是口径不统一导致返工。',
+      '需要提醒的是资源占用：这件事会持续占用同一批人的时间。',
+      '风险等级目前不高；如果确认环节继续拖，会传导到交付节点。',
+      '还没有出现需要升级处理的信号，先按现有办法观察一个周期。',
+      '最需要盯住的是依赖外部配合的那一步，它不受我们单方面控制。',
+    ],
+    goal: [
+      '本期目标：把{kw}从讨论推进到可以重复执行的状态。',
+      '开始之前定下的目标很清楚：先跑通一轮，再谈优化。',
+      '目标分两条：一条看结果，一条看过程；后者用来判断做法能不能留下来。',
+      '目标里有一条是硬约束：关键节点的完成时间不能往后挪。',
+      '定目标时就把验收标准写上，避免最后各说各话。',
+    ],
+    progress: [
+      '本期完成的部分：把{kw}的主流程走通了一遍，留下的记录可以直接复用。',
+      '进展集中在两件事上：把标准写清楚，把责任人落到具体的人头上。',
+      '已经完成的部分都有记录可查，材料里提到的每一步都有对应的产出。',
+      '推进过程中做过一次调整，调整的理由与结果都写在依据部分。',
+      '过程中投入的时间比计划多，多出来的部分主要花在确认环节。',
+    ],
+    findings: [
+      '材料显示的{kw}相关信号方向一致，没有互相矛盾的记录。',
+      '从材料看，卡点集中在准备环节，而不是执行环节。',
+      '把材料里的记录按事项归类之后，重复出现的只有一类问题。',
+      '真正占用时间的不是讨论本身，而是等待确认。',
+      '同一件事在材料里被记了两次，两次的说法不完全一样，需要对齐。',
+    ],
+    problem: [
+      '要解决的问题只有一个：{kw}到现在还没有一个所有人都认的执行口径。',
+      '问题在于判断标准不统一：同一件事，不同的人用不同的尺子量。',
+      '当前最需要处理的是等待时间过长，它挤占了后面的环节。',
+      '如果这个问题不解决，后面每一步都要重新解释一遍。',
+      '问题的表现是反复返工，根子在前面那一步没有定清楚。',
+    ],
+    cause: [
+      '原因不在能力，在分工：没有人对结果负全责。',
+      '原因有两个：一是标准没有写下来，二是例外情况没有指定处理人。',
+      '根因是前置条件没有确认，导致后面的动作反复。',
+      '从材料看，问题的来源更可能是流程设计，而不是执行力度。',
+      '还有一层原因在于信息不同步：两边按不同的版本在做同一件事。',
+    ],
+    suggestion: [
+      '对策是先定口径，再定人：口径写下来，责任人写在同一行。',
+      '建议把例外情况单独列一张表，写明谁可以拍板、多久之内给答复。',
+      '建议先在一个小范围里试跑，跑通之后再推广，避免一次性铺开。',
+      '对策分两步：先止血，再优化；先做见效快的那一步。',
+      '建议把确认环节的时间上限写进流程，超时默认按原方案执行。',
+    ],
+    compare: [
+      '对比的结论是：差距不在投入多少，而在标准是否统一。',
+      '横向对比看，{kw}的推进节奏比同类事项慢，慢在确认环节。',
+      '纵向对比看，本期比上期稳定，波动主要来自计划外的临时事项。',
+      '两边口径不一致，直接比较意义不大；先统一口径，再看差距。',
+      '把可比的部分单独拿出来比，差距比看上去要小。',
+    ],
+    trend: [
+      '趋势上，这类问题的处理方式正在从补漏转向前置。',
+      '外部条件没有出现方向性变化，短期判断仍以现有条件为基础。',
+      '如果当前条件延续，下一期的重点会从推进转到稳定。',
+      '同类做法在变多，早一步形成标准的人会省下后面很多沟通成本。',
+    ],
+    reusable: [
+      '可复用的做法：把标准写成模板，第一次慢，之后每一次都快。',
+      '值得留下来的是那套记录方式，它让复盘有据可依。',
+      '能复用的经验只有一条：把决定写在事情发生之前。',
+      '这次有效的做法是提前一周对齐，下个项目可以照搬。',
+    ],
+    items: [
+      '第一件事：把上一期的收尾工作做完，记录一并归档。',
+      '第二件事：把本期的标准落到纸面上，方便换人接手。',
+      '第三件事：把需要外部配合的环节提前一周打招呼。',
+      '第四件事：把例会时间压缩，只留需要拍板的事项。',
+      '第五件事：把材料里对不上的两处记录核对清楚。',
+    ],
+    todo: [
+      '待办一：更新一份可执行的清单，写清每一条的负责人。',
+      '待办二：把例外情况整理成一张表，随清单一起发出去。',
+      '待办三：下期开始前先过一遍上期待办，没做完的说清原因。',
+      '待办四：把对外口径统一成一份说明，避免两边说法不一致。',
+    ],
+    next: [
+      '下一步一：把口径定稿，并同步到所有相关的人。',
+      '下一步二：按定稿的口径把未完成的部分做完。',
+      '下一步三：下期开始前复盘一次，没做完的写清原因。',
+      '下一步四：对外沟通统一口径，避免两边按不同标准做事。',
+      '下一步五：把这次留下的记录整理成模板，供下次直接使用。',
+    ],
+  };
+
+  const REPORT_KIND_LEAD = {
+    work: '本期{kw}的推进情况按材料里写到的事实汇报，材料之外的内容不在这里出现。',
+    review: '复盘按“目标—结果—做法”的次序写：先看没做到什么，再看哪一步可以留下。',
+    market: '这份行业分析只就材料给出的信息判断，材料之外的推测不写。',
+    survey: '调研按“发现—数据—建议”的次序写，样本与口径在数据部分说明。',
+    weekly: '本期周报按事项罗列，只写有进展和需要跟进的部分。',
+  };
+
+  /* 报告类型不只是换个说法：结构上也要看得到差别 */
+  const REPORT_KIND_POOL = {
+    work: [
+      '本期的事项按“做完了什么、卡在哪里、下一步”三段来看。',
+      '推进过程中的调整都写在依据里，没有藏在结论里。',
+    ],
+    review: [
+      '复盘只看两件事：目标达成了多少，哪些做法值得留下来。',
+      '没做到的部分也写清原因，不然复盘会变成表功。',
+    ],
+    market: [
+      '行业信息按“现状—原因—趋势”来看，能确认的写出来，不能确认的留作待补。',
+      '判断只依据材料里的事实，没有拿常识替代数据。',
+    ],
+    survey: [
+      '调研的样本与回收情况写在数据部分，结论只在样本范围内成立。',
+      '发现按重要程度排序，先写会影响决策的那几条。',
+    ],
+    weekly: [
+      '本周的事项按完成情况罗列，没有进展的不写进来凑数。',
+      '需要别人配合的事项单独标出来，免得散会就忘。',
+    ],
+  };
+
+  const REPORT_KIND_EXTRA_ROLE = { work: '', review: 'reusable', market: 'trend', survey: 'findings', weekly: '' };
+
+  /* 周报/月报本来就是事项清单，章节不照"结论—依据—行动"铺 */
+  const REPORT_KIND_PLAN = { weekly: ['items', 'todo', 'next'] };
+
+  /* 编号已经写在标题里了，条目里再写一遍「下一步二：」就太啰嗦 */
+  const REPORT_LABEL_RE = {
+    next: /^下一步[一二三四五六七八九十]?[：:]?\s*/,
+    conclusion: /^结论[：:]\s*/,
+    decision: /^待决策项[：:]\s*/,
+    todo: /^待办[一二三四五六七八九十]?[：:]\s*/,
+    items: /^第[一二三四五六七八九十]件事[：:]\s*/,
+  };
+
+  function stripReportLabel(role, line) {
+    const re = REPORT_LABEL_RE[role];
+    if (!re) return line;
+    const out = String(line).replace(re, '');
+    return out.length >= 6 ? out : line;
+  }
+
+  const REPORT_AUDIENCE_LEAD = {
+    leader: '本报告面向管理层：结论与需要拍板的事项放在前面，细节放在后面。',
+    team: '本报告面向同组同事：分工与执行细节写全，方便直接照着做。',
+    client: '本报告面向合作方：只写与本次合作相关的内容，内部口径不在此列。',
+    public: '本报告对外公开：去掉了内部术语与尚未确认的数字。',
+  };
+
+  const REPORT_TONE = {
+    bluf: { prefer: ['结论', '待决策', '需要拍板', '依据'], lead: [] },
+    plain: { prefer: [], lead: [] },
+    data: { prefer: ['数据', '口径', '来源', '指标', '记录'], lead: [] },
+    crisp: { prefer: [], lead: [], short: true },
+  };
+
+  const REPORT_TONE_EXTRA = {
+    data: ['口径补充：上面出现的数字都来自你提供的素材，没有换算，也没有补估。'],
+    bluf: [],
+    crisp: [],
+    plain: [],
+  };
+
+  function composeReport(p, mode, angle, ctx, target) {
+    const kind = REPORT_KIND_LEAD[ctx.fields.kind] ? ctx.fields.kind : 'work';
+    const audience = REPORT_AUDIENCE_LEAD[ctx.fields.audience] ? ctx.fields.audience : 'leader';
+    const voice = REPORT_TONE[p.tone] || REPORT_TONE.plain;
+    const rnd = ctx.rnd;
+    let plan = (REPORT_KIND_PLAN[kind] || REPORT_PLAN[angle.id] || REPORT_PLAN.bluf).slice();
+    const compact = p.tone === 'crisp' || kind === 'weekly';
+    const perSection = p.tone === 'crisp' ? 2 : 4;
+    const budget = Math.max(150, Math.round(target * (kind === 'weekly' ? 0.82 : p.tone === 'crisp' ? 0.86 : 1)));
+    const lean = budget < 320;
+
+    // 报告的依据就是材料本身：先把材料里的事实抽出来，只放进一节，不重复摆
+    const facts = keyPoints(ctx.src, 3).map((s) => clipSoft(s, lean ? 42 : 58));
+    const factRole = plan.filter((r) => REPORT_FACT_ROLES[r])[0] || '';
+
+    const pools = {};
+    plan.forEach((role) => {
+      let lines = poolLines(REPORT_POOL[role] || [], ctx);
+      // 换角度时把章节内的条目错开一个起点，读起来不是同几行换标题
+      lines = rotate(rnd, lines);
+      if (role === factRole && facts.length) {
+        lines = facts.concat(lines.filter((s) => facts.indexOf(s) < 0));
+      } else if (!REPORT_KIND_PLAN[kind]) {
+        lines = orderByTone(rnd, lines, voice);
+      }
+      pools[role] = lines;
+    });
+
+    const lines = [];
+    const firstOf = (role) => (pools[role] && pools[role][0]) || '';
+
+    // 结论先行的语气：第一段就把结论与待决策项说完，正文里不再重复这两节
+    if (p.tone === 'bluf') {
+      const con = firstOf('conclusion');
+      const dec = firstOf('decision');
+      if (con || dec) {
+        lines.push('结论与待决策项');
+        if (con) lines.push(stripReportLabel('conclusion', con));
+        if (dec) lines.push(/^(需要拍板|待决策项|请确认)/.test(dec) ? dec : `待决策项：${dec}`);
+        plan = plan.filter((r) => r !== 'conclusion' && r !== 'decision');
+      }
+    }
+
+    lines.push(REPORT_AUDIENCE_LEAD[audience]);
+    // 缺的地方一律写「（待补）」：这条口径无论素材有没有数字都在
+    lines.push('口径说明：数字与时间只取自素材，材料没写的地方写（待补），不替你估。');
+    if (!lean) {
+      const kindLead = fill(REPORT_KIND_LEAD[kind], ctx);
+      if (kindLead) lines.push(kindLead);
+      poolLines(REPORT_KIND_POOL[kind] || [], ctx).slice(0, 2).forEach((s) => lines.push(s));
+      (REPORT_TONE_EXTRA[p.tone] || []).forEach((s) => lines.push(s));
+    }
+
+    // 报告类型决定要不要多插一节：复盘留经验、行业看趋势、调研摆发现
+    const extraRole = REPORT_KIND_EXTRA_ROLE[kind];
+    if (extraRole && plan.indexOf(extraRole) < 0) {
+      const extraPool = orderByTone(rnd, rotate(rnd, poolLines(REPORT_POOL[extraRole] || [], ctx)), voice);
+      const at = Math.max(1, plan.length - 2);
+      plan.splice(at, 0, extraRole);
+      pools[extraRole] = extraPool;
+    }
+    // 长篇报告要多铺两节，否则翻来覆去还是那几句
+    if (budget >= 640) {
+      let added = 0;
+      ['progress', 'cause', 'suggestion', 'reusable'].forEach((role) => {
+        if (added >= 2 || plan.indexOf(role) >= 0) return;
+        plan.splice(Math.max(1, plan.length - 2), 0, role);
+        pools[role] = orderByTone(rnd, rotate(rnd, poolLines(REPORT_POOL[role] || [], ctx)), voice);
+        added += 1;
+      });
+    }
+
+    // 短篇报告只留"一节依据 + 下一步"：开头几行已经把结论与口径说完了
+    if (lean && plan.length > 2) {
+      plan = [plan[0], 'next'].filter((r) => pools[r]);
+    }
+
+    const sections = plan
+      .filter((role) => (pools[role] || []).length)
+      .map((role) => ({
+        role,
+        heading: kind === 'weekly' && role === 'conclusion' ? '本期结论' : REPORT_HEADING[role] || role,
+        used: [pools[role][0]],
+      }));
+
+    // 每节先各留一条要点，再轮着补齐，保证「下一步」这一节一定在
+    let len = charCount(lines.join('')) + sections.reduce((n, s) => n + charCount(s.heading) + charCount(s.used[0]), 0);
+    for (let round = 1; round < 12 && len < budget * 0.92; round += 1) {
+      let added = false;
+      sections.forEach((sec) => {
+        if (len >= budget * 0.92) return;
+        if (sec.used.length >= perSection) return;
+        const nextLine = pools[sec.role][sec.used.length];
+        if (!nextLine) return;
+        sec.used.push(nextLine);
+        len += charCount(nextLine);
+        added = true;
+      });
+      if (!added) break;
+    }
+
+    const cn = ['一', '二', '三', '四', '五', '六', '七'];
+    sections.forEach((sec, i) => {
+      lines.push('');
+      lines.push(`${cn[i] || i + 1}、${sec.heading}`);
+      let bullets = sec.used.map((s) => stripReportLabel(sec.role, s));
+      if (sec.role === 'next') {
+        bullets = bullets.map((s) => `${s.replace(/[。；]$/, '')}（责任人待定，完成时间待补）。`);
+      }
+      bullets.forEach((s, j) => lines.push(`${j + 1}. ${s}`));
+    });
+
+    if (!compact && !lean && ctx.nums.length) {
+      lines.push('', `本次用到的数字：${ctx.nums.slice(0, 3).join('、')}，均照素材原样引用。`);
+    }
+    return lines.join('\n');
+  }
+
+  /* ══════════════════════════════════════════════════════════
+   * 十三、小说语料（fiction）
+   * ══════════════════════════════════════════════════════════ */
+
+  /* 三条约束写进语料本身：
+     1. 只写动作、场景与对话，不用「他感到」「她意识到」直接说明情绪——
+        情绪要靠数零钱、抬手、停住这类动作让读者自己看出来；
+     2. 主语一律走 {I} 槽位（我 / 他 / 她），别的人物只用身份词（{role}），
+        这样第一人称稿里天然不会漏出「他/她」；
+     3. 不写"以下是小说的开头"这类说明句，也不写年表与梗概。 */
+
+  const FICTION_PROP = {
+    real: [
+      '末班公交进站的时候，雨已经小了，站牌下只剩两个人。',
+      '收银台上的胶带用完了，抽屉里翻出半卷，边缘起了毛。',
+      '便利店的玻璃门内侧结了一层薄雾，手指划过去能留下一道印。',
+      '微波炉响了一声，值夜班的人把饭盒端出来，在窗口站了一会儿。',
+      '塑料袋在手里晃着，装着两盒牛奶和一包盐。',
+      '路灯把水洼照得发白，踩过去的时候声音很轻。',
+      '楼下的面馆关了门，卷帘门拉到一半，里面还亮着一盏灯。',
+      '电动车停在单元门口，车筐里放着没拆的快递。',
+    ],
+    mystery: [
+      '楼道的声控灯亮到第三层就灭了，脚步停下来，灯又亮。',
+      '门锁上有两道新的划痕，一道深一道浅，位置和上次一样。',
+      '监控画面从两点十七分开始跳帧，中间缺了四十秒。',
+      '桌上的杯子换过位置，杯口的水渍朝外，杯底却没有移动的痕迹。',
+      '信封没有封口，里面的纸对折了三次，折痕是旧的。',
+      '楼道里有人停下，钥匙在手里转了两圈，没有插进锁孔。',
+      '走廊尽头的门虚掩着，门缝里的光比昨天暗。',
+      '电梯停在四层，指示灯没有再动。',
+    ],
+    scifi: [
+      '舱内的主灯切到夜间模式，只剩两条冷白色的导光条。',
+      '气闸泄压的声音持续了六秒，压力表的指针回到绿区。',
+      '终端上跳出一行日志：同步率下降百分之三，原因未知。',
+      '休眠舱的指示灯是慢闪的，说明里面的人醒过一次。',
+      '舷窗外那颗行星转到背面，通讯中断了十一分钟。',
+      '冷却管里的液体发出细小的流动声，温度比标准值低了两度。',
+      '维修臂停在货舱上方，末端夹着一块不在清单里的编号牌。',
+      '头盔里的呼吸声被放大，间隔比平时长。',
+    ],
+    fantasy: [
+      '长街尽头的铜铃响过第三遍，卖药的铺子还亮着灯。',
+      '结界上的裂口只有一指宽，边缘的光正在变淡。',
+      '药炉里的火压得很低，锅里的水一直没有开。',
+      '雪落在石阶上，落一层化一层，谁的脚印都没留下。',
+      '木牌上的字被雨泡过，最后两个字已经看不清。',
+      '腰间的短刀没有出鞘，刀鞘上沾着松脂。',
+      '灯芯烧到最后一截，屋里的人把灯挑高一寸。',
+      '客栈的账本摊在桌上，最后一页没有写满。',
+    ],
+    romance: [
+      '咖啡凉到一半，杯壁上的水痕慢慢往下走。',
+      '伞往那边偏了一下，肩膀湿了一片，谁都没有提。',
+      '手机屏幕亮了一次，消息框里只有两个字：到了。',
+      '电梯停在十层，门开了一半，两个人谁都没有先出去。',
+      '外套搭在椅背上，袖口还留着上一个人的温度。',
+      '桌上的两只杯子挨得很近，杯沿上的水渍几乎连在一起。',
+      '楼道里的声控灯灭下去，没有人跺脚。',
+      '车票压在书页里，页角折了起来。',
+    ],
+    history: [
+      '更鼓敲过三下，坊门早已落锁，只有驿道上的马蹄声还听得见。',
+      '油灯把账册照得发黄，算盘珠子停在最后一行。',
+      '布庄的门板上贴着新告示，纸边还没有干透。',
+      '祠堂的门槛磨得发亮，来上香的人把伞靠在门边。',
+      '驿马换了新掌，铁匠铺的火一直没有熄。',
+      '茶摊收了，木凳扣在桌上，风把招牌吹得响。',
+      '家书封了口，蜡印上按着一个模糊的指痕。',
+      '渡口的船停在浅水处，缆绳松了半圈。',
+    ],
+  };
+
+  /* 动作按"哪一段"分。中性动作哪个类型都能用；
+     便利店、收银台、灯管这类现代器物单独放，免得跑进奇幻或历史的场面里。 */
+  const FICTION_BEAT = {
+    open: [
+      '门上的铃铛响了一声。',
+      '进来的人把伞收在门口，水顺着伞骨往下滴。',
+      '来的人把东西放在案上，往后退了半步。',
+      '外面的风把门帘吹起来一角，又落下去。',
+      '屋里的人没有抬头，手里的东西没有停。',
+      '灯芯挑高了一点，屋里亮了一层。',
+    ],
+    plot: [
+      '{I}把东西推过去，对方没有接。',
+      '两个人隔着桌子，中间放着一样东西。',
+      '{I}低头去找，东西滚到地上，滚到角落里。',
+      '上面的字迹掉了，认不出原先写的是什么。',
+      '{I}抬手去拿最上层的东西，指尖碰到一层灰。',
+      '门又响了一声，进来的人站在门口没有动。',
+    ],
+    talk: [
+      '“说慢一点。”{role}把手里的东西放回案上。',
+      '“我记着。”{I}把笔尖按在纸上，没有立刻写。',
+      '“上一次你也是这么说的。”',
+      '“上一次不一样。”{I}抬起头。',
+      '“哪里不一样？”{role}往后退了半步。',
+      '“上一次我还不知道要问什么。”',
+    ],
+    turn: [
+      '{I}把那张纸翻过来，背面还有一行字。',
+      '原来的说法在这一刻对不上了：日期和记录差了一天。',
+      '这次进来的人换了一件外套，鞋却和昨天一样。',
+      '{I}把抽屉里的东西全部倒出来，少了一样。',
+      '记录上的时间是对的，错的是{role}报出来的那一个。',
+      '一直放在明面上的东西，其实不是那件事的关键。',
+    ],
+    end: [
+      '灯灭了以后，屋里只剩下门缝里的一条光。',
+      '外面的雨停了，地上的水痕慢慢干了。',
+      '{I}把东西收好，钥匙放进口袋。',
+      '第二天，原先那个位置换了一个人。',
+      '门上的铃铛被取了下来，放在抽屉最里面。',
+      '这件事没有下文，只有那一格空着。',
+    ],
+  };
+
+  const FICTION_BEAT_MODERN = [
+    '柜台后面的位置空着，收钱的抽屉虚掩。',
+    '灯管闪了两下，才亮稳。',
+    '外面的风把卷帘门的边角吹得响。',
+    '货架第二层的标签掉了，商品和价格对不上。',
+    '灯管最后闪了一下，灭了。',
+    '{I}低头找零，零钱滚到地上，滚进货架下面。',
+  ];
+
+  /* 另外三个类型的动作：器物和用词跟着换，不跟现代生活混着写 */
+  const FICTION_BEAT_ERA = {
+    scifi: [
+      '舱门的气密圈发出一声轻响，锁扣退回去半格。',
+      '控制台上的指示灯按顺序亮过一遍，最后停在第二格。',
+      '通讯频道里有人叫了一声编号，没有得到回答。',
+      '手套内侧的温度在下降，指节按在面板上留下几个浅印。',
+      '自动门开到一半停住，缝里透进来的光很薄。',
+      '终端把上一段记录又读了一遍，读到同一处就停住。',
+      '通道尽头过来一个人，脚步比平时慢半拍。',
+      '值班表上多出一行，写的是同一段时间。',
+    ],
+    fantasy: [
+      '门轴响了一声，来的人把斗篷上的雪抖在门槛外。',
+      '灯笼晃了半圈，墙上的影子跟着挪了半尺。',
+      '屋檐下的铜铃响过第三声，院子里没有人应。',
+      '案上摊着的纸被风掀起一角，镇尺滑了半指。',
+      '药炉里的火苗矮下去，屋里暗了一层。',
+      '长廊那头过来一个人，脚步声在石板上停了一下。',
+      '封着的封条上有一道细纹，指腹按过去能感觉到。',
+      '桌上的茶凉了，杯口的白气早散了。',
+    ],
+    history: [
+      '门环响了两下，来的人把伞靠在门外的阶上。',
+      '灯花爆了一下，屋里的人把灯盏挪近半寸。',
+      '更夫的声音从巷子那头过去，近了又远。',
+      '案上的公文摊到一半，边角被镇纸压着。',
+      '帐子后面有人动了一下，帘子晃了两晃。',
+      '门外有人候着，影子从门缝下面透进来。',
+      '封好的信放在托盘上，蜡印朝上。',
+      '茶添过一次，杯口的热气已经淡了。',
+    ],
+  };
+
+  const FICTION_TALK = {
+    real: [
+      '“今天照旧。”{role}把硬币放在台面上。',
+      '“照旧。”{I}把东西装进袋子，袋口折了两折。',
+      '“明天可能不来了。”',
+    ],
+    mystery: [
+      '“门锁上的划痕，你看见过？”',
+      '“没有。”{role}的手在袖口里停了半秒。',
+      '“那你把昨晚的事再说一遍。”',
+    ],
+    scifi: [
+      '“同步率在掉。”{role}把手从控制台上收回来。',
+      '“掉了多少？”',
+      '“三个百分点。日志里没有写原因。”',
+    ],
+    fantasy: [
+      '“灯要灭了。”{role}把灯芯挑高。',
+      '“灭了就看不见。”{I}把门闩上。',
+      '“看不见也好。”',
+    ],
+    romance: [
+      '“你等很久了？”',
+      '“不久。”{I}把伞往那边挪了半寸。',
+      '“下次别站在雨里。”',
+    ],
+    history: [
+      '“坊门关了，今夜出不去。”{role}把灯盏放在案上。',
+      '“那就明天一早走。”{I}把驿书压在灯下。',
+      '“明天一早，驿马未必还在。”',
+    ],
+  };
+
+  const FICTION_POV = {
+    first: [
+      '我在门口站了一会儿，才把手从口袋里拿出来。',
+      '墙上的钟比平时慢了两分钟，我看了两次。',
+      '话在心里过了一遍，出口的时候只剩半句。',
+      '抽屉里的零钱我数了两遍，数目没有错。',
+      '我没有回头，把门带上。',
+      '手插在口袋里，指头一下一下地敲着裤缝。',
+    ],
+    third: [
+      '{H}在门口站了一会儿，才把手从口袋里拿出来。',
+      '墙上的钟比平时慢了两分钟，{H}看了两次。',
+      '话在心里过了一遍，出口的时候只剩半句。',
+      '抽屉里的零钱{H}数了两遍，数目没有错。',
+      '{H}没有回头，把门带上。',
+      '手插在口袋里，指头一下一下地敲着裤缝。',
+    ],
+    omni: [
+      '柜台里的人和门口的人各自站着，谁都没有先开口。',
+      '{H}在想那句没说完的话，{role}想的是另一件事。',
+      '街对面的人抬头看了一眼这边的窗，又低下头。',
+      '两个人都听见了那声铃响，动作却不一样：一个往后退，一个往前半步。',
+      '这一夜还有一个人没有睡：三楼的灯一直亮着。',
+      '事情后来走向了另一个方向，当时在场的人各自记下了不同的版本。',
+    ],
+  };
+
+  /* 角度是四套动线，句子本身不挑类型：器物由 FICTION_PROP / FICTION_BEAT 提供 */
+  const FICTION_ANGLE = {
+    scene: [
+      '外面的声音一阵一阵，隔着墙传进来。',
+      '光从门口斜着照进来，在地上切出一条边。',
+      '有人影从亮处走过，停了一下又走开。',
+      '细小的声音一直没有停，落在同一个地方。',
+    ],
+    talk: [
+      '“你先听我说完。”{role}把手里的东西往旁边推了推。',
+      '“我在听。”{I}把手收回来。',
+      '“那天你为什么不说？”',
+    ],
+    inner: [
+      '有一处细小的声音一直没有停，像有什么东西在里面走。',
+      '{I}把手指按在桌沿的划痕上，来回摸了三次。',
+      '手里的东西换了个位置，又换回去，前后两次的间隔越来越短。',
+    ],
+    hook: [
+      '最底下压着一张对折的纸，边角是新的。',
+      '空出来的那一格，昨天还是满的。',
+      '门外有人停下来，影子停留了很久，没有推门。',
+    ],
+  };
+
+  /* 类型中性的一批动作：任何年代、任何设定里都成立，用来把篇幅补足 */
+  const FICTION_LIFE = [
+    '门口的垫子上有一块深色的印子，擦不掉。',
+    '墙上的钟慢了四分钟，没有人去调。',
+    '手边的杯子里只剩底下一层水。',
+    '外面的声音一阵一阵，听不出是什么。',
+    '记录本翻到新的一页，上一页的字迹压得很深。',
+    '灯下有一只飞虫绕着转，撞在灯罩上。',
+    '椅子的一条腿短了半截，垫着一张折起来的纸。',
+    '笔没有盖帽，墨在纸上洇开一小块。',
+  ];
+
+  const FICTION_END = [
+    '雨到天亮才停，门口的水痕慢慢干了。',
+    '后来那条街上的人都换了，只有招牌没有换。',
+    '灯没有再亮起来，柜台也没有再开过。',
+    '所有的记录都留下来了，只有那一页是空白。',
+  ];
+
+  const FICTION_TONE = {
+    restrained: ['没有人说话。', '手停在半空，又收回去。'],
+    lyric: ['雨声压在屋顶上，密得像有人在上面走。', '光落在地上慢慢铺开，边缘是软的。', '风从门缝里进来，先动了桌角那张纸。'],
+    tense: ['灯灭了。', '脚步声停在门口。', '铃响了一声。', '没有第二声。'],
+    light: ['“又是我。”{I}把手里的东西推回去，退回来半寸。', '墙角那只猫抬头看了一眼，又睡了。'],
+  };
+
+  /* 主角与另一方的称呼：第一人称让另一方只用身份词，就不会漏出第三人称代词 */
+  const FICTION_ROLE_FALLBACK = {
+    real: '值班的',
+    mystery: '值班的人',
+    scifi: '值班员',
+    fantasy: '铺子里的人',
+    romance: '那个人',
+    history: '掌柜',
+  };
+
+  function fictionRole(ctx, genre) {
+    // 科幻、奇幻、历史里不能蹦出「便利店店员」这种现代身份，身份词跟着类型走
+    if (FICTION_BEAT_ERA[genre]) return FICTION_ROLE_FALLBACK[genre] || '那个人';
+    const src = ctx.src || '';
+    const hit = src.match(/([\u4e00-\u9fa5]{1,3}(?:店员|老板|客人|乘客|医生|护士|司机|教师|老师|学生|警察|保安|骑手|快递员|服务员|掌柜|同事|房客|邻居))/);
+    const role = hit ? hit[1] : '';
+    const clean = role.replace(/[他她]/g, '');
+    return clean || FICTION_ROLE_FALLBACK[genre] || '那个人';
+  }
+
+  function fictionHero(ctx) {
+    return /(她|女|妻|妈|姐|嫂|姑娘|女孩)/.test(ctx.src || '') ? '她' : '他';
+  }
+
+  /* 对话是一来一回：把连续的对白捆成一个整块，
+     这样篇幅裁剪时要么整段留下、要么整段不要，不会剩一句没头没尾的话 */
+  function groupExchange(lines) {
+    const out = [];
+    let buf = [];
+    (lines || []).forEach((s) => {
+      if (/^[“「]/.test(s)) {
+        buf.push(s);
+        return;
+      }
+      if (buf.length) {
+        out.push(buf.join('\n'));
+        buf = [];
+      }
+      out.push(s);
+    });
+    if (buf.length) out.push(buf.join('\n'));
+    return out;
+  }
+
+  function composeFiction(p, mode, angle, ctx, target) {
+    const part = FICTION_BEAT[ctx.fields.part] ? ctx.fields.part : 'open';
+    const viewpoint = FICTION_POV[ctx.fields.viewpoint] ? ctx.fields.viewpoint : 'third';
+    const genre = FICTION_PROP[ctx.fields.genre] ? ctx.fields.genre : 'real';
+    const rnd = ctx.rnd;
+    const hero = fictionHero(ctx);
+    const fctx = Object.assign({}, ctx, {
+      I: viewpoint === 'first' ? '我' : hero,
+      H: hero,
+      role: fictionRole(ctx, genre),
+    });
+
+    // 器物跟类型走：现代场景用便利店那一套，科幻、奇幻、历史各自换过
+    const world = (FICTION_BEAT_ERA[genre] || []).length ? FICTION_BEAT_ERA[genre] : FICTION_BEAT_MODERN;
+    const tonePool = FICTION_TONE[p.tone] || [];
+    const all = {
+      prop: poolLines(FICTION_PROP[genre], fctx),
+      beat: poolLines(world, fctx),
+      // 对话是一来一回，顺序打乱就读不懂了，这两组不参与乱序
+      exchange: part === 'talk' ? groupExchange(poolLines(FICTION_BEAT.talk, fctx)) : [],
+      talk: groupExchange(poolLines(FICTION_TALK[genre], fctx)),
+      pov: poolLines(FICTION_POV[viewpoint], fctx),
+      angle: groupExchange(poolLines(FICTION_ANGLE[angle.id] || FICTION_ANGLE.scene, fctx)),
+      tone: poolLines(tonePool, fctx),
+      life: poolLines(FICTION_LIFE, fctx),
+      end: poolLines(FICTION_END, fctx),
+    };
+    // 角度就是四套动线：先画面、先对话、贴意识、还是把钩子留到最后
+    const order = angle.id === 'talk' ? ['exchange', 'talk', 'beat', 'pov', 'prop', 'angle', 'tone', 'life', 'end']
+      : angle.id === 'inner' ? ['pov', 'angle', 'exchange', 'beat', 'tone', 'prop', 'life', 'talk', 'end']
+        : angle.id === 'hook' ? ['prop', 'exchange', 'beat', 'tone', 'pov', 'life', 'talk', 'angle', 'end']
+          : ['prop', 'tone', 'exchange', 'beat', 'talk', 'angle', 'pov', 'life', 'end'];
+
+    let blocks = [];
+    order.forEach((key) => {
+      const list = all[key] || [];
+      const ordered = key === 'talk' || key === 'exchange';
+      const arranged = ordered ? list.slice() : rotate(rnd, orderByTone(rnd, list, ctx.voice));
+      arranged.forEach((s) => pushUnique(blocks, s));
+    });
+
+    // 第一人称：任何带「他/她」的句子都不要，这是硬约束，兜底在最后一道
+    if (viewpoint === 'first') blocks = blocks.filter((s) => !/[他她]/.test(s));
+
+    const kept = fitTarget(blocks, Math.max(150, target), []);
+    if (!kept.length) return '';
+    // 留钩子的角度：最后一句换成一个让读者想往下翻的东西
+    if (angle.id === 'hook' && kept.length > 1) {
+      const pool = all.angle.concat(all.end).filter((s) => kept.slice(0, -1).indexOf(s) < 0);
+      const last = pick(rnd, pool);
+      if (last) kept[kept.length - 1] = last;
+    }
+    // 对话单独占一行：中文小说里对话挤在叙述段落中间最难读
+    const paras = [];
+    let buf = [];
+    const flush = () => {
+      if (buf.length) paras.push(buf.join(''));
+      buf = [];
+    };
+    kept.forEach((s, i) => {
+      if (/^[“「]/.test(s)) {
+        flush();
+        paras.push(s);
+        return;
+      }
+      buf.push(s);
+      if (buf.length >= [2, 2, 3][i % 3]) flush();
+    });
+    flush();
+    return paras.join('\n\n');
+  }
+
+  /* ══════════════════════════════════════════════════════════
+   * 十四、翻译与自定义模板：离线引擎做不到的事如实说明
+   * ══════════════════════════════════════════════════════════ */
+
+  /* 离线引擎没有语言能力，翻译做不了；自定义模板的提示词也只有真实模型能执行。
+     这两类请求一律返回"说明 + 原样保留的原文"，绝不假装译过、也绝不拿内置模式的稿子充数。 */
+
+  const TEMPLATE_PREFIX = 'tpl_';
+
+  const TRANSLATE_LANG = {
+    en: '英文',
+    ja: '日文',
+    ko: '韩文',
+    fr: '法文',
+    de: '德文',
+    es: '西班牙文',
+    ru: '俄文',
+    'zh-tw': '繁体中文',
+  };
+
+  const TRANSLATE_ANGLE_NOTE = {
+    faithful: '接入模型后会按逐句对应的方式译，专业术语一律照通行译法，不为了顺口改动信息。',
+    natural: '接入模型后会按目标语言的表达习惯重组句子，目标是读起来不像译文。',
+    localized: '接入模型后会把成语、俗语、单位与称呼换成目标语言里对等的说法。',
+    rhythm: '接入模型后会保留原文的句长与停顿，口吻尽量不走样。',
+  };
+
+  const TRANSLATE_TONE_NOTE = {
+    literal: '译法口径：贴着原文，不添不减。',
+    natural: '译法口径：以目标语言读者的读感为先。',
+    localized: '译法口径：按当地习惯改写称呼、单位与语气。',
+    formal: '译法口径：用书面语与公文体例，称呼与落款照目标语言的惯例。',
+  };
+
+  function translateTargetName(fields) {
+    const key = (fields && fields.target) || 'en';
+    if (key === 'other') {
+      const custom = clip((fields && fields.targetCustom) || '', 20);
+      return custom || '你在“其它语言”里填写的语言';
+    }
+    return TRANSLATE_LANG[key] || TRANSLATE_LANG.en;
+  }
+
+  function stripBlank(text) {
+    return String(text == null ? '' : text).replace(/^[\s\u3000]+|[\s\u3000]+$/g, '');
+  }
+
+  function composeTranslate(p, mode, angle, ctx, target, rawSrc) {
+    const fields = ctx.fields || {};
+    const lang = translateTargetName(fields);
+    const shape = fields.shape || 'keep';
+    const body = stripBlank(rawSrc);
+    const lines = [
+      '【离线引擎不做翻译】',
+      '',
+      '翻译需要真实模型：设置 DEEPSEEK_API_KEY 后重启即可（别家平台再加 AI_BASE_URL）。',
+      '',
+      `目标语言：${lang}`,
+      TRANSLATE_TONE_NOTE[p.tone] || TRANSLATE_TONE_NOTE.literal,
+      TRANSLATE_ANGLE_NOTE[angle.id] || TRANSLATE_ANGLE_NOTE.faithful,
+    ];
+    if (fields.glossary) lines.push(`术语要求：${clip(fields.glossary, 60)}；接入模型后按这个口径执行。`);
+    if (shape === 'merge') lines.push('格式：合并成一段——接上模型后译文会给成一段，方便直接放进邮件或表格。');
+
+    if (!body) {
+      lines.push('', '原文这里还空着：把要翻译的内容粘进原稿，我先把原文原样带着。');
+      return lines.join('\n');
+    }
+
+    if (shape === 'bilingual') {
+      const paras = body.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+      lines.push('', '下面是原文与译文的对照骨架，译文一栏等接上模型再补：', '');
+      paras.forEach((para, i) => {
+        lines.push(`【原文 ${i + 1}】`);
+        lines.push(para);
+        lines.push(`【译文 ${i + 1}】待补（离线引擎不做翻译）`);
+        lines.push('');
+      });
+      return lines.join('\n').trim();
+    }
+
+    lines.push('', '下面是你的原文，先留着对照：', '', body);
+    if (shape === 'merge') lines.push('', '（原文按原样保留，段落没有合并：合并这件事留给真实模型。）');
+    return lines.join('\n');
+  }
+
+  const CUSTOM_TEMPLATE_ANGLES = ['structured', 'detailed', 'concise', 'another'];
+
+  const TEMPLATE_ANGLE_NOTE = {
+    structured: '接上模型后，这一稿会按小标题分段，一段一个意思。',
+    detailed: '接上模型后，这一稿会把要求落到具体的例子、数字与场景上。',
+    concise: '接上模型后，这一稿只留核心信息，篇幅压到最短。',
+    another: '接上模型后，这一稿会换一个切入点或叙述顺序。',
+  };
+
+  const TEMPLATE_TONE_NOTE = {
+    plain: '语气：平实——不用形容词堆砌，把事说清楚。',
+    professional: '语气：专业——术语准确，句子有分量。',
+    warm: '语气：亲切——像跟熟人说话。',
+    crisp: '语气：简练——能删就删，一段一个意思。',
+    same: '语气：贴合原稿的句长与用词习惯。',
+  };
+
+  /**
+   * 模板名：服务端会把注册好的模板名放在第四个参数里（{ templateName }）；
+   * 直接调引擎的调用方可能把名字放在 params 上；两者都拿不到就退回「自定义模板」四个字。
+   */
+  function templateNameOf(raw, options) {
+    const r = raw && typeof raw === 'object' ? raw : {};
+    const o = options && typeof options === 'object' ? options : {};
+    const registered = Modes.customModeOf ? Modes.customModeOf(r.mode || '') : null;
+    const candidates = [
+      o.templateName,
+      o.template && (o.template.name || o.template.title),
+      r.templateName,
+      r.template && (r.template.name || r.template.title),
+      registered && registered.name,
+      r.meta && r.meta.templateName,
+      r.fields && r.fields.templateName,
+    ];
+    for (let i = 0; i < candidates.length; i += 1) {
+      const name = clip(candidates[i], 24);
+      if (name) return name;
+    }
+    return '';
+  }
+
+  function composeCustomTemplate(raw, rawSrc, index, options) {
+    const name = templateNameOf(raw, options) || '自定义模板';
+    const p = Modes.normalizeParams(raw);
+    const angleId = CUSTOM_TEMPLATE_ANGLES[((index % 4) + 4) % 4];
+    const body = stripBlank(rawSrc);
+    const lines = [
+      `【离线引擎${name === '自定义模板' ? '写不了自定义模板' : `写不了模板「${name}」`}】`,
+      '',
+      `模板「${name}」的自定义提示词需要真实模型执行：设置 DEEPSEEK_API_KEY 后重启即可。`,
+      '（离线引擎只写内置模式的内容，模板里的提示词它读不懂，硬拼一版出来只会误导你。）',
+      TEMPLATE_ANGLE_NOTE[angleId],
+      TEMPLATE_TONE_NOTE[p.tone] || TEMPLATE_TONE_NOTE.plain,
+    ];
+    if (!body) {
+      lines.push('', '素材也还空着：把要处理的内容粘进来，接上模型之前先留着。');
+      return lines.join('\n');
+    }
+    lines.push('', '下面是你的原文，模板跑起来之前先留着：', '', body);
+    return lines.join('\n');
+  }
+
+  /* ══════════════════════════════════════════════════════════
+   * 十五、入口：compose
    * ══════════════════════════════════════════════════════════ */
 
   /** 没素材时的通用起稿：宁可给一段关于"怎么写"的实话，也不给空壳模板 */
@@ -1529,17 +2761,34 @@
     return p.chars;
   }
 
-  function compose(params, material, versionIndex) {
-    const p = Modes.normalizeParams(params);
-    const mode = Modes.getMode(p.mode);
+  function compose(params, material, versionIndex, options) {
+    const raw = params && typeof params === 'object' ? params : {};
     const index = Math.max(0, Math.floor(Number(versionIndex) || 0));
+    const materialText = plain(typeof material === 'string' ? material : (material && material.input) || '');
+    const src = squash(materialText);
+
+    // 自定义模板（tpl_xxx）不在模式目录里：getMode 对未知 id 会退回第一个模式，
+    // 所以这里必须先看原始参数，不能被规整后的 mode 骗过去；
+    // 服务端注册过模板时参数里已经是 tpl_xxx，没注册过则只剩第四个参数里的 templateName。
+    const tplFlag = String(raw.mode || '').indexOf(TEMPLATE_PREFIX) === 0
+      || Boolean(options && typeof options === 'object' && options.templateName);
+    if (tplFlag) {
+      return composeCustomTemplate(raw, materialText, index, options);
+    }
+
+    const p = Modes.normalizeParams(raw);
+    const mode = Modes.getMode(p.mode);
     const angle = Modes.angleOf(mode, index);
-    const src = squash(typeof material === 'string' ? material : (material && material.input) || '');
     const rnd = seededRandom(seedFor(p, src, index));
     const ctx = makeCtx(p, mode, angle, src, rnd);
     const target = targetOf(p, mode, src.length);
 
-    if (!src && mode.id !== 'copywriting' && mode.id !== 'outline' && mode.id !== 'summary' && mode.id !== 'email') {
+    // 离线引擎没有语言能力：译不了就直说，并把原文原样带上
+    if (mode.id === 'translate') return composeTranslate(p, mode, angle, ctx, target, materialText);
+
+    // 新加的三个模式自带语料，没有素材也能起一稿，不走"该怎么写"的兜底
+    const SELF_CONTAINED = ['copywriting', 'outline', 'summary', 'email', 'academic', 'report', 'fiction'];
+    if (!src && SELF_CONTAINED.indexOf(mode.id) < 0) {
       return composeFallback(p, mode, angle, ctx, target);
     }
 
@@ -1549,6 +2798,9 @@
     else if (mode.id === 'copywriting') text = composeCopywriting(p, mode, angle, ctx, target);
     else if (mode.id === 'email') text = composeEmail(p, mode, angle, ctx, target);
     else if (mode.id === 'summary') text = composeSummary(p, mode, angle, ctx, target);
+    else if (mode.id === 'academic') text = composeAcademic(p, mode, angle, ctx, target);
+    else if (mode.id === 'report') text = composeReport(p, mode, angle, ctx, target);
+    else if (mode.id === 'fiction') text = composeFiction(p, mode, angle, ctx, target);
     else text = composeOutline(p, mode, angle, ctx, target);
 
     if (!text || !text.trim()) return composeFallback(p, mode, angle, ctx, target);
@@ -1556,7 +2808,7 @@
   }
 
   /* ══════════════════════════════════════════════════════════
-   * 十二、校对：polish
+   * 十六、校对：polish
    * ══════════════════════════════════════════════════════════ */
 
   const POLISH_TYPES = ['grammar', 'collocation', 'wording', 'punct', 'order', 'redundant', 'tone', 'typo'];
@@ -1833,7 +3085,7 @@
   }
 
   /* ══════════════════════════════════════════════════════════
-   * 十三、导出
+   * 十七、导出
    * ══════════════════════════════════════════════════════════ */
 
   return {

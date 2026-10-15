@@ -57,6 +57,7 @@
   let workspaces = new Map();   // 每个板块一份工作区：换板块时互不串台
   let runCtrl = null;
   let polish = null;          // {source, label, before, edits, accepted:Set, stats, engine, note}
+  const compareState = { open: false, a: 'input', b: '' };
   const view = {
     drawerOpen: false,
     historyMode: 'all',
@@ -73,6 +74,13 @@
   const dom = {};
 
   /* ── 提示条 ─────────────────────────────────────────────── */
+  /**
+   * 星标是什么，一句话说清：它不是置顶，而是「留档清理时不会被删掉」的标记，
+   * 顺带可以用「只看星标」筛出来、导出时也只导这几篇。
+   * 留档默认按时间倒序（最近写的在最前），刻意不做置顶——星标一多，时间序就废了。
+   */
+  const STAR_HINT = '不会被自动清理，可用「只看星标」筛出来';
+
   function toast(message, options) {
     const opt = options || {};
     const node = h('div', { class: 'toast', dataset: { level: opt.level || 'info' } }, [
@@ -105,45 +113,85 @@
   /* ── 画：模式 ───────────────────────────────────────────── */
   function renderModes() {
     clear(dom.modes);
-    Modes.MODES.forEach((mode) => {
-      dom.modes.append(
-        h(
-          'button',
-          {
-            type: 'button',
-            class: 'mode',
-            'aria-current': String(mode.id === state.mode),
-            title: mode.tagline,
-            onclick: () => switchToMode(mode.id),
-          },
-          [h('span', { class: 'mode__mark', text: mode.mark }), h('span', { text: mode.name })]
-        )
-      );
+    Modes.listGroups().forEach((group, gi) => {
+      // 分组之间一道细线：十个板块不分组的会糊成一片
+      if (gi > 0) dom.modes.append(h('span', { class: 'modes__sep', 'aria-hidden': 'true' }));
+      group.modes.forEach((mode) => {
+        dom.modes.append(
+          h(
+            'button',
+            {
+              type: 'button',
+              class: 'mode',
+              'aria-current': String(mode.id === state.mode),
+              title: `${group.name} · ${mode.name}：${mode.tagline}`,
+              onclick: () => switchToMode(mode.id),
+            },
+            [
+              h('span', { class: 'mode__mark', text: mode.mark }),
+              h('span', { text: mode.name }),
+            ]
+          )
+        );
+      });
     });
+    revealCurrentMode();
+  }
+
+  /**
+   * 把当前板块挪进可视范围。
+   *
+   * 为什么需要：导航是重建的，清空子节点时容器的横向滚动位置会被重置到最左边，
+   * 于是点右边的板块之后，最左边高亮的还是「文章续写」——看起来就像没切换成功。
+   * 窄屏退回横向滚动时这一条尤其要紧。
+   */
+  function revealCurrentMode() {
+    const active = Array.from(dom.modes.children).find(
+      (node) => node.classList && node.classList.contains('mode') && node.getAttribute('aria-current') === 'true'
+    );
+    if (!active || typeof active.scrollIntoView !== 'function') return;
+    try {
+      active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    } catch {
+      /* 老浏览器不认参数就算了，不影响功能 */
+    }
   }
 
   /**
    * 换板块：每个板块有自己的工作区（原稿、成稿、朱批），互不串台。
    * 切回用过的板块会把它自己那份装回来，而不是清空——来回对照着改稿是常态，
    * 每次清空会白丢一次工作；首次进入某个板块时它本来就是空的。
+   *
+   * @param {string} modeId 目标板块
+   * @param {string} [preset] 顺手放进去的素材（「接着写」「翻译这一稿」这类动作用）
    */
-  function switchToMode(modeId) {
-    if (state.busy || modeId === state.mode) return;
+  function switchToMode(modeId, preset) {
+    if (state.busy) return;
+    // 已经在目标板块里：只把素材放进去（例如在翻译板块里对某一稿再点一次「翻译」）
+    if (modeId === state.mode) {
+      if (typeof preset === 'string') {
+        state = Object.assign({}, state, { material: preset });
+        renderAll();
+        persistUI();
+        notice('已把内容放进原稿，可以直接起稿。', 'info');
+      }
+      return;
+    }
     // 界面上的朱批视图也是这个板块的「活」：先放回 state 再存档，
     // 否则切走一趟回来，稿子和原稿都在、朱批却没了（留档里那份还在，但视图丢了）
     state = Object.assign({}, state, { polish });
     const moved = Core.switchWorkspace(state, modeId, workspaces);
     state = moved.state;
     workspaces = moved.workspaces;
+    if (typeof preset === 'string') state = Object.assign({}, state, { material: preset });
     polish = state.polish || null;
     renderAll();
     persistUI();
-    dom.material.focus();
-    if (moved.restored && Core.hasWork(state)) {
+    if (typeof preset === 'string') notice(`已把内容放进「${Modes.getMode(state.mode).name}」的原稿，按起稿开始。`, 'info');
+    else if (moved.restored && Core.hasWork(state)) {
       notice(`${Modes.getMode(state.mode).name} · 你上次在这里的稿子还在。想从头写就点「清空」。`, 'info');
-    } else {
-      notice('');
-    }
+    } else notice('');
+    if (!preset) dom.material.focus();
   }
 
   /** 清空当前板块的工作区：原稿、成稿、朱批一起清，参数不动 */
@@ -161,6 +209,299 @@
     persistUI();
     notice('已清空，可以从头写。');
     dom.material.focus();
+  }
+
+  /* ── 自定义模板 ─────────────────────────────────────────── */
+  /**
+   * 模板库。
+   *
+   * 用户写的是「提示词」，但界面上要把它当成一个板块用：所以拿到列表后交给
+   * Modes.setCustomTemplates() 注册成板块，之后起稿、多稿、朱批、留档、
+   * 工作区隔离这些逻辑一行都不用改——它们只认「板块」。
+   */
+  const templates = { list: [], editing: '', open: false };
+
+  async function loadTemplates() {
+    try {
+      const out = await api.templates.list();
+      templates.list = out.templates || [];
+    } catch (err) {
+      templates.list = [];
+      if (!templates.open) toast('模板库读不到：' + ((err && err.message) || ''), { level: 'error' });
+    }
+    Modes.setCustomTemplates(templates.list);
+    dom.templateCount.textContent = String(templates.list.length);
+    // 模板被删掉时，当前板块可能已经不存在了，退回续写
+    if (!Modes.MODES.some((m) => m.id === state.mode)) {
+      state = Core.switchWorkspace(state, 'continue', workspaces).state;
+    }
+    renderTemplates();
+    renderModes();
+    return templates.list;
+  }
+
+  function templateModeOf() {
+    return Modes.customModeOf(state.mode);
+  }
+
+  /** 起稿时随请求带上的模板规格（服务端用它替代默认提示词） */
+  function templatePayload() {
+    const mode = templateModeOf();
+    if (!mode) return null;
+    return {
+      id: mode.templateId,
+      name: mode.name,
+      system: mode.system,
+      outputHint: mode.outputHint,
+    };
+  }
+
+  function openTemplates() {
+    templates.open = true;
+    closeDrawer();
+    dom.tplDrawer.hidden = false;
+    dom.tplDrawer.removeAttribute('inert');
+    dom.tplDrawer.setAttribute('aria-hidden', 'false');
+    dom.scrim.hidden = false;
+    loadTemplates().then(() => dom.tplName.focus());
+  }
+
+  function closeTemplates() {
+    templates.open = false;
+    dom.tplDrawer.hidden = true;
+    dom.tplDrawer.setAttribute('inert', '');
+    dom.tplDrawer.setAttribute('aria-hidden', 'true');
+    if (!view.drawerOpen) dom.scrim.hidden = true;
+  }
+
+  function renderTemplates() {
+    clear(dom.tplList);
+    dom.tplCount.textContent = `${templates.list.length} 个`;
+    if (!templates.list.length) {
+      dom.tplList.append(
+        h('p', {
+          class: 'drawer__empty',
+          text: '还没有自定义模板。在上面写一段提示词，比如「你是资深产品经理，只输出周报正文……」，保存后它会出现在顶部导航的「我的模板」里。',
+        })
+      );
+      return;
+    }
+    templates.list.forEach((tpl) => {
+      dom.tplList.append(
+        h('article', { class: 'tpl' }, [
+          h('span', { class: 'tpl__mark', text: tpl.mark }),
+          h('div', { class: 'tpl__main' }, [
+            h('span', { class: 'tpl__name', text: tpl.name }),
+            h('p', { class: 'tpl__excerpt', text: tpl.system }),
+            h('div', { class: 'tpl__meta' }, [
+              h('span', { text: `${tpl.system.length} 字提示词` }),
+              tpl.outputHint ? h('span', { text: '有输出要求' }) : null,
+              h('span', { text: Core.formatTime(tpl.updatedAt) }),
+            ]),
+          ]),
+          h('div', { class: 'tpl__act' }, [
+            h('button', {
+              type: 'button',
+              class: 'btn btn--small btn--line',
+              text: '用它写',
+              onclick: () => useTemplate(tpl),
+            }),
+            h('button', {
+              type: 'button',
+              class: 'btn btn--small btn--line',
+              text: '编辑',
+              onclick: () => fillTemplateForm(tpl),
+            }),
+            h('button', {
+              type: 'button',
+              class: 'btn btn--small btn--line',
+              text: '删除',
+              onclick: () => removeTemplate(tpl),
+            }),
+          ]),
+        ])
+      );
+    });
+  }
+
+  function fillTemplateForm(tpl) {
+    templates.editing = tpl ? tpl.id : '';
+    dom.tplFormTitle.textContent = tpl ? `编辑：${tpl.name}` : '新建模板';
+    dom.tplName.value = tpl ? tpl.name : '';
+    dom.tplMark.value = tpl ? tpl.mark : '';
+    dom.tplTagline.value = tpl ? tpl.tagline : '';
+    dom.tplSystem.value = tpl ? tpl.system : '';
+    dom.tplOutput.value = tpl ? tpl.outputHint : '';
+    dom.tplInputLabel.value = tpl ? tpl.inputLabel : '';
+    dom.tplExample.value = tpl ? tpl.example : '';
+    dom.tplFormNote.textContent = '';
+    dom.tplCancel.hidden = !tpl;
+    dom.tplName.focus();
+  }
+
+  async function saveTemplate(event) {
+    if (event) event.preventDefault();
+    const draft = {
+      id: templates.editing || undefined,
+      name: dom.tplName.value.trim(),
+      mark: dom.tplMark.value.trim(),
+      tagline: dom.tplTagline.value.trim(),
+      system: dom.tplSystem.value.trim(),
+      outputHint: dom.tplOutput.value.trim(),
+      inputLabel: dom.tplInputLabel.value.trim(),
+      example: dom.tplExample.value.trim(),
+    };
+    try {
+      const saved = templates.editing
+        ? await api.templates.update(templates.editing, draft)
+        : await api.templates.create(draft);
+      templates.editing = '';
+      fillTemplateForm(null);
+      await loadTemplates();
+      toast(`已保存模板「${saved.name}」`);
+      // 存完就带他去写：模板库是手段，写作台才是目的
+      useTemplate(saved);
+    } catch (err) {
+      dom.tplFormNote.textContent = (err && err.message) || '保存失败';
+    }
+  }
+
+  async function removeTemplate(tpl) {
+    if (!window.confirm(`删除模板「${tpl.name}」？已经写过的稿子不受影响，但那个板块会消失。`)) return;
+    try {
+      await api.templates.remove(tpl.id);
+      await loadTemplates();
+      toast('已删除模板');
+    } catch (err) {
+      toast('删除失败：' + ((err && err.message) || ''), { level: 'error' });
+    }
+  }
+
+  /** 切到某个模板板块并开始写 */
+  function useTemplate(tpl) {
+    const modeId = Modes.templateModeId(tpl.id);
+    closeTemplates();
+    if (modeId === state.mode) {
+      dom.material.focus();
+      return;
+    }
+    switchToMode(modeId);
+    notice(`模板「${tpl.name}」：粘素材，按起稿。左侧参数（创意度、篇幅、一次几稿）照样能调。`, 'info');
+  }
+
+  /** 「给个例子」：省得对着空表单发呆 */
+  function seedTemplateForm() {
+    fillTemplateForm(null);
+    dom.tplName.value = '产品周报';
+    dom.tplMark.value = '周';
+    dom.tplTagline.value = '每周给组里同步进展';
+    dom.tplSystem.value =
+      '你是资深产品经理，替团队写周报。只输出周报正文，分三块：本周进展、遇到的问题、下周计划。' +
+      '每块用短句列举，不要写客套话，不要编造数据——数据只能来自我给的素材，缺的地方写「（待补）」。';
+    dom.tplOutput.value = '每块不超过五条；遇到的问题要给出当前的处理办法';
+    dom.tplInputLabel.value = '本周做了什么';
+    dom.tplExample.value = '进展：上线了新版搜索，修了 3 个线上问题。\n风险：灰度期间接口偶发超时，还没定位到根因。';
+    dom.tplFormNote.textContent = '这是例子，改成你自己的就行。';
+  }
+
+  /* ── 对比两稿 ───────────────────────────────────────────── */
+  /** 可对比的对象：原稿、每一稿、润色稿 */
+  function compareOptions() {
+    const list = [{ value: 'input', label: '原稿' }];
+    state.versions.forEach((v) => {
+      if (v.text) list.push({ value: 'v' + v.index, label: `${Core.versionLabel(v.index)} · ${v.angleLabel || '常规'}` });
+    });
+    if (polish && polish.after) list.push({ value: 'polish', label: '润色稿' });
+    return list;
+  }
+
+  function compareTextOf(ref) {
+    if (ref === 'input') return state.material || '';
+    if (ref === 'polish') return (polish && polish.after) || '';
+    const index = Number(String(ref).replace('v', ''));
+    const hit = state.versions.find((v) => v.index === index);
+    return hit ? hit.text : '';
+  }
+
+  function openCompare() {
+    const options = compareOptions();
+    if (options.length < 2) {
+      notice('至少要有两样东西（原稿、成稿或润色稿）才能对比。', 'warn');
+      return;
+    }
+    compareState.open = true;
+    // 默认：拿第一稿和最后一稿对比；只有一稿时拿原稿和它比
+    const texts = options.map((o) => o.value);
+    if (compareState.a === compareState.b) compareState.b = '';
+    if (!texts.includes(compareState.a)) compareState.a = texts[0];
+    if (!texts.includes(compareState.b)) compareState.b = texts[texts.length - 1] === compareState.a ? texts[0] : texts[texts.length - 1];
+    renderCompare();
+    dom.compare.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  function renderCompare() {
+    if (!compareState.open) {
+      dom.compare.hidden = true;
+      return;
+    }
+    const options = compareOptions();
+    dom.compare.hidden = false;
+
+    const fill = (select, current) => {
+      clear(select);
+      options.forEach((o) => select.append(h('option', { value: o.value, text: o.label, selected: o.value === current })));
+      select.value = current;
+    };
+    fill(dom.compareA, compareState.a);
+    fill(dom.compareB, compareState.b);
+
+    const a = compareTextOf(compareState.a);
+    const b = compareTextOf(compareState.b);
+    const result = Polisher.compare(a, b);
+
+    const labelOf = (value) => (options.find((o) => o.value === value) || { label: value }).label;
+    dom.compareSummary.textContent = result.identical
+      ? `${labelOf(compareState.a)} 与 ${labelOf(compareState.b)} 完全一样。`
+      : `${result.edits.length} 处不同　·　相似度 ${(result.similarity * 100).toFixed(0)}%　·　` +
+        `新增 ${result.addedChars} 字，删改 ${result.removedChars} 字（右稿相对左稿）`;
+
+    // 正文：以左稿为底，右稿新增的用朱字标出，左稿被删的划掉——与朱批同一套标记
+    const body = clear(dom.compareText);
+    const edits = result.edits;
+    const spans = Polisher.renderSpans(a, edits);
+    spans.forEach((span) => {
+      if (span.kind === 'same') {
+        body.append(document.createTextNode(span.text));
+        return;
+      }
+      const no = edits.findIndex((e) => e.id === span.editId);
+      body.append(h('span', { class: span.kind === 'del' ? 'mark-del' : 'mark-ins', text: span.text }));
+      if (span.editId && edits[no]) body.append(h('sup', { class: 'mark-no', text: String(no + 1) }));
+    });
+    if (!a && !b) body.append(document.createTextNode('两边都还没有内容。'));
+
+    const changes = clear(dom.compareChanges);
+    if (!edits.length) {
+      changes.append(h('li', { class: 'annotation' }, [h('span', { class: 'annotation__reason', text: '两稿一模一样，没有差异。' })]));
+    }
+    edits.forEach((edit, i) => {
+      changes.append(
+        h('li', { class: 'annotation' }, [
+          h('span', { class: 'annotation__no', text: String(i + 1) }),
+          h('span', { class: 'annotation__type', text: (Polisher.TYPES[edit.type] || Polisher.TYPES.wording).label }),
+          h('span', { class: 'annotation__change' }, [
+            edit.before ? h('span', { class: 'annotation__from', text: clipForShow(edit.before) }) : null,
+            h('span', { class: 'annotation__arrow', text: '→' }),
+            h('span', { text: edit.after ? clipForShow(edit.after) : '（删去）' }),
+          ]),
+        ])
+      );
+    });
+  }
+
+  function clipForShow(text) {
+    const s = String(text || '');
+    return s.length > 60 ? s.slice(0, 60) + '…' : s;
   }
 
   /* ── 画：参数栏 ─────────────────────────────────────────── */
@@ -345,6 +686,9 @@
   /* ── 画：原稿与按钮 ─────────────────────────────────────── */
   function renderCompose() {
     const mode = Modes.getMode(state.mode);
+    // 稿签上写出板块名：光看「原稿」两个字分不出自己在哪个板块，
+    // 导航一旦被滚动/换行遮住，就会以为「怎么还是文章续写」
+    if (dom.sheetTab) dom.sheetTab.textContent = `${mode.name} · 原稿`;
     dom.materialLabel.textContent = mode.input.label;
     dom.material.placeholder = mode.input.placeholder;
     dom.materialHint.textContent = mode.input.hint || '';
@@ -376,13 +720,35 @@
     const host = dom.draftsExamples;
     if (!host) return;
     clear(host);
+
+    const custom = Modes.customModeOf(state.mode);
+    // 作者没写示例时，示例是从提示词里推出来的「结构骨架」，要标出来——
+    // 免得用户以为那是一段可以直接用的真实材料
+    const derived = Boolean(custom) && !(custom.examples || []).length;
+
+    const list = [];
     [0, 1].forEach((i) => {
       const text = Core.exampleOf(state.mode, i);
+      if (text && list.indexOf(text) < 0) list.push(text);
+    });
+
+    if (!list.length) {
+      host.append(
+        h('p', {
+          class: 'drafts__hint',
+          text: custom ? '这个模板没写示例：把你的材料粘进原稿就行。' : '这个板块没准备示例：直接写你的材料。',
+        })
+      );
+      return;
+    }
+
+    list.forEach((text) => {
       host.append(
         h('button', {
           type: 'button',
           class: 'example',
-          text,
+          text: derived ? '示例结构：' + text : text,
+          title: derived ? '按你的提示词推出来的结构，点一下填进原稿、再改成自己的内容' : '点一下填进原稿',
           onclick: () => {
             state = Object.assign({}, state, { material: text });
             renderCompose();
@@ -405,6 +771,7 @@
     const acts = [
       { id: 'adopt', label: state.adopted === version.index ? '已采用' : '采用' },
       { id: 'polish', label: '一键优化' },
+      { id: 'translate', label: '翻译', title: '把这一稿放进「多语言翻译」板块' },
       { id: 'extend', label: '接着写' },
       { id: 'copy', label: '复制' },
     ];
@@ -417,6 +784,7 @@
           class: 'draft__btn',
           dataset: { act: act.id },
           text: act.label,
+          title: act.title || act.label,
           disabled: !version.text,
           onclick: () => onDraftAction(act.id, version),
         })
@@ -426,9 +794,19 @@
 
   function renderDrafts() {
     clear(dom.drafts);
-    dom.drafts.append(dom.draftsEmpty);
+    dom.drafts.append(dom.draftsBar, dom.draftsEmpty);
     renderEmptyState();
     if (state.versions.length) dom.drafts.classList.remove('drafts--empty');
+
+    // 顶部工具行：有稿子就能对比；只有一稿时也能和原稿比
+    const compareCount = compareOptions().length;
+    dom.draftsBar.hidden = state.versions.length === 0;
+    if (!dom.draftsBar.hidden) {
+      const done = state.versions.filter((v) => v.text).length;
+      dom.draftsBarLabel.textContent = `已出 ${done} 稿${state.adopted >= 0 ? ` · 采用${Core.versionLabel(state.adopted)}` : ''} · 可对比的对象 ${compareCount} 个`;
+      dom.openCompare.disabled = compareCount < 2;
+    }
+    if (compareState.open) renderCompare();
 
     state.versions.forEach((version) => {
       const adopted = state.adopted === version.index;
@@ -654,8 +1032,7 @@
       await api.generate(
         params,
         { input: text },
-        {
-          onMeta(meta) {
+        {          onMeta(meta) {
             state = Core.beginRun(state, meta.versions);
             state.engineModel = meta.model || '';
             if (meta.engineNote) api.info.engine.note = meta.engineNote;
@@ -689,7 +1066,8 @@
           },
         },
         runCtrl.signal,
-        view.model
+        view.model,
+        templatePayload()
       );
 
       state = Core.endRun(state, {});
@@ -817,14 +1195,16 @@
               h('span', { text: Core.formatTime(item.updatedAt) }),
               h('span', { text: `${item.versions} 稿 · ${Core.formatChars(item.chars)}` }),
               item.hasPolish ? h('span', { class: 'record__badge', text: '有朱批' }) : null,
-              item.starred ? h('span', { class: 'record__badge', text: '星标' }) : null,
+              item.starred
+                ? h('span', { class: 'record__badge', title: STAR_HINT, text: '星标' })
+                : null,
             ]),
           ]),
           h('div', { class: 'record__act' }, [
             h('button', {
               type: 'button',
               class: 'icon-btn',
-              title: item.starred ? '取消星标' : '加星标',
+              title: item.starred ? `取消星标（${STAR_HINT}）` : `加星标（${STAR_HINT}）`,
               'aria-label': item.starred ? '取消星标' : '加星标',
               text: item.starred ? '★' : '☆',
               onclick: async () => {
@@ -943,6 +1323,12 @@
     }
     if (act === 'polish') {
       runPolish({ source: 'version:' + version.index, label: Core.versionLabel(version.index), text: version.text });
+      return;
+    }
+    if (act === 'translate') {
+      // 翻译是个独立板块：把这一稿递过去，目标语言与角度在那边选
+      switchToMode('translate', version.text);
+      return;
     }
   }
 
@@ -988,7 +1374,12 @@
     notice(`正在校对${target.label}……`);
     dom.polishInput.disabled = true;
     try {
-      const result = await api.polish(text, { model: view.model });
+      // 译文要按目标语言校对，而不是按中文的语法习惯；这一句提示让朱批更对症
+      const isTranslate = Modes.getMode(state.mode).id === 'translate';
+      const result = await api.polish(text, {
+        model: view.model,
+        focus: isTranslate ? '这是译文：重点核对目标语言的语法、搭配与地道程度，不要改成中文的表达习惯' : '',
+      });
       const edits = result.edits || [];
       polish = {
         source: target.source,
@@ -1050,7 +1441,40 @@
     dom.picker = $('#picker');
     dom.modelSelect = $('#model-select');
     dom.historyCount = $('#history-count');
+    dom.templateCount = $('#template-count');
+    dom.openTemplates = $('#open-templates');
+    dom.tplDrawer = $('#tpl-drawer');
+    dom.tplList = $('#tpl-list');
+    dom.tplCount = $('#tpl-count');
+    dom.tplForm = $('#tpl-form');
+    dom.tplFormTitle = $('#tpl-form-title');
+    dom.tplFormNote = $('#tpl-form-note');
+    dom.tplName = $('#tpl-name');
+    dom.tplMark = $('#tpl-mark');
+    dom.tplTagline = $('#tpl-tagline');
+    dom.tplSystem = $('#tpl-system');
+    dom.tplOutput = $('#tpl-output');
+    dom.tplInputLabel = $('#tpl-input-label');
+    dom.tplExample = $('#tpl-example');
+    dom.tplSave = $('#tpl-save');
+    dom.tplCancel = $('#tpl-cancel');
+    dom.tplSeed = $('#tpl-seed');
+    dom.newTemplate = $('#new-template');
+    dom.closeTemplates = $('#close-templates');
+    dom.compare = $('#compare');
+    dom.compareA = $('#compare-a');
+    dom.compareB = $('#compare-b');
+    dom.compareSummary = $('#compare-summary');
+    dom.compareText = $('#compare-text');
+    dom.compareChanges = $('#compare-changes');
+    dom.compareSwap = $('#compare-swap');
+    dom.compareCopy = $('#compare-copy');
+    dom.compareClose = $('#compare-close');
+    dom.draftsBar = $('#drafts-bar');
+    dom.draftsBarLabel = $('#drafts-bar-label');
+    dom.openCompare = $('#open-compare');
     dom.openHistory = $('#open-history');
+    dom.sheetTab = $('#input-tab');
     dom.material = $('#material');
     dom.materialLabel = $('#material-label');
     dom.materialHint = $('#material-hint');
@@ -1197,7 +1621,40 @@
 
     dom.openHistory.addEventListener('click', openDrawer);
     dom.closeHistory.addEventListener('click', closeDrawer);
-    dom.scrim.addEventListener('click', closeDrawer);
+    dom.scrim.addEventListener('click', () => {
+      closeDrawer();
+      closeTemplates();
+    });
+
+    /* 模板库 */
+    dom.openTemplates.addEventListener('click', openTemplates);
+    dom.closeTemplates.addEventListener('click', closeTemplates);
+    dom.newTemplate.addEventListener('click', () => fillTemplateForm(null));
+    dom.tplCancel.addEventListener('click', () => fillTemplateForm(null));
+    dom.tplSeed.addEventListener('click', seedTemplateForm);
+    dom.tplForm.addEventListener('submit', saveTemplate);
+
+    /* 对比两稿 */
+    dom.openCompare.addEventListener('click', openCompare);
+    dom.compareClose.addEventListener('click', () => {
+      compareState.open = false;
+      renderCompare();
+    });
+    dom.compareA.addEventListener('change', () => {
+      compareState.a = dom.compareA.value;
+      renderCompare();
+    });
+    dom.compareB.addEventListener('change', () => {
+      compareState.b = dom.compareB.value;
+      renderCompare();
+    });
+    dom.compareSwap.addEventListener('click', () => {
+      const a = compareState.a;
+      compareState.a = compareState.b;
+      compareState.b = a;
+      renderCompare();
+    });
+    dom.compareCopy.addEventListener('click', () => copyText(compareTextOf(compareState.b), '已复制右边这一稿'));
 
     dom.modelSelect.addEventListener('change', () => {
       view.model = dom.modelSelect.value;
@@ -1269,6 +1726,18 @@
     cacheDom();
     api = await ApiMod.detect(window);
 
+    // 顺序有讲究：先把模板注册成板块，再造状态 —— 否则上次停在自定义模板板块的话，
+    // 那个板块 id 还没注册，状态会退回「文章续写」
+    try {
+      const out = await api.templates.list();
+      templates.list = out.templates || [];
+      Modes.setCustomTemplates(templates.list);
+      dom.templateCount.textContent = String(templates.list.length);
+      renderTemplates();
+    } catch (err) {
+      templates.list = [];
+    }
+
     const saved = Core.loadUI(window.localStorage);
     state = Core.createState(saved.mode ? { mode: saved.mode } : {});
     if (saved.params) state.params = Object.assign(state.params, saved.params);
@@ -1290,6 +1759,9 @@
           '如果 Key 来自别家平台（中转、聚合），还要把 AI_BASE_URL 或 OPENAI_BASE_URL 设成那家的地址。',
         'info'
       );
+      if (Modes.isCustomMode(state.mode) || state.mode === 'translate') {
+        notice('这个板块需要真实模型：离线引擎不执行自定义提示词，也不会翻译。接上模型就好。', 'warn');
+      }
     }
   }
 

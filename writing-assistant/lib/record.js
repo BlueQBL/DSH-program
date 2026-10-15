@@ -92,6 +92,9 @@
       createdAt: input.createdAt || nowIso(),
       updatedAt: input.updatedAt || input.createdAt || nowIso(),
       mode: params.mode,
+      // 存下当时的板块名：自定义模板被删掉后，板块 id 就没人认识了，
+      // 只靠 id 反查会让旧稿显示成「文章续写」——那是查不到时的兜底，不是事实
+      modeName: clip(input.modeName || Modes.getMode(params.mode).name, 24),
       params,
       material: { input: clip((input.material && input.material.input) || '', LIMITS.materialChars) },
       versions,
@@ -118,7 +121,7 @@
       id: record.id,
       title: record.title,
       mode: record.mode,
-      modeName: mode.name,
+      modeName: record.modeName || mode.name,
       mark: mode.mark,
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
@@ -180,11 +183,12 @@
 
   function toMarkdown(record) {
     const mode = Modes.getMode(record.mode);
+    const modeName = record.modeName || mode.name;
     const extras = fieldsLine(record);
     const lines = [];
     lines.push(`# ${record.title}`);
     lines.push('');
-    lines.push(`- 模式：${mode.name}`);
+    lines.push(`- 模式：${modeName}`);
     lines.push(`- 参数：${Modes.describeParams(record.params)}`);
     if (extras) lines.push(`- 附加：${extras}`);
     lines.push(`- 时间：${record.createdAt}`);
@@ -224,7 +228,7 @@
     const extras = fieldsLine(record);
     const sep = '\n' + '─'.repeat(24) + '\n';
     const parts = [
-      `${record.title}\n${mode.name} · ${Modes.describeParams(record.params)}${extras ? ' · ' + extras : ''} · ${record.createdAt}`,
+      `${record.title}\n${record.modeName || mode.name} · ${Modes.describeParams(record.params)}${extras ? ' · ' + extras : ''} · ${record.createdAt}`,
     ];
     record.versions.forEach((v, i) => {
       parts.push(`${sheetLabel(i)}（${v.angleLabel || '常规'}）\n\n${v.text}`);

@@ -91,7 +91,16 @@ group('样式表用的每个 CSS 变量都定义过', () => {
 
 group('script 标签按依赖顺序、且文件都在', () => {
   const srcs = matchAll(html, /<script src="([^"]+)"><\/script>/g);
-  const expected = ['lib/modes.js', 'lib/record.js', 'lib/polisher.js', 'lib/mock-writer.js', 'js/core.js', 'js/api.js', 'js/app.js'];
+  const expected = [
+    'lib/modes.js',
+    'lib/record.js',
+    'lib/template.js',
+    'lib/polisher.js',
+    'lib/mock-writer.js',
+    'js/core.js',
+    'js/api.js',
+    'js/app.js',
+  ];
   ok(JSON.stringify(srcs) === JSON.stringify(expected), `script 顺序是 ${srcs.join(' → ')}`);
   const missing = srcs.filter((src) => !fs.existsSync(path.join(ROOT, src)));
   ok(missing.length === 0, `缺文件：${missing.join('、')}`);

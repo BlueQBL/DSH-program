@@ -9,15 +9,17 @@
   const isNode = typeof module === 'object' && module.exports;
   const api = factory(
     isNode ? require('../lib/modes.js') : root.WriterModes,
-    isNode ? require('../lib/record.js') : root.WriterRecord
+    isNode ? require('../lib/record.js') : root.WriterRecord,
+    isNode ? require('../lib/template.js') : root.WriterTemplate
   );
   if (isNode) module.exports = api;
   if (root) root.WriterCore = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (Modes, Record) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (Modes, Record, Template) {
   'use strict';
 
   const KEY_STORE = 'writing-assistant/v1';
   const KEY_UI = 'writing-assistant/ui/v1';
+  const KEY_TEMPLATES = 'writing-assistant/templates/v1';
   const LOCAL_CAP = 120;
 
   /** 空稿纸上给几条可以直接用的素材，省得对着空白发呆 */
@@ -46,10 +48,79 @@
       '写一篇给新入职同事看的《远程团队怎么开好周会》，发在公司内网',
       '整理一份面向管理层的《为什么要重做我们的结算系统》汇报提纲',
     ],
+    academic: [
+      '写一篇论文的引言部分：题目是「短视频使用时长与大学生专注力的关系」，已有一份 320 人的问卷数据。',
+      '给「城市绿地对夏季地表温度的影响」写摘要，方法是用卫星遥感数据做回归分析，样本覆盖 12 个城市。',
+    ],
+    report: [
+      '把三季度三家门店的经营情况写成一份给管理层的报告：A 店客流降 8% 但客单价升 15%，B 店因周边施工客流降 22%，C 店新开业日均 210 单。',
+      '写一份项目复盘：目标是把结算时长从 3 天压到 1 天，上线后实际是 1.5 天，主要卡在银行回单的解析上。',
+    ],
+    fiction: [
+      '夜班便利店店员连续七天遇到同一个只买一瓶水的客人。第八天，客人没来。',
+      '老房子的第一个晚上，楼上传来弹珠落地的声音。房东说，楼上已经空了三年。',
+    ],
+    translate: [
+      '把这段译成英文：本产品支持七天无理由退货，往返运费由我们承担。',
+      '把这段译成日文：会议改到下周三上午十点，地点不变，请提前十分钟到场。',
+    ],
   };
 
+  /**
+   * 从模板的提示词里推一个「示例结构」。
+   *
+   * 自定义模板没有语料，但我们能从作者自己的措辞里读出他要分几块：
+   * 「分进展、风险、下周计划三块」→ 进展：…　风险：…　下周计划：…
+   * 推不出来就返回空，让上层退回一句通用提示——宁可少给，不要瞎编内容。
+   */
+  function deriveExample(system) {
+    const text = String(system || '').replace(/\s+/g, ' ');
+    if (!text) return '';
+
+    const runs = [];
+    // 「分/按/包括/输出 ……」后面跟着一串顿号短语，就是在说分几块。
+    // 两个约束很要紧：① 短语里不许出现「，」，否则「只输出周报正文，分进展、风险…」
+    // 会把前半句一起吞进来；② 不强求「三块/部分」这种后缀——「包括标题、正文、话题标签。」
+    // 就没有后缀，但它显然也是结构说明。
+    const structured = /(?:分|按|包括|包含|含|输出|写|列)([^。；;！!？?，,\n]{2,40})/g;
+    let hit;
+    while ((hit = structured.exec(text)) !== null) runs.push(hit[1]);
+    // 退化：任何「甲、乙、丙」式的并列短语
+    if (!runs.length) {
+      const parallel = text.match(/[\u4e00-\u9fa5A-Za-z]{2,10}(?:、[\u4e00-\u9fa5A-Za-z]{2,10}){1,5}/);
+      if (parallel) runs.push(parallel[0]);
+    }
+
+    for (const raw of runs) {
+      // 去掉尾巴上的「三块/四部分/两条」这类计数词，它不是内容
+      const run = raw.replace(/(?:三|四|两|二|几)?(?:块|部分|段|点|条|项|步)$/, '');
+      const items = run
+        .split(/[、，,和与及]/)
+        .map((s) => s.replace(/^[的了把一套个些每]+/, '').replace(/[的了吗呢]+$/, '').trim())
+        .filter((s) => s.length >= 2 && s.length <= 10);
+      if (items.length >= 2) {
+        return items
+          .slice(0, 4)
+          .map((name) => `${name}：…`)
+          .join('　');
+      }
+    }
+    return '';
+  }
+
+  /**
+   * 空稿纸下面的示例。
+   * 自定义模板：作者写了就用作者的，没写就从提示词推一个结构。
+   */
   function exampleOf(mode, index) {
-    const list = EXAMPLES[mode] || EXAMPLES.continue;
+    const custom = Modes.customModeOf(mode);
+    if (custom) {
+      if (custom.examples && custom.examples.length) return custom.examples[index || 0] || '';
+      if (index) return '';
+      return deriveExample(custom.system);
+    }
+    const list = EXAMPLES[Modes.getMode(mode).id];
+    if (!list) return '';
     return list[(index || 0) % list.length];
   }
 
@@ -305,6 +376,8 @@
         {
           id: state.savedId || undefined,
           mode: state.mode,
+          // 存下板块名：模板被删掉之后，旧稿在留档里还能显示当时的名字
+          modeName: Modes.getMode(state.mode).name,
           params,
           material: { input: state.material },
           versions,
@@ -533,6 +606,78 @@
     };
   }
 
+  /* ── 自定义模板（本地留档，接口形状与服务端 /api/templates 一致） ── */
+  function createLocalTemplateStore(storage) {
+    const KEY = KEY_TEMPLATES;
+
+    function readAll() {
+      try {
+        const raw = storage.getItem(KEY);
+        if (!raw) return [];
+        const data = JSON.parse(raw);
+        const list = Array.isArray(data) ? data : data && Array.isArray(data.templates) ? data.templates : [];
+        return list.map((t) => Template.normalizeTemplate(t)).filter((t) => t.system);
+      } catch {
+        return [];
+      }
+    }
+
+    function writeAll(list) {
+      // 上限按最近更新保留，避免本地存储被模板撑爆
+      const kept = Template.sortTemplates(list).slice(0, Modes.LIMITS.templatesMax);
+      storage.setItem(KEY, JSON.stringify({ version: 1, templates: kept }));
+      return kept;
+    }
+
+    return {
+      kind: 'local',
+      async list(opts) {
+        const all = Template.sortTemplates(readAll()).filter((t) => Template.matchesTemplate(t, opts || {}));
+        return {
+          ok: true,
+          total: all.length,
+          items: all.map(Template.summarize),
+          templates: all,
+          limit: Modes.LIMITS.templatesMax,
+        };
+      },
+      async get(id) {
+        return readAll().find((t) => t.id === id) || null;
+      },
+      async create(raw) {
+        const check = Template.validateTemplate(raw);
+        if (!check.ok) throw new Error(check.message);
+        const list = readAll();
+        if (list.length >= Modes.LIMITS.templatesMax) {
+          throw new Error(`模板最多 ${Modes.LIMITS.templatesMax} 个，先删掉几个不用的`);
+        }
+        writeAll(list.concat(check.template));
+        return check.template;
+      },
+      async update(id, patch) {
+        const list = readAll();
+        const current = list.find((t) => t.id === id);
+        if (!current) return null;
+        const merged = Template.normalizeTemplate(Object.assign({}, current, patch || {}, { id: current.id }));
+        const check = Template.validateTemplate(merged);
+        if (!check.ok) throw new Error(check.message);
+        check.template.updatedAt = Record.nowIso();
+        writeAll(list.map((t) => (t.id === id ? check.template : t)));
+        return check.template;
+      },
+      async remove(id) {
+        const list = readAll();
+        const rest = list.filter((t) => t.id !== id);
+        if (rest.length === list.length) return false;
+        writeAll(rest);
+        return true;
+      },
+      async count() {
+        return readAll().length;
+      },
+    };
+  }
+
   /** 界面偏好：模式、参数、上次的素材都留着，刷新后接着用 */
   function loadUI(storage) {
     try {
@@ -554,9 +699,11 @@
   return {
     KEY_STORE,
     KEY_UI,
+    KEY_TEMPLATES,
     LOCAL_CAP,
     EXAMPLES,
     exampleOf,
+    deriveExample,
     createState,
     resolvedParams,
     setMode,
@@ -585,6 +732,7 @@
     polishTarget,
     canGenerate,
     createLocalStore,
+    createLocalTemplateStore,
     loadUI,
     saveUI,
   };

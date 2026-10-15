@@ -51,11 +51,26 @@ const SOURCE = [
 ].join('');
 
 const MODE_IDS = Modes.listModeIds();
-const ALL_MODES = ['continue', 'rewrite', 'copywriting', 'email', 'summary', 'outline'];
+/* 十个内置模式一起过通用断言（确定性、非空、禁用词、模式差异、角度差异）。
+   translate 也在这十种里，它的产出是有意的短说明，只从第 3 组
+   「篇幅要接近目标字数」里排除，原因写在该组里。 */
+const ALL_MODES = MODE_IDS.slice();
 
-const BANNED = ['作为AI', '作为 AI', '希望对你有帮助', '以下是', '下面是为你', '（此处可补充）', 'TODO', 'XXX', 'Lorem'];
+const BANNED = ['作为AI', '作为 AI', '希望对你有帮助', '以下是', '下面是为你', '（此处可补充）', 'TODO', 'XXX', 'Lorem',
+  // README 承诺不写的空转句：学术与报告最容易犯，所以放进全局断言
+  '综上所述', '值得注意的是', '毋庸置疑', '不言而喻', '本文主要'];
 
 const EMOJI_RE = /[\u{1F300}-\u{1FAFF}\u{2190}-\u{21FF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}]/u;
+
+/** 产出里出现的阿拉伯数字（报告会用它跟素材比对：数字只能来自素材） */
+function digitsOf(text) {
+  return String(text).match(/[0-9]+/g) || [];
+}
+
+/** 去掉清单编号（1. / 2、）与标题序号，剩下的数字才算正文里的数字 */
+function unnumbered(text) {
+  return String(text).replace(/^[ \t]*\d+[.、]\s*/gm, '');
+}
 
 /* ------------------------------------------------------------------ 1 确定性 */
 group('确定性：同参数两次结果完全一致，不同版本明显不同', () => {
@@ -73,7 +88,7 @@ group('确定性：同参数两次结果完全一致，不同版本明显不同'
 });
 
 /* ------------------------------------------------------------------ 2 非空 */
-group('非空：6 种模式 × 4 个版本 × 空素材/正常素材都写得出来', () => {
+group('非空：10 种模式 × 4 个版本 × 空素材/正常素材都写得出来', () => {
   let checked = 0;
   ALL_MODES.forEach((mode) => {
     const params = Modes.normalizeParams({ mode: mode, length: 'medium', versions: 4 });
@@ -88,12 +103,19 @@ group('非空：6 种模式 × 4 个版本 × 空素材/正常素材都写得出
     // 素材直接传字符串也要能跑
     ok(M.charCount(M.compose(params, SOURCE, 0)) > 50, `${mode}：material 传字符串也要能产出`);
   });
-  eq(checked, 48, '共应检查 48 篇');
+  eq(ALL_MODES.length, 10, '内置模式应有 10 种');
+  eq(checked, 80, '共应检查 80 篇');
 });
 
 /* ------------------------------------------------------------------ 3 篇幅 */
 group('篇幅：短/中/长三档落在 ±30% 内，且长 > 中 > 短', () => {
-  ['continue', 'email', 'copywriting'].forEach((mode) => {
+  /* 这里只收"按目标字数写"的模式。
+     translate 与自定义模板（tpl_）被排除在外：离线引擎做不了翻译、也执行不了
+     自定义提示词，它们返回的是如实说明 + 原样保留的原文，字数远小于目标字数
+     是有意的设计，单独在第 14、15 组断言。
+     学术论文的"摘要"也另有长度惯例（二百字上下），不跟着档位放大，
+     单独在第 11 组断言。 */
+  ['continue', 'email', 'copywriting', 'academic', 'report', 'fiction'].forEach((mode) => {
     const sizes = { short: 0, medium: 0, long: 0 };
     ['short', 'medium', 'long'].forEach((length) => {
       const params = Modes.normalizeParams({ mode: mode, length: length, versions: 1 });
@@ -140,7 +162,7 @@ group('禁用词：不出现套话，非文案模式不带 emoji', () => {
 });
 
 /* ------------------------------------------------------------------ 5 模式差异 */
-group('模式差异：同一素材下六种模式产出两两不同', () => {
+group('模式差异：同一素材下十种模式产出两两不同', () => {
   const outputs = {};
   ALL_MODES.forEach((mode) => {
     const params = Modes.normalizeParams({ mode: mode, length: 'medium', versions: 1 });
@@ -304,6 +326,267 @@ group('素材驱动：关键词、数字、原句语气会被带进产出', () =
   ok(kws.length > 0 && kws.length <= 5, `关键词条数应在 1~5 之间，实际 ${kws.length}`);
   ok(kws.indexOf('供应商') >= 0, '重复出现的「供应商」应被抽为关键词');
   eq(M.numberTokens('下周交付顺延两天，3 个工作日内回复。').length > 0, true, '应能抽出时间数字');
+});
+
+/* ---------------------------------------------------- 11 学术论文 */
+const ACADEMIC_SRC =
+  '写“短视频使用时长与大学生专注力的关系”这篇论文的引言部分，已经收了 320 份问卷，' +
+  '用自陈报告和打卡记录两种方式测量使用时长，打卡记录的缺失率约 12%。';
+
+/* 编造文献的四种典型长相：署名加年份、光秃秃的年份、期刊名、外文作者 */
+const FABRICATED_CITE = [
+  /[\u4e00-\u9fa5]{2,4}[（(]\d{4}[）)]/,
+  /\d{4}\s*年/,
+  /《[^》\n]{2,20}》/,
+  /[A-Z][a-z]{2,}\s*(?:et al\.?|等)/,
+];
+
+group('学术论文：六个部分都写得出来，不编文献与数据，不写空转句', () => {
+  const SECTIONS = ['abstract', 'intro', 'review', 'method', 'result', 'conclusion'];
+  const materialDigits = digitsOf(ACADEMIC_SRC);
+  SECTIONS.forEach((section) => {
+    const params = Modes.normalizeParams({
+      mode: 'academic',
+      length: 'medium',
+      versions: 4,
+      fields: { section: section, genre: 'journal', discipline: '教育心理学' },
+    });
+    for (let i = 0; i < 4; i += 1) {
+      const text = M.compose(params, { input: ACADEMIC_SRC }, i);
+      const at = `academic/${section} 第${i + 1}稿`;
+      ok(M.charCount(text) > 120, `${at} 应有正文，实际 ${M.charCount(text)} 字`);
+      FABRICATED_CITE.forEach((re) => {
+        const hit = text.match(re);
+        no(Boolean(hit), `${at} 不应出现编造的文献或年份，实际出现 ${JSON.stringify(hit && hit[0])}`);
+      });
+      digitsOf(text).forEach((d) => {
+        ok(materialDigits.indexOf(d) >= 0, `${at} 里的数字 ${d} 必须来自素材，不能自己编`);
+      });
+      if (section !== 'abstract') ok(text.indexOf('教育心理学') >= 0, `${at} 应带上学科领域`);
+    }
+  });
+  // 摘要有自己的长度惯例（二百字上下），不跟着 medium 的 500 字走
+  const abs = M.compose(
+    Modes.normalizeParams({ mode: 'academic', length: 'medium', versions: 1, fields: { section: 'abstract' } }),
+    { input: ACADEMIC_SRC },
+    0
+  );
+  const absLen = M.charCount(abs);
+  ok(absLen >= 150 && absLen <= 320, `摘要应落在 150~320 字（固定长度惯例），实际 ${absLen} 字`);
+  ok(abs.indexOf('摘要：') === 0, '摘要应以「摘要：」起头');
+  ok(abs.indexOf('关键词：') > 0, '摘要应带一行关键词');
+  // 与文献对话的角度必须给引用占位，而不是编一个出处
+  const dlg = M.compose(
+    Modes.normalizeParams({ mode: 'academic', length: 'long', versions: 4, fields: { section: 'intro' } }),
+    { input: ACADEMIC_SRC },
+    1
+  );
+  ok(dlg.indexOf('（相关研究，年份）') >= 0, '与文献对话的角度应写成「（相关研究，年份）」占位');
+  // 体例影响紧凑程度
+  const thesis = M.charCount(
+    M.compose(Modes.normalizeParams({ mode: 'academic', length: 'long', versions: 1, fields: { section: 'intro', genre: 'thesis' } }), { input: ACADEMIC_SRC }, 0)
+  );
+  const conf = M.charCount(
+    M.compose(Modes.normalizeParams({ mode: 'academic', length: 'long', versions: 1, fields: { section: 'intro', genre: 'conference' } }), { input: ACADEMIC_SRC }, 0)
+  );
+  ok(thesis > conf, `学位论文应比会议论文写得开（${thesis} > ${conf}）`);
+});
+
+/* ---------------------------------------------------- 12 工作报告 */
+const REPORT_SRC =
+  '三季度三家门店的经营情况：A 店营收 128 万元，比二季度增长 9%；B 店与上期持平；C 店下滑 6%。' +
+  '人力成本上涨是主要原因，公司已经用了 2 个月调整排班。';
+
+group('工作报告：分级标题 + 下一步与责任人占位，数字只来自素材、缺的写（待补）', () => {
+  const KINDS = ['work', 'review', 'market', 'survey', 'weekly'];
+  const materialDigits = digitsOf(REPORT_SRC);
+  KINDS.forEach((kind) => {
+    const params = Modes.normalizeParams({ mode: 'report', length: 'medium', versions: 4, fields: { kind: kind, audience: 'leader' } });
+    for (let i = 0; i < 4; i += 1) {
+      const text = M.compose(params, { input: REPORT_SRC }, i);
+      const at = `report/${kind} 第${i + 1}稿`;
+      ok(/^[一二三四五六]、/m.test(text), `${at} 应有「一、」这样的分级标题`);
+      ok(text.indexOf('下一步') >= 0, `${at} 结尾必须有下一步`);
+      ok(text.indexOf('（待补）') >= 0, `${at} 缺数据处应写「（待补）」`);
+      ok(text.indexOf('（责任人待定') >= 0, `${at} 应留责任人占位`);
+      const heads = text.split('\n').filter((line) => /^[一二三四五六七]、/.test(line));
+      ok(heads.length > 0 && heads[heads.length - 1].indexOf('下一步') >= 0, `${at} 的「下一步」应是最后一节，实际最后是 ${heads[heads.length - 1]}`);
+      digitsOf(unnumbered(text)).forEach((d) => {
+        ok(materialDigits.indexOf(d) >= 0, `${at} 里的数字 ${d} 必须来自素材`);
+      });
+    }
+  });
+  // 结论先行的语气：第一段就要给出结论与待决策项
+  const bluf = M.compose(
+    Modes.normalizeParams({ mode: 'report', length: 'medium', versions: 1, tone: 'bluf', fields: { kind: 'work', audience: 'leader' } }),
+    { input: REPORT_SRC },
+    0
+  );
+  const head = bluf.split('\n').slice(0, 4).join('\n');
+  ok(head.indexOf('结论') >= 0 && head.indexOf('待决策项') >= 0, `bluf 语气第一段应同时给出结论与待决策项，实际开头 ${JSON.stringify(head.slice(0, 30))}`);
+  // 素材里没有数字时，一个数字都不许编
+  const noNumSrc = '这次的例行检查已经做完，发现有几处需要调整，具体数量还没有统计出来。';
+  const noNum = M.compose(
+    Modes.normalizeParams({ mode: 'report', length: 'medium', versions: 1, tone: 'plain', fields: { kind: 'work', audience: 'team' } }),
+    { input: noNumSrc },
+    0
+  );
+  eq(digitsOf(unnumbered(noNum)).length, 0, `素材没有数字时报告里不应出现数字，实际 ${JSON.stringify(digitsOf(unnumbered(noNum)))}`);
+  ok(noNum.indexOf('（待补）') >= 0, '素材缺数字时应写「（待补）」，不许估一个');
+});
+
+/* ---------------------------------------------------- 13 小说 */
+const FICTION_SRC = '一个夜班便利店店员，连续七天遇到同一个只买一瓶水的客人，第七天客人没有出现。';
+
+const EMOTION_TELL = ['他感到', '她感到', '他意识到', '她意识到', '内心充满', '他觉得自己', '她觉得自己', '感到很', '感到一阵'];
+const FICTION_META = ['以下是小说的开头', '本段', '故事梗概', '人物介绍', '这篇小说'];
+
+group('小说：动作与对话推进，不直接说明情绪，视角守规矩，类型看得出差别', () => {
+  const PARTS = ['open', 'plot', 'talk', 'turn', 'end'];
+  PARTS.forEach((part) => {
+    const params = Modes.normalizeParams({ mode: 'fiction', length: 'medium', versions: 4, fields: { part: part, viewpoint: 'third', genre: 'real' } });
+    for (let i = 0; i < 4; i += 1) {
+      const text = M.compose(params, { input: FICTION_SRC }, i);
+      const at = `fiction/${part} 第${i + 1}稿`;
+      ok(M.charCount(text) > 120, `${at} 应有正文，实际 ${M.charCount(text)} 字`);
+      EMOTION_TELL.forEach((w) => no(text.indexOf(w) >= 0, `${at} 不应直接说明情绪（出现「${w}」）`));
+      FICTION_META.forEach((w) => no(text.indexOf(w) >= 0, `${at} 不应写成说明句（出现「${w}」）`));
+    }
+  });
+  // 第一人称：一个「他/她」都不能有
+  const first = Modes.normalizeParams({ mode: 'fiction', length: 'long', versions: 4, fields: { part: 'open', viewpoint: 'first', genre: 'real' } });
+  [0, 1, 2, 3].forEach((i) => {
+    const text = M.compose(first, { input: FICTION_SRC }, i);
+    const leak = text.match(/[他她]/);
+    no(Boolean(leak), `第一人称第${i + 1}稿不应出现「他/她」，实际出现：${leak ? JSON.stringify(text.slice(Math.max(0, leak.index - 8), leak.index + 8)) : ''}`);
+    ok(text.indexOf('我') >= 0, `第一人称第${i + 1}稿里应有「我」`);
+  });
+  // 第三人称限知：贴着一个主角写
+  const third = M.compose(
+    Modes.normalizeParams({ mode: 'fiction', length: 'medium', versions: 1, fields: { part: 'plot', viewpoint: 'third', genre: 'real' } }),
+    { input: FICTION_SRC },
+    0
+  );
+  ok(/[他她]/.test(third), '第三人称的稿子里应出现「他」或「她」');
+  // 六种类型：产出两两不同，且各自留下自己的器物与用词
+  const GENRE_MARKS = {
+    real: ['雨', '收银', '便利店', '末班', '塑料袋', '面馆'],
+    mystery: ['监控', '门锁', '声控灯', '电梯', '折痕', '划痕'],
+    scifi: ['舱', '气闸', '同步率', '舷窗', '日志', '导光条'],
+    fantasy: ['铜铃', '结界', '药炉', '灯芯', '镇尺', '斗篷'],
+    romance: ['伞', '咖啡', '电梯', '杯子', '车票', '外套'],
+    history: ['更鼓', '坊门', '驿', '油灯', '算盘', '公文'],
+  };
+  const byGenre = {};
+  Object.keys(GENRE_MARKS).forEach((genre) => {
+    byGenre[genre] = M.compose(
+      Modes.normalizeParams({ mode: 'fiction', length: 'long', versions: 1, fields: { part: 'open', viewpoint: 'third', genre: genre } }),
+      { input: FICTION_SRC },
+      0
+    );
+  });
+  eq(new Set(Object.keys(byGenre).map((g) => byGenre[g])).size, 6, '六种类型应产出六份不同的稿子');
+  Object.keys(GENRE_MARKS).forEach((genre) => {
+    const hit = GENRE_MARKS[genre].filter((w) => byGenre[genre].indexOf(w) >= 0);
+    ok(hit.length > 0, `${genre} 的稿子里应至少留下一处该类型的用语`);
+  });
+});
+
+/* ---------------------------------------------------- 14 翻译（诚实说明） */
+const TRANSLATE_SRC = '会议定在周四下午三点。\n请把材料提前发我，我这边先对一遍。';
+
+group('翻译：离线引擎如实说明，不假装翻译', () => {
+  const params = Modes.normalizeParams({ mode: 'translate', length: 'medium', versions: 4, fields: { target: 'en', shape: 'keep' } });
+  const text = M.compose(params, { input: TRANSLATE_SRC }, 0);
+  ok(text.indexOf('离线') >= 0, '说明里要点明「离线」');
+  ok(text.indexOf('离线引擎不做翻译') >= 0, '应有一句「离线引擎不做翻译」');
+  ok(text.indexOf('DEEPSEEK_API_KEY') >= 0, '应告诉用户怎么接上真实模型');
+  ok(text.indexOf('目标语言：英文') >= 0, '应写明目标语言的中文名');
+  ok(text.indexOf('会议定在周四下午三点。') >= 0, '原文要原样保留');
+  ok(text.indexOf('请把材料提前发我，我这边先对一遍。') >= 0, '原文的每一段都要保留');
+  ok(M.charCount(text) < params.chars, `说明 + 原文有意短于目标字数（实际 ${M.charCount(text)} < ${params.chars}）`);
+  // 四个角度的说明互不相同
+  const four = [0, 1, 2, 3].map((i) => M.compose(params, { input: TRANSLATE_SRC }, i));
+  eq(new Set(four).size, 4, '四个角度应给出四份不同的说明');
+  // 语气也进说明
+  const literal = M.compose(Modes.normalizeParams({ mode: 'translate', length: 'short', versions: 1, tone: 'literal', fields: { target: 'en' } }), { input: TRANSLATE_SRC }, 0);
+  const formal = M.compose(Modes.normalizeParams({ mode: 'translate', length: 'short', versions: 1, tone: 'formal', fields: { target: 'en' } }), { input: TRANSLATE_SRC }, 0);
+  no(literal === formal, '不同语气的翻译说明不应完全相同');
+  // 目标语言中文名
+  const tw = M.compose(Modes.normalizeParams({ mode: 'translate', length: 'short', versions: 1, fields: { target: 'zh-tw' } }), { input: TRANSLATE_SRC }, 0);
+  ok(tw.indexOf('目标语言：繁体中文') >= 0, 'zh-tw 应映射成「繁体中文」');
+  const other = M.compose(
+    Modes.normalizeParams({ mode: 'translate', length: 'short', versions: 1, fields: { target: 'other', targetCustom: '葡萄牙语' } }),
+    { input: TRANSLATE_SRC },
+    0
+  );
+  ok(other.indexOf('葡萄牙语') >= 0, 'target=other 时应使用 targetCustom 里填的语言名');
+  // 中对照：给出「原文一段 / 译文待补」的骨架
+  const bi = M.compose(Modes.normalizeParams({ mode: 'translate', length: 'short', versions: 1, fields: { target: 'ja', shape: 'bilingual' } }), { input: TRANSLATE_SRC }, 0);
+  ok(bi.indexOf('【原文 1】') >= 0 && bi.indexOf('【译文 1】') >= 0, '中对照应给出原文/译文的对照骨架');
+  ok(bi.indexOf('待补') >= 0, '译文一栏应写明待补');
+  ok(bi.indexOf('请把材料提前发我，我这边先对一遍。') >= 0, '中对照里的原文一个字也不能丢');
+  // 术语要求要带进说明
+  const gl = M.compose(
+    Modes.normalizeParams({ mode: 'translate', length: 'short', versions: 1, fields: { target: 'en', glossary: '把“抓手”译成 lever' } }),
+    { input: TRANSLATE_SRC },
+    0
+  );
+  ok(gl.indexOf('抓手') >= 0, '填了术语要求时应写进说明');
+});
+
+/* ---------------------------------------------------- 15 自定义模板（诚实说明） */
+group('自定义模板：tpl_ 前缀走诚实说明，不拿内置模式的稿子充数', () => {
+  const raw = { mode: 'tpl_demo0001', templateName: '周会纪要模板', length: 'medium', versions: 4 };
+  const text = M.compose(raw, { input: TRANSLATE_SRC }, 0);
+  ok(text.indexOf('离线') >= 0, '说明里要点明「离线」');
+  ok(text.indexOf('离线引擎写不了') >= 0, '应有一句「离线引擎写不了自定义模板」');
+  ok(text.indexOf('周会纪要模板') >= 0, '应带上模板名');
+  ok(text.indexOf('DEEPSEEK_API_KEY') >= 0, '应告诉用户怎么接上真实模型');
+  ok(text.indexOf('会议定在周四下午三点。') >= 0, '原文要原样留着');
+  no(text.indexOf('（相关研究，年份）') >= 0, '自定义模板不该套用学术论文的产出');
+  no(/^[一二三四五六]、/m.test(text), '自定义模板不该套用报告的章节结构');
+  // 名字拿不到时退回「自定义模板」
+  const nameless = M.compose({ mode: 'tpl_noName', length: 'short' }, { input: TRANSLATE_SRC }, 0);
+  ok(nameless.indexOf('「自定义模板」') >= 0, '模板名拿不到时应退回「自定义模板」');
+  // 服务端的真实调用方式：模板注册成板块后，模板名走第四个参数传进来
+  if (typeof Modes.setCustomTemplates === 'function') {
+    Modes.setCustomTemplates([{ id: 'demo0001', name: '竞品周报模板', system: '写一份竞品周报' }]);
+    const viaOption = M.compose({ mode: 'tpl_demo0001', length: 'short' }, { input: TRANSLATE_SRC }, 0, { templateName: '竞品周报模板' });
+    ok(viaOption.indexOf('竞品周报模板') >= 0, '服务端把模板名放在第四个参数里时也要认出来');
+    const registered = Modes.normalizeParams({ mode: 'tpl_demo0001', length: 'short' });
+    eq(registered.mode, 'tpl_demo0001', '注册过的模板板块应保留自己的 id');
+    ok(M.compose(registered, { input: TRANSLATE_SRC }, 0).indexOf('离线引擎写不了') >= 0, '注册过的模板同样返回诚实说明');
+    Modes.setCustomTemplates([]);
+  }
+  // 四个角度互不相同，同参数两次结果一致
+  const four = [0, 1, 2, 3].map((i) => M.compose(raw, { input: TRANSLATE_SRC }, i));
+  eq(new Set(four).size, 4, '四个角度应给出四份不同的说明');
+  eq(M.compose(raw, { input: TRANSLATE_SRC }, 0), text, '同参数两次结果应逐字相同');
+  ok(M.charCount(text) < Modes.normalizeParams(raw).chars, '说明 + 原文有意短于目标字数（离线引擎执行不了模板）');
+});
+
+/* ---------------------------------------------------- 16 新模式的语气与确定性 */
+group('新模式：语气影响产出，四角度两两不同，同参数两次一致', () => {
+  const CASES = [
+    ['academic', ['rigorous', 'plain', 'critical', 'applied'], { section: 'intro' }],
+    ['report', ['bluf', 'plain', 'data', 'crisp'], { kind: 'work', audience: 'leader' }],
+    ['fiction', ['restrained', 'lyric', 'tense', 'light'], { part: 'open', viewpoint: 'third', genre: 'real' }],
+  ];
+  CASES.forEach((item) => {
+    const mode = item[0];
+    const tones = item[1];
+    const fields = item[2];
+    const texts = tones.map((tone) =>
+      M.compose(Modes.normalizeParams({ mode: mode, length: 'medium', versions: 1, tone: tone, fields: fields }), { input: SOURCE }, 0)
+    );
+    eq(new Set(texts).size, tones.length, `${mode}：四种语气的产出应两两不同`);
+    texts.forEach((t, i) => ok(M.charCount(t) > 100, `${mode}/${tones[i]} 应写得出来，实际 ${M.charCount(t)} 字`));
+    const params = Modes.normalizeParams({ mode: mode, length: 'medium', versions: 4, fields: fields });
+    eq(M.compose(params, { input: SOURCE }, 0), M.compose(params, { input: SOURCE }, 0), `${mode}：同参数两次结果应逐字相同`);
+    const four = [0, 1, 2, 3].map((i) => M.compose(params, { input: SOURCE }, i));
+    eq(new Set(four).size, 4, `${mode}：四个角度应产出四份不同的稿子`);
+  });
 });
 
 /* ------------------------------------------------------------------ 汇总 */

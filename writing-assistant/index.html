@@ -28,6 +28,9 @@
       </select>
     </label>
     <span class="engine" id="engine" title="当前成稿方式">正在连接…</span>
+    <button type="button" class="ghost-btn" id="open-templates">
+      模板<span class="ghost-btn__count" id="template-count">0</span>
+    </button>
     <button type="button" class="ghost-btn" id="open-history">
       写作留档<span class="ghost-btn__count" id="history-count">0</span>
     </button>
@@ -39,7 +42,7 @@
   <!-- 原稿：一张可以写的稿纸 -->
   <section class="compose" aria-label="原稿">
     <div class="sheet sheet--input" id="input-sheet">
-      <div class="sheet__tab">原稿</div>
+      <div class="sheet__tab" id="input-tab">原稿</div>
       <div class="sheet__body">
         <label class="sheet__label" for="material" id="material-label">原稿开头</label>
         <textarea id="material" rows="8" spellcheck="false"
@@ -92,10 +95,40 @@
 
   <!-- 成稿：一次起稿，多张稿片并排 -->
   <section class="drafts" id="drafts" aria-label="生成的稿子">
+    <div class="drafts__bar" id="drafts-bar" hidden>
+      <span class="drafts__bar-label" id="drafts-bar-label"></span>
+      <button type="button" class="btn btn--small btn--line" id="open-compare">对比两稿</button>
+    </div>
     <div class="drafts__empty" id="drafts-empty">
       <p class="drafts__lead">写下的第一笔，剩下的交给它。</p>
       <p class="drafts__sub">选一种模式，粘一段素材，一次会给你几份不一样的稿子。</p>
       <div class="drafts__examples" id="drafts-examples"></div>
+    </div>
+  </section>
+
+  <!-- 对比：两稿的差异 -->
+  <section class="compare" id="compare" aria-label="版本对比" hidden>
+    <div class="compare__head">
+      <h2 class="compare__title">对比</h2>
+      <div class="compare__pick">
+        <label for="compare-a">左</label>
+        <select id="compare-a" aria-label="选择左边的稿子"></select>
+        <span class="compare__vs">对照</span>
+        <label for="compare-b">右</label>
+        <select id="compare-b" aria-label="选择右边的稿子"></select>
+      </div>
+      <p class="compare__summary" id="compare-summary"></p>
+      <div class="compare__actions">
+        <button type="button" class="btn btn--small btn--line" id="compare-swap">左右对调</button>
+        <button type="button" class="btn btn--small btn--line" id="compare-copy">复制右边全文</button>
+        <button type="button" class="btn btn--small btn--line" id="compare-close">收起</button>
+      </div>
+    </div>
+    <div class="sheet sheet--marked">
+      <div class="sheet__body">
+        <div class="marktext" id="compare-text"></div>
+      </div>
+      <ol class="annotations" id="compare-changes"></ol>
     </div>
   </section>
 
@@ -122,7 +155,7 @@
 
   <div class="drawer__tools">
     <input type="search" id="history-q" placeholder="搜标题、素材或正文" aria-label="搜索留档">
-    <label class="switch">
+    <label class="switch" title="只列出被标为星标的几篇。星标不代表置顶，而是「不会被自动清理」的标记。">
       <input type="checkbox" id="history-starred">
       <span>只看星标</span>
     </label>
@@ -131,6 +164,8 @@
   <nav class="chips chips--toolbar" id="history-modes" aria-label="按模式筛选"></nav>
 
   <div class="drawer__list" id="history-list"></div>
+
+  <p class="drawer__hint">留档按时间倒序（最近写的在最前）。<b>星标</b>不代表置顶，而是「留档清理时不会被删掉」的标记：留档满了会从最旧的开始清，星标的一律留住；勾上「只看星标」可以只看这几篇，导出时也只导它们。</p>
 
   <footer class="drawer__foot">
     <div class="export">
@@ -144,10 +179,71 @@
 </aside>
 <div class="scrim" id="scrim" hidden></div>
 
+<!-- 模板库 -->
+<aside class="drawer" id="tpl-drawer" aria-label="模板库" aria-hidden="true" inert hidden>
+  <header class="drawer__head">
+    <h2 class="drawer__title">模板库</h2>
+    <span class="drawer__count" id="tpl-count">0 个</span>
+    <button type="button" class="icon-btn" id="new-template" title="新建模板">＋</button>
+    <button type="button" class="icon-btn" id="close-templates" aria-label="关闭模板库">✕</button>
+  </header>
+
+  <form class="tpl-form" id="tpl-form">
+    <p class="tpl-form__title" id="tpl-form-title">新建模板</p>
+    <div class="tpl-form__row">
+      <label class="tpl-form__field tpl-form__field--name">
+        <span>模板名</span>
+        <input class="input" id="tpl-name" maxlength="24" placeholder="例如：产品周报" required>
+      </label>
+      <label class="tpl-form__field tpl-form__field--mark">
+        <span>稿签</span>
+        <input class="input" id="tpl-mark" maxlength="1" placeholder="周">
+      </label>
+    </div>
+    <label class="tpl-form__field">
+      <span>一句话说明（可选）</span>
+      <input class="input" id="tpl-tagline" maxlength="60" placeholder="例如：每周给组里同步进展">
+    </label>
+    <label class="tpl-form__field">
+      <span>提示词（模板的核心）</span>
+      <textarea class="input tpl-form__system" id="tpl-system" rows="6" maxlength="4000"
+        placeholder="你是谁、要写什么、不要写什么。例如：你是资深产品经理，只输出周报正文，分进展、风险、下周计划三块；不要写客套话，不要编造数据。"></textarea>
+    </label>
+    <label class="tpl-form__field">
+      <span>输出要求（可选）</span>
+      <input class="input" id="tpl-output" maxlength="400" placeholder="例如：每块不超过五条，结尾给一句风险提示">
+    </label>
+    <label class="tpl-form__field">
+      <span>素材字段名（可选）</span>
+      <input class="input" id="tpl-input-label" maxlength="20" placeholder="默认叫「素材」">
+    </label>
+    <label class="tpl-form__field">
+      <span>示例素材（可选，一行一条，最多两条）</span>
+      <textarea class="input" id="tpl-example" rows="2" maxlength="600"
+        placeholder="会显示成空稿纸下面可点的示例。留空则按你的提示词自动推一个结构。"></textarea>
+    </label>
+    <p class="tpl-form__note" id="tpl-form-note"></p>
+    <div class="tpl-form__actions">
+      <button type="submit" class="btn btn--small btn--primary" id="tpl-save">保存模板</button>
+      <button type="button" class="btn btn--small btn--line" id="tpl-cancel" hidden>取消编辑</button>
+      <button type="button" class="btn btn--small btn--line" id="tpl-seed">给个例子</button>
+    </div>
+  </form>
+
+  <div class="drawer__list" id="tpl-list"></div>
+
+  <p class="drawer__hint">
+    模板就是一段你自己写的提示词，外加几个说明字段。保存后会出现在顶部导航的「我的模板」里，
+    和内置板块一样能调创意度与篇幅、一次出 1–4 稿、一键朱批、进留档。
+    <b>离线引擎不会执行自定义提示词</b>，接上真实模型后才有效果。
+  </p>
+</aside>
+
 <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
 
 <script src="lib/modes.js"></script>
 <script src="lib/record.js"></script>
+<script src="lib/template.js"></script>
 <script src="lib/polisher.js"></script>
 <script src="lib/mock-writer.js"></script>
 <script src="js/core.js"></script>

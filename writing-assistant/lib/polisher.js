@@ -331,6 +331,45 @@
     };
   }
 
+  /* ── 两段文本对比 ───────────────────────────────────────── */
+
+  /**
+   * 改动量占比：被改掉的字数 ÷ 两者中较长的长度。
+   * 这不是编辑距离，而是「有多少内容被重写了」的直觉指标，
+   * 用来给用户一个「这两稿差多远」的粗略概念，不做精确承诺。
+   */
+  function similarity(before, after) {
+    const a = String(before || '');
+    const b = String(after || '');
+    const longest = Math.max(a.length, b.length);
+    if (!longest || a === b) return 1;
+    const edits = diffEdits(a, b);
+    const changed = edits.reduce((sum, e) => sum + Math.max(e.before.length, e.after.length), 0);
+    return Math.max(0, Math.min(1, 1 - changed / longest));
+  }
+
+  /**
+   * 对比两段文本：差异条目 + 统计 + 相似度。
+   * 复用的是一键优化那套差异引擎，所以「改了哪里」两边口径一致。
+   */
+  function compare(before, after) {
+    const a = String(before || '');
+    const b = String(after || '');
+    const edits = diffEdits(a, b).map((e, i) =>
+      Object.assign({}, e, { id: 'c' + (i + 1), type: inferType(e), reason: '', source: 'diff' })
+    );
+    return {
+      before: a,
+      after: b,
+      edits,
+      stats: stats(edits),
+      similarity: similarity(a, b),
+      identical: a === b,
+      addedChars: edits.reduce((sum, e) => sum + e.after.length, 0),
+      removedChars: edits.reduce((sum, e) => sum + e.before.length, 0),
+    };
+  }
+
   /* ── 解析模型返回的 JSON ────────────────────────────────── */
   /** 从可能夹带解释的文字里抠出第一个完整的 JSON 对象 */
   function extractJson(raw) {
@@ -396,6 +435,8 @@
     applyEdits,
     renderSpans,
     stats,
+    similarity,
+    compare,
     extractJson,
     parseReply,
   };

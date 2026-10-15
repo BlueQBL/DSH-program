@@ -39,9 +39,13 @@ function group(name, fn) {
 
 console.log('模式目录与参数');
 
-group('六种模式都在，键值齐备', () => {
-  eq(Modes.MODES.length, 6, '模式数量');
-  eq(Modes.listModeIds(), ['continue', 'rewrite', 'copywriting', 'email', 'summary', 'outline'], '模式顺序');
+group('十个板块都在，键值齐备', () => {
+  eq(Modes.MODES.length, 10, '板块数量');
+  eq(
+    Modes.listModeIds(),
+    ['continue', 'rewrite', 'copywriting', 'email', 'summary', 'outline', 'academic', 'report', 'fiction', 'translate'],
+    '板块顺序（内置的在前，自定义模板追加在后面）'
+  );
   Modes.MODES.forEach((m) => {
     ok(m.name && m.mark && m.tagline, `${m.id} 有名称/单字/一句话说明`);
     eq(m.mark.length, 1, `${m.id} 的稿签单字只有一个字`);

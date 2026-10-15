@@ -241,6 +241,59 @@ group('类型表覆盖提示词里允许的全部类型', () => {
   types.forEach((t) => ok(P.TYPES[t].label && P.TYPES[t].mark, `${t} 有中文名与标记`));
 });
 
+console.log('两稿对比');
+
+group('对比：差异条目、相似度、增删字数', () => {
+  const r = P.compare(SRC, DST);
+  ok(r.edits.length >= 2, `抓到 ${r.edits.length} 处不同`);
+  eq(r.identical, false, '不是同一份');
+  ok(r.similarity > 0.5 && r.similarity < 1, `相似度落在合理区间（${(r.similarity * 100).toFixed(0)}%）`);
+  ok(r.removedChars > 0, '有被删改的字');
+  ok(r.addedChars > 0, '有新增的字');
+  eq(r.before, SRC, '带上左稿全文');
+  eq(r.after, DST, '带上右稿全文');
+  eq(P.applyEdits(SRC, r.edits, new Set(r.edits.map((e) => e.id))), DST, '对比给出的改动能把左稿还原成右稿');
+  r.edits.forEach((e) => {
+    eq(e.id.slice(0, 1), 'c', 'id 有独立前缀（不与朱批条目混用）');
+    ok(P.TYPES[e.type], '给出了可读的类型');
+  });
+});
+
+group('对比：一模一样时明确说没有差异', () => {
+  const same = P.compare(SRC, SRC);
+  eq(same.identical, true, '标记为完全相同');
+  eq(same.edits, [], '没有差异条目');
+  eq(same.similarity, 1, '相似度 100%');
+  eq(same.addedChars, 0, '没有新增');
+  eq(same.removedChars, 0, '没有删改');
+});
+
+group('对比：长度悬殊与空文本都不崩', () => {
+  const grew = P.compare('短短一句。', '短短一句。后面又补了很长很长的一段内容，用来测试长度悬殊时的表现。');
+  eq(grew.identical, false, '不一样');
+  ok(grew.similarity < 1 && grew.similarity > 0, '相似度在 0 到 1 之间');
+  eq(grew.removedChars, 0, '只增不删时删改字数为 0');
+
+  const empty = P.compare('', '凭空出现的一段话。');
+  eq(empty.removedChars, 0, '空对非空：没有删改');
+  ok(empty.addedChars > 0, '全是新增');
+  eq(P.compare('', '').similarity, 1, '两个空串算完全相同');
+  eq(P.compare('', '').identical, true, '两个空串完全一致');
+});
+
+group('对比与朱批用同一套差异引擎，口径一致', () => {
+  const a = '他说的非常非常对。';
+  const b = '他说得很对。';
+  const compared = P.compare(a, b).edits;
+  const merged = P.mergeEdits(a, [], b);
+  eq(
+    compared.map((e) => [e.start, e.end, e.before, e.after]),
+    merged.map((e) => [e.start, e.end, e.before, e.after]),
+    '两处给出的位置与文段完全相同'
+  );
+  eq(P.compare(a, b).stats.total, P.stats(merged).total, '统计口径也一致');
+});
+
 const total = pass + failures.length;
 console.log(`\n通过 ${pass}/${total}`);
 if (failures.length) {

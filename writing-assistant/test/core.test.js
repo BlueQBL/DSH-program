@@ -368,7 +368,9 @@ group('记录读回状态：朱批也能还原', () => {
   eq(back.polish.accepted, ['e1'], '采纳情况还原');
 });
 
-group('示例素材：六种模式都有两条，且各不相同', () => {
+const EXAMPLES_CONTINUE = Core.EXAMPLES.continue;
+
+group('示例素材：十个板块各两条，互不重复', () => {
   const seen = new Set();
   Modes.MODES.forEach((mode) => {
     const a = Core.exampleOf(mode.id, 0);
@@ -379,7 +381,32 @@ group('示例素材：六种模式都有两条，且各不相同', () => {
     seen.add(a);
     seen.add(b);
   });
-  ok(seen.size >= 10, '示例之间不重复');
+  eq(seen.size, Modes.MODES.length * 2, '十个板块共 20 条示例，彼此不重复（没拿别的板块的凑数）');
+  Modes.MODES.forEach((mode) => {
+    ok(Core.EXAMPLES[mode.id], `${mode.name} 有自己的示例（不是兜底）`);
+  });
+
+  // 不存在的板块 id 会退回第一个板块，示例也跟着退回（人都到不了那个板块）
+  eq(Core.exampleOf('tpl_不存在', 0), EXAMPLES_CONTINUE[0], '不存在的板块退回内置板块的示例');
+});
+
+group('自定义模板的示例：作者写了就用，没写就从提示词推结构', () => {
+  Modes.setCustomTemplates([
+    { id: 't_full', name: '周会纪要', mark: '会', system: '写周会纪要。', example: '议题一：预算\n议题二：排期' },
+    { id: 't_derive', name: '产品周报', mark: '周', system: '你是资深产品经理，只输出周报正文，分进展、风险、下周计划三块。' },
+    { id: 't_plain', name: '散记', mark: '记', system: '你是一位散文作家，写一段有画面感的文字。' },
+  ]);
+
+  eq(Core.exampleOf('tpl_t_full', 0), '议题一：预算', '作者写的示例按行拆开');
+  eq(Core.exampleOf('tpl_t_full', 1), '议题二：排期', '第二条也在');
+  eq(Core.exampleOf('tpl_t_derive', 0), '进展：…　风险：…　下周计划：…', '没写示例时按提示词推出结构');
+  eq(Core.exampleOf('tpl_t_derive', 1), '', '推出来的只有一条，别硬凑第二条');
+  eq(Core.exampleOf('tpl_t_plain', 0), '', '推不出来就返回空（宁可少给，不瞎编）');
+  eq(Core.deriveExample(''), '', '空提示词不炸');
+
+  // 别忘了恢复，后面几组还指望内置板块
+  Modes.setCustomTemplates([]);
+  ok(Core.exampleOf('fiction', 0).includes('便利店'), '内置板块的示例不受影响');
 });
 
 console.log('本地留档');
@@ -398,7 +425,7 @@ console.log('本地留档');
     const list = await store.list({});
     eq(list.total, 1, '列表里有一篇');
     eq(list.items[0].versions, 2, '摘要有版本数');
-    ok(list.modes.length === 6, '带回各模式计数');
+    ok(list.modes.length === 10, '带回各板块计数');
     ok(storage.dump()['writing-assistant/v1'].includes(rec.id), '确实写进了本地存储');
   });
 
@@ -450,6 +477,28 @@ console.log('本地留档');
     eq(await store.count(), Core.LOCAL_CAP, '留档篇数被压在上限内');
     eq(await store.get(ids[0]), null, '最旧的被丢掉');
     ok(await store.get(ids[ids.length - 1]), '最新的留着');
+  });
+
+  await agroup('本地留档：星标不会被上限清掉', async () => {
+    const small = fakeStorage();
+    const store = Core.createLocalStore(small);
+    const make = async (label) => {
+      const s = Core.createState({ mode: 'outline', material: label });
+      let run = Core.beginRun(s, [{ index: 0, angleId: 'a', angleLabel: '甲' }]);
+      run = Core.finishVersion(run, 0, { text: label + '正文' });
+      return (await store.create(Core.toRecord(run))).id;
+    };
+
+    const ids = [];
+    for (let i = 0; i < Core.LOCAL_CAP; i += 1) ids.push(await make('第 ' + i + ' 篇'));
+    await store.update(ids[0], { starred: true });   // 把最旧那篇标星
+    await make('新来的甲');
+    await make('新来的乙');
+
+    eq(await store.count(), Core.LOCAL_CAP, '篇数仍被压在上限内');
+    ok(await store.get(ids[0]), '星标的最旧那篇被留住');
+    eq(await store.get(ids[1]), null, '清掉的是没星标的次旧那篇');
+    eq((await store.list({ starred: true })).total, 1, '「只看星标」筛得到它');
   });
 
   await agroup('本地留档：存储坏了也不崩', async () => {

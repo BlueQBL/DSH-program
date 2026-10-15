@@ -12,11 +12,12 @@
     isNode ? require('../lib/modes.js') : root.WriterModes,
     isNode ? require('../lib/polisher.js') : root.WriterPolisher,
     isNode ? require('../lib/mock-writer.js') : root.WriterMock,
-    isNode ? require('./core.js') : root.WriterCore
+    isNode ? require('./core.js') : root.WriterCore,
+    isNode ? require('../lib/template.js') : root.WriterTemplate
   );
   if (isNode) module.exports = api;
   if (root) root.WriterApi = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (Modes, Polisher, Mock, Core) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (Modes, Polisher, Mock, Core, Template) {
   'use strict';
 
   const HEALTH_TIMEOUT = 2500;
@@ -103,11 +104,16 @@
       base,
 
       /** 起稿：SSE 逐字推进，多个版本并行 */
-      async generate(params, material, handlers, signal, model) {
+      async generate(params, material, handlers, signal, model, template) {
         const res = await fetch(base + '/api/generate', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ params: Modes.normalizeParams(params), material, model: model || undefined }),
+          body: JSON.stringify({
+            params: Modes.normalizeParams(params),
+            material,
+            model: model || undefined,
+            template: template || undefined,
+          }),
           signal,
         }).catch((err) => {
           throw friendly(err);
@@ -165,6 +171,41 @@
 
       async testEngine() {
         return getJson('/api/engine/test');
+      },
+
+      /** 自定义模板库 */
+      templates: {
+        async list(opts) {
+          const q = new URLSearchParams();
+          if (opts && opts.q) q.set('q', opts.q);
+          const suffix = q.toString() ? '?' + q.toString() : '';
+          return getJson('/api/templates' + suffix);
+        },
+        async create(template) {
+          const res = await fetch(base + '/api/templates', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ template }),
+          });
+          if (!res.ok) throw await readError(res);
+          return (await res.json()).template;
+        },
+        async update(id, patch) {
+          const res = await fetch(base + '/api/templates/' + encodeURIComponent(id), {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ template: patch }),
+          });
+          if (res.status === 404) return null;
+          if (!res.ok) throw await readError(res);
+          return (await res.json()).template;
+        },
+        async remove(id) {
+          const res = await fetch(base + '/api/templates/' + encodeURIComponent(id), { method: 'DELETE' });
+          if (res.status === 404) return false;
+          if (!res.ok) throw await readError(res);
+          return true;
+        },
       },
 
       history: {
@@ -249,9 +290,10 @@
       },
       base: '',
 
-      async generate(params, material, handlers, signal) {
+      async generate(params, material, handlers, signal, model, template) {
         const resolved = Modes.normalizeParams(params);
         const mode = Modes.getMode(resolved.mode);
+        const isCustom = Modes.isCustomMode(mode);
         const plan = [];
         for (let i = 0; i < resolved.versions; i += 1) {
           const angle = Modes.angleOf(mode, i);
@@ -270,7 +312,10 @@
         }
 
         // 逐字上屏，节奏与真实模型一致，界面上看不出区别
-        const texts = plan.map((p) => Mock.compose(resolved, material, p.index));
+        // 自定义模板与翻译没有离线语料：交给引擎返回诚实的说明（它自己会判断）。
+        // 模板名要放进 params —— 离线的说明里得写出是哪个模板做不了。
+        const engineParams = isCustom ? Object.assign({}, resolved, { templateName: mode.name }) : resolved;
+        const texts = plan.map((p) => Mock.compose(engineParams, material, p.index));
         const sent = plan.map(() => 0);
         let alive = true;
         while (alive) {
@@ -333,6 +378,9 @@
           note: this.info.engine.note,
         };
       },
+
+      /** 本地模式的模板库存在浏览器里（表单一关也能留着） */
+      templates: Core.createLocalTemplateStore(storage),
 
       history,
     };

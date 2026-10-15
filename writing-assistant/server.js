@@ -21,6 +21,8 @@ const Prompt = require('./lib/prompt.js');
 const Polisher = require('./lib/polisher.js');
 const Llm = require('./lib/llm.js');
 const HistoryStore = require('./lib/store.js');
+const Template = require('./lib/template.js');
+const TemplateStore = require('./lib/template-store.js');
 
 const ROOT = __dirname;
 const VERSION = require('./package.json').version;
@@ -35,6 +37,20 @@ const HEARTBEAT_MS = 15000;
 const config = Llm.readConfig();
 const models = Llm.createModelRegistry(config, { log: (line) => console.log('  ' + line) });
 const history = HistoryStore.createStore({ dir: path.join(DATA_DIR, 'history') });
+const templates = TemplateStore.createTemplateStore({ dir: path.join(DATA_DIR, 'templates') });
+
+/**
+ * 把磁盘上的模板注册成板块。
+ *
+ * 为什么服务端也要注册：留档里存的是板块 id（`tpl_xxx`），而 Modes 对不认识的 id
+ * 会退回第一个板块 —— 不注册的话，自定义模板写的稿子在列表里会被显示成「文章续写」。
+ * 所以模板一变就重新注册。
+ */
+async function syncTemplates() {
+  const list = await templates.all();
+  Modes.setCustomTemplates(list);
+  return list.length;
+}
 
 /* ── 离线引擎按需加载：没有这个文件时服务照样能起，只是报错更清楚 ── */
 let offlineEngine = null;
@@ -167,14 +183,16 @@ function sseFatal(res, req, message) {
 
 
 /* ── 生成：一个版本 ─────────────────────────────────────── */
-async function runVersion(params, material, index, sse, signal, model) {
+async function runVersion(params, material, index, sse, signal, model, template) {
   const mode = Modes.getMode(params.mode);
   const angle = Modes.angleOf(mode, index);
+  // 自定义模板的提示词由浏览器带来（模板库在服务端，但生成不依赖它）
+  const templateName = template && template.name ? String(template.name).slice(0, 24) : '';
 
   if (config.live) {
     let buffer = '';
     try {
-      const messages = Prompt.buildMessages(params, material, index);
+      const messages = Prompt.buildMessages(params, material, index, template);
       for await (const evt of Llm.streamChat({
         apiKey: config.apiKey,
         baseUrl: config.baseUrl,
@@ -205,7 +223,7 @@ async function runVersion(params, material, index, sse, signal, model) {
 
   // 离线引擎：整篇先写好，再按节奏吐字，做出与真实模型一致的逐字观感
   const engine = loadOfflineEngine();
-  const text = String(engine.compose(params, material, index) || '').trim();
+  const text = String(engine.compose(params, material, index, { templateName }) || '').trim();
   let sent = 0;
   while (sent < text.length) {
     if (sse.closed || signal.aborted) return null;
@@ -230,7 +248,6 @@ async function handleGenerate(req, res) {
   if (!material.input.trim()) {
     return json(res, 400, { ok: false, message: '先写点什么再起稿' });
   }
-
   const ctrl = new AbortController();
   req.on('close', () => ctrl.abort());
 
@@ -245,6 +262,17 @@ async function handleGenerate(req, res) {
 
   // 页面上选的模型只管这一次请求；不在可用列表里就退回默认，并在界面上说明
   const picked = models.resolveModel(body.model);
+  // 自定义模板的提示词随请求带来（长度在这里收口，别让提示词无上限）
+  const template = body.template && typeof body.template === 'object'
+    ? {
+        id: String(body.template.id || '').slice(0, 40),
+        name: String(body.template.name || '').slice(0, Modes.LIMITS.templateNameMax),
+        system: String(body.template.system || '').slice(0, Modes.LIMITS.templateSystemMax),
+        outputHint: String(body.template.outputHint || '').slice(0, Modes.LIMITS.templateNoteMax),
+      }
+    : null;
+  // 离线引擎要靠模板名把「离线做不了这个模板」那段说明写对（写不出名字时会退回「自定义模板」）
+  if (template && template.name) params.templateName = template.name;
 
   sse.send('meta', {
     requestId: 'r' + startedAt.toString(36),
@@ -254,12 +282,15 @@ async function handleGenerate(req, res) {
     modelNote: picked.note,
     mode: params.mode,
     params,
+    template: template ? { id: template.id, name: template.name } : null,
     versions: plan,
   });
 
   let results;
   try {
-    results = await Promise.all(plan.map((p) => runVersion(params, material, p.index, sse, ctrl.signal, picked.model)));
+    results = await Promise.all(
+      plan.map((p) => runVersion(params, material, p.index, sse, ctrl.signal, picked.model, template))
+    );
   } catch (err) {
     sse.send('fatal', { message: err.message });
     sse.end();
@@ -435,6 +466,75 @@ async function handleHistory(req, res, url, method) {
   return json(res, 405, { ok: false, message: '不支持的方法' });
 }
 
+/* ── 自定义模板 ─────────────────────────────────────────── */
+/**
+ * 模板库。生成时用的是浏览器随请求带来的提示词，这里的落盘是为了「关掉浏览器还在」，
+ * 顺带让服务端能把模板注册成板块（留档里显示的名字与稿签才对得上）。
+ */
+async function handleTemplates(req, res, url, method) {
+  const parts = url.pathname.split('/').filter(Boolean); // ['api','templates', id?]
+  const id = parts[2] ? decodeURIComponent(parts[2]) : '';
+
+  if (method === 'GET' && id) {
+    const tpl = await templates.get(id);
+    if (!tpl) return json(res, 404, { ok: false, message: '这个模板已经不在了' });
+    return json(res, 200, { ok: true, template: tpl });
+  }
+
+  if (method === 'GET') {
+    const out = await templates.list({ q: url.searchParams.get('q') || '' });
+    return json(res, 200, {
+      ok: true,
+      total: out.total,
+      items: out.items,
+      templates: out.records,
+      limit: Template.LIMITS.count,
+    });
+  }
+
+  if (method === 'POST') {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch (err) {
+      return json(res, 400, { ok: false, message: err.message });
+    }
+    const tpl = body.template || body;
+    const check = Template.validateTemplate(tpl);
+    if (!check.ok) return json(res, 400, { ok: false, field: check.field, message: check.message });
+    try {
+      const saved = await templates.create(check.template);
+      await syncTemplates();
+      return json(res, 201, { ok: true, template: saved });
+    } catch (err) {
+      return json(res, 400, { ok: false, message: err.message });
+    }
+  }
+
+  if (method === 'PATCH') {
+    if (!id) return json(res, 400, { ok: false, message: '缺少模板 id' });
+    const body = await readBody(req).catch(() => ({}));
+    const merged = Object.assign({}, await templates.get(id), body.template || body);
+    if (!merged.id) return json(res, 404, { ok: false, message: '这个模板已经不在了' });
+    const check = Template.validateTemplate(merged);
+    if (!check.ok) return json(res, 400, { ok: false, field: check.field, message: check.message });
+    const saved = await templates.update(id, check.template);
+    if (!saved) return json(res, 404, { ok: false, message: '这个模板已经不在了' });
+    await syncTemplates();
+    return json(res, 200, { ok: true, template: saved });
+  }
+
+  if (method === 'DELETE') {
+    if (!id) return json(res, 400, { ok: false, message: '缺少模板 id' });
+    const removed = await templates.remove(id);
+    if (!removed) return json(res, 404, { ok: false, message: '这个模板已经不在了' });
+    await syncTemplates();
+    return json(res, 200, { ok: true, id });
+  }
+
+  return json(res, 405, { ok: false, message: '不支持的方法' });
+}
+
 /* ── 引擎自检 ───────────────────────────────────────────── */
 async function handleEngineTest(req, res) {
   if (!config.live) {
@@ -506,7 +606,7 @@ const DENY_DIRS = ['data', 'test', 'node_modules'];
  * 但上游接入与留档落盘只在服务端跑：浏览器既不需要，也就不必让它读走
  * （读走本身不会漏 Key，但「浏览器能取到的东西里不含鉴权代码」是一条值得守住的不变量）。
  */
-const DENY_FILES = ['server.js', 'lib/llm.js', 'lib/store.js'];
+const DENY_FILES = ['server.js', 'lib/llm.js', 'lib/store.js', 'lib/template-store.js'];
 
 function serveStatic(req, res, url) {
   const rel = url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname).replace(/^\/+/, '');
@@ -574,6 +674,9 @@ const server = http.createServer(async (req, res) => {
       });
     }
     if (url.pathname === '/api/models' && method === 'GET') return handleModels(req, res, url);
+    if (url.pathname === '/api/templates' || url.pathname.startsWith('/api/templates/')) {
+      return handleTemplates(req, res, url, method);
+    }
     if (url.pathname === '/api/engine/test' && method === 'GET') return handleEngineTest(req, res);
     if (url.pathname === '/api/generate' && method === 'POST') return handleGenerate(req, res);
     if (url.pathname === '/api/polish' && method === 'POST') return handlePolish(req, res);
@@ -615,6 +718,7 @@ function banner(actualPort, probed) {
     console.log('  别家平台（中转、聚合）的 Key 还要设地址：AI_BASE_URL 或 OPENAI_BASE_URL（可选 AI_MODEL / OPENAI_MODEL）');
   }
   console.log('  留档目录：' + path.join(DATA_DIR, 'history'));
+  console.log('  模板目录：' + path.join(DATA_DIR, 'templates'));
   console.log('  按 Ctrl+C 停止。');
 }
 
@@ -644,18 +748,31 @@ function start(options) {
     server.once('listening', async () => {
       server.removeListener('error', onError);
       const actual = server.address().port;
-      history.ready().catch((err) => console.warn('[history] 初始化失败：' + err.message));
+
+      // 顺序有讲究：先把模板注册成板块，再加载留档 —— 留档里的板块 id
+      // （tpl_xxx）要能解析出对应的名字与稿签，否则自定义模板写的稿子会被显示成「文章续写」。
+      let templateCount = 0;
+      try {
+        templateCount = await syncTemplates();
+      } catch (err) {
+        console.warn('[templates] 初始化失败：' + err.message);
+      }
+      await history.ready().catch((err) => console.warn('[history] 初始化失败：' + err.message));
 
       let probed = null;
       if (config.live && opt.probe !== false) {
         if (opt.banner !== false) console.log('  正在探测可用的上游模型……');
         probed = await models.probe().catch((err) => ({ ok: false, note: err.message }));
       }
-      if (opt.banner !== false) banner(actual, probed);
+      if (opt.banner !== false) {
+        if (templateCount) console.log(`  自定义模板：${templateCount} 个（已注册成板块）`);
+        banner(actual, probed);
+      }
       resolve({
         port: actual,
         url: `http://${HOST}:${actual}/`,
         models,
+        templates,
         probe: probed,
         close: () => new Promise((r) => server.close(r)),
       });
@@ -678,5 +795,5 @@ if (require.main === module) {
   }
 }
 
-module.exports = { server, start, config, models, history, ROOT, DATA_DIR, sseFatal };
+module.exports = { server, start, config, models, templates, history, syncTemplates, ROOT, DATA_DIR, sseFatal };
 

@@ -95,12 +95,16 @@ group('README 里的端口与默认值一致', () => {
 });
 
 group('README 里的数字与代码一致', () => {
-  eq(Modes.MODES.length, 6, '代码里是六种模式');
-  ok(README.includes('六种：'), 'README 说六种');
+  eq(Modes.MODES.length, 10, '代码里是十个板块');
+  ok(README.includes('十种') || README.includes('十个板块'), 'README 说清了板块数量');
   eq(StoreLimits.records, 800, '代码里留档上限 800');
   ok(README.includes('最多 800 篇'), 'README 说 800 篇');
   eq(Modes.LIMITS.versionsMax, 4, '代码里最多四稿');
-  ok(README.includes('一次生成多个版本 | 1–4 稿'), 'README 说 1–4 稿');
+  ok(README.includes('1–4 稿'), 'README 说 1–4 稿');
+  // 每个板块都真的能出满四稿：角度数不能少于上限，否则「1-4 稿」就是空话
+  Modes.MODES.filter((m) => !m.custom).forEach((m) => {
+    eq(Modes.angleCount(m.id), Modes.LIMITS.versionsMax, `${m.name} 有 ${Modes.LIMITS.versionsMax} 个角度`);
+  });
   eq(Modes.LIMITS.customCharsMax, 2000, '自定义字数上限 2000');
   ok(README.includes('80–2000 字'), 'README 说 80–2000 字');
 });

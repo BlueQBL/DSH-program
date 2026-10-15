@@ -111,7 +111,7 @@ function draft(over) {
     eq(list.items[0].text, undefined, '摘要里没有正文');
     eq(list.items[0].modeName, '内容改写', '带模式中文名');
     eq(list.items[0].mark, '改', '带稿签单字');
-    ok(list.modes.length === 6, '返回各模式的篇数');
+    ok(list.modes.length === 10, '返回各板块的篇数');
     ok(list.modes.find((m) => m.id === 'rewrite').count >= 3, '改写模式的计数正确');
   });
 
@@ -295,6 +295,35 @@ function draft(over) {
       eq(await small.count(), 3, '只留三篇');
       eq(await small.get(ids[0]), null, '最旧的被清掉');
       ok(await small.get(ids[4]), '最新的留着');
+    } finally {
+      Store.LIMITS.records = oldLimit;
+    }
+  });
+
+  await group('星标不会被自动清理：最旧的也留得住，被清的是次旧的', async () => {
+    const starDir = path.join(ROOT, 'starred');
+    const oldLimit = Store.LIMITS.records;
+    Store.LIMITS.records = 3;
+    try {
+      const small = Store.createStore({ dir: starDir });
+      const ids = [];
+      for (let i = 0; i < 3; i += 1) {
+        const rec = await small.create(draft({ material: { input: '第 ' + i + ' 篇' } }));
+        ids.push(rec.id);
+        await new Promise((r) => setTimeout(r, 2));
+      }
+      // 把最旧的那篇标星，再写入一篇把它挤出上限
+      await small.update(ids[0], { starred: true });
+      await new Promise((r) => setTimeout(r, 2));
+      await small.create(draft({ material: { input: '新来的' } }));
+
+      eq(await small.count(), 3, '仍然只留三篇');
+      ok(await small.get(ids[0]), '最旧的星标稿被留住了（它是星标）');
+      eq(await small.get(ids[1]), null, '于是清掉的是没星标的次旧那篇');
+      ok(await small.get(ids[2]), '较新的没星标稿也还在（还没轮到它）');
+
+      const starred = await small.list({ starred: true });
+      eq(starred.total, 1, '「只看星标」筛得到它');
     } finally {
       Store.LIMITS.records = oldLimit;
     }

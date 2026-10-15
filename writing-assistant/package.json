@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "test": "node test/modes.test.js && node test/polisher.test.js && node test/mock-writer.test.js && node test/store.test.js && node test/core.test.js && node test/models.test.js && node test/server.test.js && node test/upstream.test.js && node test/readme.test.js && node scripts/check-wiring.js",
+    "test": "node test/modes.test.js && node test/polisher.test.js && node test/mock-writer.test.js && node test/store.test.js && node test/templates.test.js && node test/core.test.js && node test/models.test.js && node test/server.test.js && node test/ui.test.js && node test/upstream.test.js && node test/readme.test.js && node scripts/check-wiring.js",
     "test:modes": "node test/modes.test.js",
     "test:polisher": "node test/polisher.test.js",
     "test:writer": "node test/mock-writer.test.js",
@@ -19,7 +19,9 @@
     "test:docs": "node test/readme.test.js",
     "check:wiring": "node scripts/check-wiring.js",
     "fake:upstream": "node scripts/fake-upstream.js",
-    "shot": "node scripts/capture.js"
+    "shot": "node scripts/capture.js",
+    "test:templates": "node test/templates.test.js",
+    "test:ui": "node test/ui.test.js"
   },
   "engines": {
     "node": ">=18.17"
