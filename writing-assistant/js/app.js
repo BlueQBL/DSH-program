@@ -11,6 +11,8 @@
   const Core = window.WriterCore;
   const Polisher = window.WriterPolisher;
   const ApiMod = window.WriterApi;
+  const AuthMod = window.WriterAuth;
+  const AuthRules = window.WriterAuthRules;
 
   const $ = (sel, root) => (root || document).querySelector(sel);
   const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
@@ -66,6 +68,7 @@
     records: [],
     modes: [],
     total: 0,
+    localElsewhere: 0,  // 登录之后：没登录时写的那一桶还剩几篇（抽屉里会提一句）
     openedId: '',
     model: '',          // 页面上选的模型；空表示用服务端探测出来的默认
     models: [],
@@ -798,6 +801,10 @@
     renderEmptyState();
     if (state.versions.length) dom.drafts.classList.remove('drafts--empty');
 
+    // 一稿占满、两稿各一半、三稿三分之一、四稿四分之一 —— 列数跟着稿数走。
+    // 写进 data-count 让 CSS 决定栏宽：稿少时稿纸更宽，正文不用挤在一列里断行。
+    dom.drafts.dataset.count = String(state.versions.length);
+
     // 顶部工具行：有稿子就能对比；只有一稿时也能和原稿比
     const compareCount = compareOptions().length;
     dom.draftsBar.hidden = state.versions.length === 0;
@@ -1133,6 +1140,7 @@
       view.records = data.items || [];
       view.total = data.total || 0;
       view.modes = data.modes || [];
+      view.localElsewhere = data.localElsewhere || 0;
       renderHistory();
       const count = (data.modes || []).reduce((sum, m) => sum + m.count, 0);
       dom.historyCount.textContent = String(count);
@@ -1141,6 +1149,32 @@
       view.records = [];
       renderHistory(err.message);
     }
+  }
+
+  /**
+   * 登录之后抽屉里那句「没登录时写的 N 篇还在」。
+   * 为什么要有：留档按账号分开是登录的意义所在，但第一次登录的人只会看到
+   * 「我的留档怎么空了」—— 说清它们在哪儿，再给一个显式的认领按钮。
+   */
+  function claimHint() {
+    return h('p', { class: 'drawer__empty' }, [
+      h('span', { text: `没登录时写的 ${view.localElsewhere} 篇还在「本地模式」那一桶里。` }),
+      h('button', {
+        type: 'button',
+        class: 'link-btn',
+        text: '认领到这个账号',
+        title: '把它们记到这个账号名下（只动这一桶，不删不改别的）',
+        onclick: async () => {
+          try {
+            const claimed = await api.history.claim();
+            await refreshHistory();
+            toast(claimed ? `认领了 ${claimed} 篇` : '没有可认领的稿子');
+          } catch (err) {
+            toast('认领失败：' + ((err && err.message) || ''), { level: 'error' });
+          }
+        },
+      }),
+    ]);
   }
 
   function renderHistory(errorText) {
@@ -1174,6 +1208,7 @@
             : '还没有留档。起一次稿，结果会自动存进来。',
         })
       );
+      if (view.localElsewhere) list.append(claimHint());
       return;
     }
 
@@ -1230,6 +1265,8 @@
         ])
       );
     });
+
+    if (view.localElsewhere) list.append(claimHint());
   }
 
   async function loadRecord(id) {
@@ -1295,6 +1332,442 @@
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+
+  /* ── 账号 ───────────────────────────────────────────────── */
+  /**
+   * 账号是**可选**的：不登录照样写、照样起稿、照样留档（存在「本地模式」那一桶）。
+   * 登录只是把留档按人分开，顺带给你一个名字和头像。
+   *
+   * 表单的四张脸（login / register / name / password）共用同一个浮层：
+   * 字段的显示与隐藏、按钮文字、提示语都从 authState.form 推出来。
+   * 不另写四套界面 —— 那样最容易出现「改密码的框里还留着登录的校验」。
+   */
+  const AUTH_FORMS = {
+    login: { title: '登录', submit: '登录', hint: '登录之后看到的是这个账号自己的留档' },
+    register: {
+      title: '注册',
+      submit: '注册并登录',
+      hint: '名字 2–20 个字，密码至少 8 位；不同账号的留档互不可见',
+    },
+    name: { title: '改名字', submit: '保存名字', hint: '名字只是显示用的，改它不用密码' },
+    password: {
+      title: '改密码',
+      submit: '保存新密码',
+      hint: '改完密码，别处开着的页面会立刻失效；这一台会继续用着',
+    },
+    recover: {
+      title: '用恢复码重置密码',
+      submit: '重置并登录',
+      hint: '恢复码是注册时给你的那一串（12 位）。重置之后旧的作废，会给你一串新的',
+    },
+    'code-shown': { title: '记下这串恢复码', submit: '抄好了', hint: '' },
+  };
+
+  const authState = {
+    user: null,
+    registerOpen: true,
+    form: 'login',
+    note: '',
+    busy: false,
+    menuOpen: false,
+    recent: [],
+    avatarDraft: null,
+  };
+
+  /** 报头那一小块：没登录是「登录 / 注册」，登录了是头像 + 名字 */
+  function renderAccount() {
+    const user = authState.user;
+    dom.accountSignin.hidden = Boolean(user);
+    dom.accountSelf.hidden = !user;
+    dom.accountMenu.hidden = !(authState.menuOpen && Boolean(user));
+    dom.accountSelf.setAttribute('aria-expanded', String(authState.menuOpen && Boolean(user)));
+    dom.accountNote.hidden = !authState.note;
+    dom.accountNote.textContent = authState.note || '';
+    dom.account.title = user ? `已登录：${user.name}` : '登录之后留档按账号分开；不登录也能用';
+    if (user) {
+      dom.accountName.textContent = user.name;
+      AuthMod.paintAvatar(dom.accountAvatar, user);
+      dom.accountMenuHead.textContent = `${user.name} · 留档只算这个账号的`;
+    } else {
+      dom.accountName.textContent = '';
+      dom.accountMenuHead.textContent = '';
+    }
+  }
+
+  /** 记住这个名字，下次点一下就能填上（只存名字，不存密码） */
+  function rememberName(name) {
+    authState.recent = AuthMod.writeRecentAccounts(
+      AuthMod.rememberAccount(authState.recent, name),
+      window.localStorage
+    );
+  }
+
+  /**
+   * 换主人 = 换了一桶留档。
+   * 所以这里要清掉「当前打开的那篇」（savedId 指向的稿子已经不属于你了），
+   * 再把抽屉里的列表重新拉一遍 —— 不清的话，采用哪一稿的同步会打到别人的 id 上。
+   */
+  function applyUser(user, message) {
+    const beforeId = (authState.user && authState.user.id) || '';
+    const nextId = (user && user.id) || '';
+    authState.user = user || null;
+    authState.note = '';
+    if (nextId !== beforeId) {
+      state = Object.assign({}, state, { savedId: '' });
+      view.openedId = '';
+      refreshHistory();
+    }
+    renderAccount();
+    if (message) toast(message);
+  }
+
+  /** 票过期了（改过密码或到了 30 天）：说清楚，别装作还登着 */
+  function handleAuthLost() {
+    if (!authState.user) return;
+    authState.user = null;
+    authState.note = '登录已过期（改过密码或到了 30 天）。重新登录就能接着写 —— 留档一篇都没丢。';
+    state = Object.assign({}, state, { savedId: '' });
+    view.openedId = '';
+    renderAccount();
+    refreshHistory();
+  }
+
+  function showAuthError(text) {
+    dom.authError.textContent = text || '';
+    dom.authError.hidden = !text;
+    if (text) dom.authOk.hidden = true;
+  }
+
+  function showAuthOk(text) {
+    dom.authOk.textContent = text || '';
+    dom.authOk.hidden = !text;
+    if (text) dom.authError.hidden = true;
+  }
+
+  function renderRecentAccounts() {
+    clear(dom.authRecent);
+    if (authState.form === 'name' || authState.form === 'password') return;
+    const list = AuthMod.matchRecentAccounts(authState.recent, dom.authName.value);
+    list.forEach((item) => {
+      dom.authRecent.append(
+        h('button', {
+          type: 'button',
+          class: 'auth-recent__item',
+          text: item.name,
+          title: `用「${item.name}」登录`,
+          onclick: () => {
+            dom.authName.value = item.name;
+            renderRecentAccounts();
+            dom.authPassword.focus();
+          },
+        })
+      );
+    });
+  }
+
+  /** 四张脸共用这一个表单：只改「哪些字段露出来」和几句提示 */
+  function renderAuthForm() {
+    const form = authState.form;
+    const copy = AUTH_FORMS[form] || AUTH_FORMS.login;
+    const issued = form === 'code-shown';
+    const changingPassword = form === 'password';
+    const recovering = form === 'recover';
+    const wantsName = form !== 'password' && !issued;
+    const wantsPassword = form === 'login' || form === 'register' || changingPassword;
+    const wantsNew = changingPassword || recovering;
+    const wantsConfirm = form === 'register' || changingPassword || recovering;
+
+    dom.authTitle.textContent = copy.title;
+    dom.authSubmit.textContent = copy.submit;
+    dom.authHint.textContent = copy.hint;
+
+    dom.authTabs.hidden = !(authState.registerOpen && (form === 'login' || form === 'register'));
+    dom.authTabLogin.setAttribute('aria-selected', String(form === 'login'));
+    dom.authTabRegister.setAttribute('aria-selected', String(form === 'register'));
+
+    dom.authNameField.hidden = !wantsName;
+    dom.authNameLabel.textContent = form === 'name' ? '新名字' : '名字';
+
+    dom.authPasswordField.hidden = !wantsPassword;
+    dom.authPasswordLabel.textContent = changingPassword ? '原密码' : '密码';
+    dom.authPassword.setAttribute('autocomplete', form === 'register' ? 'new-password' : 'current-password');
+
+    dom.authCodeField.hidden = !recovering;
+
+    dom.authNewField.hidden = !wantsNew;
+    dom.authNewLabel.textContent = '新密码';
+
+    dom.authConfirmField.hidden = !wantsConfirm;
+    dom.authConfirmLabel.textContent = '再输一遍';
+
+    // 恢复码那一屏：整张卡片只剩「这串码 + 复制」，别的都收起来
+    dom.authCodeShown.hidden = !issued;
+    if (issued) dom.authCodeValue.textContent = authState.issuedCode;
+    dom.authRememberRow.hidden = changingPassword || recovering || issued;
+    dom.authActions.hidden = issued;
+    dom.authHint.hidden = issued;
+    dom.authForgot.hidden = issued || recovering || form === 'name' || changingPassword;
+    dom.authRecent.hidden = dom.authTabs.hidden || !authState.recent.length;
+    renderRecentAccounts();
+    showAuthError('');
+    dom.authOk.hidden = true;
+    if (issued) dom.authCodeCopy.focus();
+  }
+
+  function openAuth(form) {
+    if (!api || api.kind !== 'server') {
+      toast('登录要用本地服务：先运行 node server.js，再从 http://127.0.0.1:5260/ 打开', { level: 'warn' });
+      return;
+    }
+    authState.form = AUTH_FORMS[form] ? form : 'login';
+    authState.busy = false;
+    authState.menuOpen = false;
+    authState.recent = AuthMod.readRecentAccounts(window.localStorage);
+    dom.authName.value = authState.user && authState.form === 'login' ? authState.user.name : '';
+    dom.authPassword.value = '';
+    dom.authConfirm.value = '';
+    dom.authNew.value = '';
+    dom.authCode.value = '';
+    renderAccount();
+    renderAuthForm();
+    dom.authOverlay.hidden = false;
+    dom.authOverlay.setAttribute('aria-hidden', 'false');
+    if (authState.form === 'login' && authState.recent.length) dom.authPassword.focus();
+    else dom.authName.focus();
+  }
+
+  function closeAuth() {
+    dom.authOverlay.hidden = true;
+    dom.authOverlay.setAttribute('aria-hidden', 'true');
+  }
+
+  async function submitAuth() {
+    if (authState.busy) return;
+    const form = authState.form;
+    // 「恢复码那一屏」只有一个按钮：抄好了 → 关掉浮层
+    if (form === 'code-shown') {
+      closeAuth();
+      return;
+    }
+    const name = dom.authName.value.trim();
+    const password = dom.authPassword.value;
+    const confirm = dom.authConfirm.value;
+    const newPassword = dom.authNew.value;
+    const code = dom.authCode.value;
+    const checked = AuthMod.authFormError({
+      mode: form,
+      // 改密码时「名字」不是用户填的，是当前账号的（密码不能和名字一样这条要用到）
+      name: form === 'password' ? (authState.user && authState.user.name) || '' : name,
+      password,
+      confirm,
+      newPassword,
+      code,
+    });
+    if (checked) {
+      showAuthError(checked);
+      return;
+    }
+
+    authState.busy = true;
+    dom.authSubmit.disabled = true;
+    showAuthError('');
+    try {
+      if (form === 'login') {
+        const out = await api.auth.login({ name, password, remember: dom.authRemember.checked });
+        rememberName(out.user.name);
+        closeAuth();
+        applyUser(out.user, `已登录：${out.user.name}`);
+      } else if (form === 'register') {
+        const out = await api.auth.register({ name, password, remember: dom.authRemember.checked });
+        rememberName(out.user.name);
+        applyUser(out.user);
+        showIssuedCode(out.recoveryCode, `注册好了，欢迎 ${out.user.name}`);
+      } else if (form === 'recover') {
+        const out = await api.auth.recover({
+          name,
+          code,
+          newPassword,
+          remember: dom.authRemember.checked,
+        });
+        rememberName(out.user.name);
+        applyUser(out.user);
+        showIssuedCode(out.recoveryCode, `${out.user.name} 的密码重好了，也重新登录了`);
+      } else if (form === 'name') {
+        const before = (authState.user && authState.user.name) || '';
+        const out = await api.auth.rename(name);
+        authState.recent = AuthMod.writeRecentAccounts(
+          AuthMod.renameRememberedAccount(authState.recent, before, out.user.name),
+          window.localStorage
+        );
+        closeAuth();
+        applyUser(out.user, out.unchanged ? '名字没变' : `名字已改成「${out.user.name}」`);
+      } else {
+        const out = await api.auth.changePassword({
+          oldPassword: password,
+          newPassword,
+          remember: dom.authRemember.checked,
+        });
+        closeAuth();
+        applyUser(out.user, '密码改好了，这台机器不用重新登录');
+      }
+    } catch (err) {
+      showAuthError((err && err.message) || '没成功，稍后再试');
+    } finally {
+      authState.busy = false;
+      dom.authSubmit.disabled = false;
+    }
+  }
+
+  /**
+   * 恢复码只出现这一次，所以注册 / 找回成功之后**不直接关浮层**，
+   * 而是把这一串摆到用户面前，等他抄完点「抄好了」。
+   */
+  function showIssuedCode(code, message) {
+    if (message) toast(message);
+    if (!code) {
+      closeAuth();
+      return;
+    }
+    authState.issuedCode = code;
+    authState.form = 'code-shown';
+    renderAuthForm();
+  }
+
+  async function doLogout() {
+    authState.menuOpen = false;
+    const name = (authState.user && authState.user.name) || '';
+    try {
+      await api.auth.logout();
+    } catch {
+      // 票没作废也照样切回未登录：界面上绝不能装作还登着
+    }
+    applyUser(null, name ? `${name} 已退出登录` : '已退出登录');
+    authState.note = '';
+    renderAccount();
+  }
+
+  /** 进来先问一句「我是谁」——没登录也是正常状态（本地模式），不是错误 */
+  async function loadAuth() {
+    try {
+      const out = await api.auth.me();
+      authState.registerOpen = out.registerOpen !== false;
+      // 本地模式（直接打开 index.html）没有账号服务，这件事点按钮时说一句就够了，
+      // 不必在报头下面常驻一行说明
+      authState.note = api.kind === 'server' ? out.authError || '' : '';
+      authState.user = out.user || null;
+      if (authState.user) rememberName(authState.user.name);
+    } catch (err) {
+      authState.note = '读不到登录状态：' + ((err && err.message) || '');
+    }
+    renderAccount();
+  }
+
+  /* 换头像 */
+  function openAvatarPanel() {
+    if (!authState.user) return;
+    authState.menuOpen = false;
+    renderAccount();
+    authState.avatarDraft = AuthRules.normalizeAvatar(authState.user.avatar) || { kind: 'initial', color: null };
+    dom.avatarError.hidden = true;
+    dom.avatarUploadNote.textContent = 'png / jpg / webp，会先压到 128px 再传（一般十几 KB）';
+    renderAvatarPanel();
+    dom.avatarOverlay.hidden = false;
+    dom.avatarOverlay.setAttribute('aria-hidden', 'false');
+  }
+
+  function closeAvatarPanel() {
+    dom.avatarOverlay.hidden = true;
+    dom.avatarOverlay.setAttribute('aria-hidden', 'true');
+  }
+
+  function renderAvatarPanel() {
+    const user = authState.user || {};
+    const draft = authState.avatarDraft || { kind: 'initial', color: null };
+    dom.avatarPreviewName.textContent = user.name || '';
+    AuthMod.paintAvatar(dom.avatarPreview, Object.assign({}, user, { avatar: draft }));
+
+    const autoColor = AuthRules.avatarColorFor(AuthRules.nameKey(user.name || ''));
+    const emojiOn = draft.kind === 'emoji' ? draft.emoji : '';
+    clear(dom.avatarGrid);
+    AuthRules.AVATAR_EMOJI.forEach((emoji) => {
+      const on = emojiOn === emoji;
+      dom.avatarGrid.append(
+        h('button', {
+          type: 'button',
+          class: on ? 'avatar-choice avatar-choice--on' : 'avatar-choice',
+          text: emoji,
+          'aria-label': `用 ${emoji} 当头像`,
+          'aria-pressed': String(on),
+          onclick: () => {
+            authState.avatarDraft = { kind: 'emoji', emoji };
+            renderAvatarPanel();
+          },
+        })
+      );
+    });
+
+    const currentColor = draft.kind === 'initial' ? draft.color || autoColor : '';
+    clear(dom.avatarColors);
+    AuthRules.AVATAR_COLORS.forEach((color) => {
+      const on = currentColor === color;
+      dom.avatarColors.append(
+        h('button', {
+          type: 'button',
+          class: on ? 'avatar-swatch avatar-swatch--on' : 'avatar-swatch',
+          style: `background:${color}`,
+          'aria-label': `首字母头像用 ${color} 这个底色`,
+          'aria-pressed': String(on),
+          onclick: () => {
+            authState.avatarDraft = { kind: 'initial', color };
+            renderAvatarPanel();
+          },
+        })
+      );
+    });
+
+    // 图片头像正在用时给它一个「用回文字头像」的出口，否则点过上传就没法回退了
+    dom.avatarUpload.textContent = draft.kind === 'image' ? '换一张图…' : '上传我自己的图片…';
+  }
+
+  /** 选了文件 → 先压到 128px → 变成草稿头像（还没上传，点「保存」才发出去） */
+  async function pickAvatarFile(event) {
+    const file = event && event.target && event.target.files && event.target.files[0];
+    if (!file) return;
+    dom.avatarError.hidden = true;
+    try {
+      const compressed = await AuthMod.compressImage(file, {
+        maxEdge: AuthMod.AVATAR_MAX_EDGE,
+        targetChars: AuthMod.AVATAR_TARGET_CHARS,
+      });
+      const avatar = AuthMod.avatarFromUpload(compressed);
+      if (!avatar) throw new Error('这张图压完还是不能用（太大或格式不对）');
+      authState.avatarDraft = avatar;
+      renderAvatarPanel();
+      const kb = Math.max(1, Math.round(compressed.finalChars / 1024));
+      dom.avatarUploadNote.textContent = `已选好这张图（压到 ${compressed.width}×${compressed.height}，约 ${kb} KB），点「保存」才生效`;
+    } catch (err) {
+      dom.avatarError.textContent = AuthMod.uploadErrorMessage(err);
+      dom.avatarError.hidden = false;
+    } finally {
+      // 让「同一个文件再选一次」也能触发 change
+      if (event && event.target) event.target.value = '';
+    }
+  }
+
+  async function saveAvatar() {
+    const draft = authState.avatarDraft || { kind: 'initial', color: null };
+    dom.avatarSave.disabled = true;
+    try {
+      const out = await api.auth.setAvatar(draft);
+      closeAvatarPanel();
+      applyUser(out.user, '头像换好了');
+    } catch (err) {
+      dom.avatarError.textContent = (err && err.message) || '换头像失败';
+      dom.avatarError.hidden = false;
+    } finally {
+      dom.avatarSave.disabled = false;
+    }
   }
 
   /* ── 稿片上的动作 ───────────────────────────────────────── */
@@ -1514,6 +1987,72 @@
     dom.historyList = $('#history-list');
     dom.clearHistory = $('#clear-history');
     dom.toasts = $('#toasts');
+
+    /* 账号 */
+    dom.account = $('#account');
+    dom.accountSignin = $('#account-signin');
+    dom.accountSelf = $('#account-self');
+    dom.accountAvatar = $('#account-avatar');
+    dom.accountName = $('#account-name');
+    dom.accountMenu = $('#account-menu');
+    dom.accountMenuHead = $('#account-menu-head');
+    dom.accountNote = $('#account-note');
+    dom.accountAvatarEdit = $('#account-avatar-edit');
+    dom.accountRename = $('#account-rename');
+    dom.accountPassword = $('#account-password');
+    dom.accountLogout = $('#account-logout');
+
+    /* 登录 / 注册浮层 */
+    dom.authOverlay = $('#auth-overlay');
+    dom.authTitle = $('#auth-title');
+    dom.authTabs = $('#auth-tabs');
+    dom.authTabLogin = $('#auth-tab-login');
+    dom.authTabRegister = $('#auth-tab-register');
+    dom.authBody = $('#auth-body');
+    dom.authNameField = $('#auth-name-field');
+    dom.authNameLabel = $('#auth-name-label');
+    dom.authName = $('#auth-name');
+    dom.authRecent = $('#auth-recent');
+    dom.authPasswordField = $('#auth-password-field');
+    dom.authPasswordLabel = $('#auth-password-label');
+    dom.authPassword = $('#auth-password');
+    dom.authNewField = $('#auth-new-field');
+    dom.authNewLabel = $('#auth-new-label');
+    dom.authNew = $('#auth-new');
+    dom.authConfirmField = $('#auth-confirm-field');
+    dom.authConfirmLabel = $('#auth-confirm-label');
+    dom.authConfirm = $('#auth-confirm');
+    dom.authCodeField = $('#auth-code-field');
+    dom.authCode = $('#auth-code');
+    dom.authCodeShown = $('#auth-code-shown');
+    dom.authCodeValue = $('#auth-code-value');
+    dom.authCodeCopy = $('#auth-code-copy');
+    dom.authCodeDone = $('#auth-code-done');
+    dom.authRememberRow = $('#auth-remember-row');
+    dom.authRemember = $('#auth-remember');
+    dom.authError = $('#auth-error');
+    dom.authOk = $('#auth-ok');
+    dom.authHint = $('#auth-hint');
+    dom.authActions = $('#auth-actions');
+    dom.authForgot = $('#auth-forgot');
+    dom.authForget = $('#auth-forget');
+    dom.authSubmit = $('#auth-submit');
+    dom.authCancel = $('#auth-cancel');
+    dom.authClose = $('#auth-close');
+
+    /* 换头像浮层 */
+    dom.avatarOverlay = $('#avatar-overlay');
+    dom.avatarPreview = $('#avatar-preview');
+    dom.avatarPreviewName = $('#avatar-preview-name');
+    dom.avatarGrid = $('#avatar-grid');
+    dom.avatarColors = $('#avatar-colors');
+    dom.avatarFile = $('#avatar-file');
+    dom.avatarUpload = $('#avatar-upload');
+    dom.avatarUploadNote = $('#avatar-upload-note');
+    dom.avatarError = $('#avatar-error');
+    dom.avatarSave = $('#avatar-save');
+    dom.avatarCancel = $('#avatar-cancel');
+    dom.avatarClose = $('#avatar-close');
   }
 
   function renderEngine() {
@@ -1621,6 +2160,41 @@
 
     dom.openHistory.addEventListener('click', openDrawer);
     dom.closeHistory.addEventListener('click', closeDrawer);
+
+    /* 账号 */
+    dom.accountSignin.addEventListener('click', () => openAuth('login'));
+    dom.accountSelf.addEventListener('click', () => {
+      authState.menuOpen = !authState.menuOpen;
+      renderAccount();
+    });
+    dom.accountAvatarEdit.addEventListener('click', openAvatarPanel);
+    dom.accountRename.addEventListener('click', () => openAuth('name'));
+    dom.accountPassword.addEventListener('click', () => openAuth('password'));
+    dom.accountLogout.addEventListener('click', doLogout);
+
+    dom.authTabLogin.addEventListener('click', () => openAuth('login'));
+    dom.authTabRegister.addEventListener('click', () => openAuth('register'));
+    dom.authForget.addEventListener('click', () => openAuth('recover'));
+    dom.authSubmit.addEventListener('click', submitAuth);
+    dom.authCancel.addEventListener('click', closeAuth);
+    dom.authClose.addEventListener('click', closeAuth);
+    dom.authCodeDone.addEventListener('click', closeAuth);
+    dom.authCodeCopy.addEventListener('click', () => copyText(authState.issuedCode, '恢复码已复制'));
+    dom.authName.addEventListener('input', renderRecentAccounts);
+    [dom.authName, dom.authPassword, dom.authConfirm, dom.authNew, dom.authCode].forEach((field) => {
+      field.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        submitAuth();
+      });
+    });
+
+    dom.avatarSave.addEventListener('click', saveAvatar);
+    dom.avatarCancel.addEventListener('click', closeAvatarPanel);
+    dom.avatarClose.addEventListener('click', closeAvatarPanel);
+    dom.avatarUpload.addEventListener('click', () => dom.avatarFile.click());
+    dom.avatarFile.addEventListener('change', pickAvatarFile);
+
     dom.scrim.addEventListener('click', () => {
       closeDrawer();
       closeTemplates();
@@ -1713,18 +2287,38 @@
         return;
       }
       if (e.key === 'Escape') {
-        if (view.drawerOpen) closeDrawer();
+        // 一层一层往回退：先关浮层，再关账号菜单，最后才是抽屉与朱批
+        if (!dom.avatarOverlay.hidden) {
+          closeAvatarPanel();
+        } else if (!dom.authOverlay.hidden) {
+          closeAuth();
+        } else if (authState.menuOpen) {
+          authState.menuOpen = false;
+          renderAccount();
+        } else if (view.drawerOpen) closeDrawer();
         else if (polish) {
           polish = null;
           renderPolish();
         }
       }
     });
+
+    // 点别处把账号菜单收起来（菜单里的按钮自己会切状态，不用管）
+    document.addEventListener('click', (event) => {
+      if (!authState.menuOpen) return;
+      const target = event.target;
+      if (target && target.closest && target.closest('#account')) return;
+      authState.menuOpen = false;
+      renderAccount();
+    });
   }
 
   async function boot() {
     cacheDom();
     api = await ApiMod.detect(window);
+    // 票过期的唯一出口：任何一条账号请求回 401 都会走到 handleAuthLost
+    ApiMod.onAuthLost(handleAuthLost);
+    await loadAuth();
 
     // 顺序有讲究：先把模板注册成板块，再造状态 —— 否则上次停在自定义模板板块的话，
     // 那个板块 id 还没注册，状态会退回「文章续写」

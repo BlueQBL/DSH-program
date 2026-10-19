@@ -51,13 +51,22 @@ const matchAll = (text, re) => {
 console.log('README 与现实');
 
 group('README 里提到的每个文件路径都存在', () => {
+  // 运行时才生成的文件：README 会提到它们（账号文件、签名密钥），但它们不该在仓库里
+  const RUNTIME_FILES = ['data/users.json', 'data/auth-secret'];
   const candidates = matchAll(README, /`([A-Za-z0-9_./-]+\.(?:js|css|html|json|md))`/g);
   const missing = Array.from(new Set(candidates)).filter((rel) => {
     if (rel.includes('*')) return false;
+    if (RUNTIME_FILES.indexOf(rel) >= 0) return false;
     return !fs.existsSync(path.join(ROOT, rel));
   });
   ok(candidates.length > 8, `提到了 ${candidates.length} 个文件`);
   eq(missing, [], 'README 里不该出现不存在的文件');
+  // 被豁免的那两个也不能是凭空写的：代码里真的会去建它们
+  const code = read('server.js') + read('lib/auth.js');
+  RUNTIME_FILES.forEach((rel) => {
+    if (!README.includes(rel)) return;
+    ok(code.includes(path.basename(rel)), `${rel} 在代码里真的会被用到`);
+  });
 });
 
 group('README 里写的目录都存在', () => {
@@ -119,6 +128,42 @@ group('README 里列的测试文件都存在，且 npm test 都跑了', () => {
   ok(pkg.scripts.test.includes('scripts/check-wiring.js'), '接线检查也在 npm test 里');
   const wiring = README.includes('check-wiring.js');
   ok(wiring, 'README 说明了接线检查');
+});
+
+group('README 里讲的账号做法在代码里落实了', () => {
+  const authRules = read('lib/auth-rules.js');
+  const authServer = read('lib/auth.js');
+  const authClient = read('js/auth.js');
+  const serverSource = read('server.js');
+
+  ok(README.includes('sanyi_session'), 'README 写了会话 Cookie 的名字');
+  ok(authServer.includes("const TOKEN_COOKIE = 'sanyi_session'"), '代码里是同一个名字');
+  ok(authServer.includes('scryptSync'), '密码走 scrypt');
+  ok(!/password\s*=\s*String\(/.test(authServer), '不把明文密码直接存下来');
+  ok(authServer.includes('timingSafeEqual'), '比较用 timingSafeEqual（不早退）');
+  ok(authServer.includes('HttpOnly'), 'Cookie 是 HttpOnly');
+  ok(authServer.includes('SameSite=Lax'), 'Cookie 带 SameSite=Lax');
+  ok(README.includes('IP + 名字'), 'README 说清了限速的键');
+  ok(authServer.includes('max = Number(opt.max) > 0 ? Number(opt.max) : 8'), '默认 8 次');
+  eq(serverSource.includes('const loginLimiter = Auth.createRateLimiter({ max: 8'), true, '服务端也是 8 次');
+  ok(authServer.includes('users_file_broken'), '账号文件坏了有专门的错误码');
+  ok(serverSource.includes('WA_ALLOW_REGISTER'), '注册开关真的读了环境变量');
+  ok(authServer.includes('WA_AUTH_SECRET'), '签名密钥能走环境变量');
+  ok(authServer.includes('tokenVersion'), '改密码会让令牌版本 +1');
+  ok(serverSource.includes('ownsRecord') || serverSource.includes('ownerScope'), '服务端按主人取留档');
+  ok(read('lib/store.js').includes('scope('), '留档有按主人取用的入口');
+  ok(authRules.includes('AVATAR_EMOJI'), '头像有 emoji 白名单');
+  ok(authRules.includes('isAvatarImage'), '上传的图片头像有一道类型与大小校验');
+  ok(!/image\/svg/.test(authRules.replace(/\/\*[\s\S]*?\*\//g, '')), 'svg 不进白名单（它能带脚本）');
+  ok(authServer.includes('makeRecoveryCode'), '有恢复码');
+  ok(README.includes('恢复码'), 'README 讲了恢复码怎么用');
+  ok(fs.existsSync(path.join(ROOT, 'scripts', 'reset-password.js')), '恢复码丢了还有本机命令行');
+  eq(JSON.parse(read('package.json')).scripts['reset-password'], 'node scripts/reset-password.js', 'npm run reset-password 指向它');
+  ok(authClient.includes('RECENT_ACCOUNTS_KEY'), '浏览器里记得最近登录过的账号');
+  ok(README.includes('模板库不分账号'), 'README 说明了「模板不按账号分」');
+  // 文档里承诺「不登录也能用」，接口也确实是这个态度：起稿不要求登录
+  const generate = serverSource.slice(serverSource.indexOf('async function handleGenerate'), serverSource.indexOf('/* ── 一键优化'));
+  ok(!/requireUser\(/.test(generate), '起稿不要求登录');
 });
 
 group('README 里对离线引擎的说法与代码相符', () => {

@@ -37,6 +37,9 @@
   --shadow-lift: 0 2px 0 rgba(27, 35, 32, .06), 0 18px 30px -20px rgba(27, 35, 32, .55);
 
   --ease: cubic-bezier(.2, .7, .3, 1);
+
+  /* 头像底色：默认用松绿，页面按名字算出一个色再就地覆盖它 */
+  --avatar-bg: #2f6b4f;
 }
 
 /* ── 基础 ───────────────────────────────────────────────── */
@@ -68,6 +71,19 @@ body {
   outline: 2px solid var(--jade);
   outline-offset: 2px;
   border-radius: 2px;
+}
+
+/*
+ * `hidden` 必须真的看不见。
+ *
+ * 浏览器给 `[hidden]` 的默认样式是 `display: none`，但那是**浏览器默认样式**：
+ * 只要有任何一条作者样式给同一个元素写了 `display`（这里 `.auth-overlay { display: grid }`、
+ * `.auth-field { display: block }`、`.auth-tabs { display: flex }` 都写了），
+ * 作者样式就赢——于是「本来藏着的浮层」一进页面就摊在脸上。
+ * 这一条把它钉死，任何带 hidden 的元素都别想被 display 抢回来。
+ */
+[hidden] {
+  display: none !important;
 }
 
 ::selection {
@@ -892,11 +908,55 @@ body {
 }
 
 /* ── 成稿 ───────────────────────────────────────────────── */
+/*
+ * 稿片的栏宽跟着**稿数**走：一稿占满、两稿各一半、三稿三分之一、四稿**两栏两行（2×2）**。
+ *
+ * 为什么不再用 `auto-fit + minmax(292px, 1fr)`：那种写法在稿少时会按容器能塞下几栏
+ * 定死栏宽，于是「只出一稿」的时候卡片还是 292px 宽，右边空一大片，正文挤成一列断行，
+ * 卡片底部那排按钮也被挤成竖的。稿少就该摊开，稿多才并排。
+ *
+ * 为什么四稿是 2×2 而不是四栏：四栏时每张只有约 1/4 宽（1440 屏上 210px 左右），
+ * 正文窄得像小纸条。2×2 每张一半宽，读起来才像稿纸；代价是多一行。
+ */
 .drafts {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(292px, 1fr));
-  gap: 30px 20px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 22px clamp(12px, 1.4vw, 20px);
   margin-top: 6px;
+  /* 稿片正文的高度上限：稿纸再长也不把整页撑到底，超出在卡片里滚 */
+  --draft-h: clamp(260px, 34vh, 440px);
+}
+
+.drafts[data-count="2"] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+/* 三稿：三栏，栏窄，正文也卡矮一点 */
+.drafts[data-count="3"] {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  --draft-h: clamp(220px, 28vh, 360px);
+}
+
+/* 四稿：两栏两行 —— 两行叠起来本来就高，每张再矮一点，整块才不会拖到页面最底部 */
+.drafts[data-count="4"] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  --draft-h: clamp(210px, 27vh, 340px);
+}
+
+/*
+ * 三栏以上时稿纸很窄：稿片底下那行「字数 · 离线」和「采用 / 一键优化 / 接着写 / 复制」
+ * 排不进同一行，会挤成一竖条。改成上下两行，按钮才排得开。
+ */
+.drafts[data-count="3"] .draft__foot,
+.drafts[data-count="4"] .draft__foot {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.drafts[data-count="3"] .draft__tools,
+.drafts[data-count="4"] .draft__tools {
+  justify-content: flex-start;
 }
 
 .drafts__empty {
@@ -975,8 +1035,12 @@ body {
 .draft__body {
   flex: 1;
   min-height: 120px;
-  max-height: 460px;
+  /* 高度上限由外面的 .drafts 按稿数给（--draft-h）：稿多时矮一点，两行也塞得下 */
+  max-height: var(--draft-h, 440px);
   overflow-y: auto;
+  /* 细一点的滚动条：这里是要滚的（稿子比卡片长），但别让一根粗条压着稿纸 */
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule) transparent;
   padding: 16px var(--pad-x) 14px;
   background-image: repeating-linear-gradient(
     to bottom,
@@ -987,6 +1051,23 @@ body {
   background-origin: padding-box;
   /* 稿片正文会滚动：格线必须跟着文字一起走，否则字动线不动 */
   background-attachment: local;
+}
+
+.draft__body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.draft__body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.draft__body::-webkit-scrollbar-thumb {
+  background: var(--rule);
+  border-radius: 99px;
+}
+
+.draft__body::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-faint);
 }
 
 .draft__text {
@@ -1730,6 +1811,521 @@ body {
   color: var(--ink-faint);
 }
 
+/* ── 账号 ───────────────────────────────────────────────── */
+/*
+ * 账号在报头**最右边**，和干活的那几个按钮（模板 / 写作留档）之间隔一道细线。
+ *
+ * 为什么不留它钉在页面角落：钉住就会压住稿片正文，卡片右下角那排「采用 / 一键优化」
+ * 也会被盖掉一半 —— 写作台的主体是稿纸，任何常驻浮层都在跟它抢地方。
+ * 所以它回到报头这一行：那里不遮挡任何正文，滚多远都在。
+ *
+ * 头像是**圆的**（与 ai-chat 一致）；emoji 头像不铺深底色。
+ */
+.masthead__sep {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 18px;
+  margin: 0 2px;
+  background: var(--rule);
+}
+
+.account {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+/* 未登录：一颗描边的胶囊 */
+.account__signin {
+  padding: 4px 13px;
+  border: 1px dashed var(--rule);
+  border-radius: 999px;
+  background: var(--paper-rise);
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: border-color .16s var(--ease), color .16s var(--ease);
+}
+
+.account__signin:hover {
+  border-color: var(--jade);
+  color: var(--ink);
+}
+
+/* 登录之后：圆头像 + 名字，一整颗胶囊 */
+.account__self {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 11px 3px 3px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: var(--paper-rise);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: border-color .16s var(--ease), background .16s var(--ease);
+}
+
+.account__self:hover {
+  border-color: var(--jade);
+  background: var(--jade-wash);
+}
+
+.account__name {
+  max-width: 9em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * 头像：**一个圆**（和 ai-chat 一样）。
+ * 底色由 JS 写进 `--avatar-bg`（只有「首字母」那种用得到），
+ * 里面要么是一个字、要么是一个 emoji、要么是一张图 —— 三种都由 paintAvatar 决定。
+ */
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  overflow: hidden;
+  flex: 0 0 auto;
+  background: var(--avatar-bg);
+  color: #fbfcf8;
+  font-family: var(--kai);
+  font-size: 12.5px;
+  line-height: 1;
+  user-select: none;
+}
+
+/* emoji 自己不铺深底色：它本来就有颜色，垫一层反而脏 */
+.avatar[data-kind="emoji"] {
+  background: var(--paper-sink);
+  color: inherit;
+  font-size: 14px;
+}
+
+.avatar--large {
+  width: 56px;
+  height: 56px;
+  font-size: 26px;
+  box-shadow: var(--shadow-sheet);
+}
+
+.avatar__text {
+  display: block;
+  line-height: 1;
+}
+
+/* 自己上传的头像：填满那个圆，圆角跟着父级裁 */
+.avatar__img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+}
+
+.account-menu {
+  position: absolute;
+  right: 0;
+  left: auto;
+  /* 在报头里，菜单往下弹 */
+  top: calc(100% + 8px);
+  bottom: auto;
+  z-index: 40;
+  min-width: 194px;
+  padding: 6px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--paper-rise);
+  box-shadow: var(--shadow-lift);
+}
+
+.account-menu__head {
+  margin: 2px 6px 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--rule-soft);
+  font-size: 11px;
+  letter-spacing: .06em;
+  color: var(--ink-faint);
+}
+
+.account-menu__item {
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 2px;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.account-menu__item:hover {
+  background: var(--jade-wash);
+}
+
+.account-menu__item--danger {
+  color: var(--zhu-deep);
+}
+
+.account-menu__item--danger:hover {
+  background: var(--zhu-wash);
+}
+
+.account__note {
+  position: absolute;
+  right: 0;
+  left: auto;
+  top: calc(100% + 8px);
+  bottom: auto;
+  width: max-content;
+  max-width: 260px;
+  margin: 0;
+  padding: 6px 9px;
+  border: 1px solid var(--rule);
+  border-left: 2px solid var(--indigo);
+  border-radius: var(--radius);
+  background: var(--paper-rise);
+  color: var(--ink-soft);
+  font-size: 11.5px;
+  line-height: 1.5;
+  box-shadow: var(--shadow-sheet);
+  white-space: normal;
+  z-index: 40;
+}
+
+/* 窄屏：名字收起来，只留那头像，别把报头挤爆 */
+@media (max-width: 560px) {
+  .account__name,
+  .masthead__sep {
+    display: none;
+  }
+
+  .account__self {
+    padding: 2px;
+  }
+}
+
+/* ── 登录 / 头像浮层 ─────────────────────────────────────── */
+/*
+ * 浮层是一张浮在稿纸上的卡片：底下那层用半透明墨色压暗，
+ * 卡片本身仍是稿纸 —— 登录这件事不该像跳到了另一个网站。
+ */
+.auth-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(27, 35, 32, .42);
+  backdrop-filter: blur(2px);
+}
+
+.auth-card {
+  width: min(392px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  padding: 18px 20px 16px;
+  border: 1px solid var(--rule);
+  border-top: 3px solid var(--jade);
+  border-radius: var(--radius);
+  background: var(--paper-rise);
+  box-shadow: var(--shadow-lift);
+}
+
+.auth-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.auth-card__title {
+  margin: 0;
+  font-family: var(--kai);
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: .1em;
+}
+
+.auth-card__body {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  border-left: 2px solid var(--jade);
+  border-radius: var(--radius);
+  background: var(--jade-wash);
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.auth-tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 12px;
+  padding: 2px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--paper-sink);
+}
+
+.auth-tab {
+  flex: 1 1 0;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 2px;
+  background: none;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.auth-tab[aria-selected="true"] {
+  background: var(--paper-rise);
+  color: var(--ink);
+  box-shadow: inset 0 -2px 0 var(--jade);
+}
+
+.auth-field {
+  display: block;
+  margin-bottom: 10px;
+}
+
+.auth-field__label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 11px;
+  letter-spacing: .12em;
+  color: var(--ink-faint);
+}
+
+.auth-field .input {
+  width: 100%;
+}
+
+.auth-recent {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: -2px 0 10px;
+}
+
+.auth-recent__item {
+  padding: 2px 8px 2px 6px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: var(--paper-sink);
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.auth-recent__item:hover {
+  border-color: var(--jade);
+  color: var(--ink);
+}
+
+.auth-remember {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 2px 0 10px;
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.auth-error,
+.auth-ok,
+.auth-hint {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.auth-error {
+  padding: 6px 9px;
+  border-left: 2px solid var(--zhu);
+  background: var(--zhu-wash);
+  color: var(--zhu-deep);
+}
+
+.auth-ok {
+  padding: 6px 9px;
+  border-left: 2px solid var(--jade);
+  background: var(--jade-wash);
+  color: var(--jade-deep);
+}
+
+.auth-hint {
+  min-height: 1.2em;
+  color: var(--ink-faint);
+}
+
+.auth-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.auth-note {
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule-soft);
+  color: var(--ink-faint);
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+/* 「忘了密码？」那一行：安安静静待在按钮下面，不跟主操作抢注意力 */
+.auth-forgot {
+  margin: 10px 0 0;
+  font-size: 11.5px;
+  color: var(--ink-faint);
+}
+
+/* 恢复码：等宽字体 + 字距，方便照着抄 */
+.input--code {
+  font-family: var(--mono);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.auth-code {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--zhu);
+  border-radius: var(--radius);
+  background: var(--zhu-wash);
+}
+
+.auth-code__title {
+  margin: 0 0 6px;
+  font-family: var(--kai);
+  font-size: 14px;
+  color: var(--zhu-deep);
+}
+
+.auth-code__value {
+  margin: 0 0 8px;
+  font-family: var(--mono);
+  font-size: 19px;
+  letter-spacing: .16em;
+  color: var(--ink);
+  user-select: all;
+}
+
+.auth-code__hint {
+  margin: 0 0 10px;
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--ink-soft);
+}
+
+.auth-code__hint code {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  padding: 1px 4px;
+  border-radius: 2px;
+  background: var(--paper-sink);
+}
+
+/* 换头像 */
+.avatar-preview {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.avatar-preview__name {
+  font-family: var(--kai);
+  font-size: 16px;
+  color: var(--ink);
+}
+
+.avatar-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 5px;
+  margin-bottom: 12px;
+}
+
+.avatar-choice {
+  display: grid;
+  place-items: center;
+  padding: 5px 0;
+  border: 1px solid var(--rule-soft);
+  border-radius: 2px;
+  background: var(--paper-sink);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.avatar-choice:hover {
+  border-color: var(--jade);
+}
+
+.avatar-choice--on {
+  border-color: var(--jade);
+  background: var(--jade-wash);
+  box-shadow: inset 0 -2px 0 var(--jade);
+}
+
+.avatar-colors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-bottom: 14px;
+}
+
+.avatar-swatch {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.avatar-swatch--on {
+  border-color: var(--ink);
+  box-shadow: 0 0 0 2px var(--paper-rise) inset;
+}
+
+/* 上传自己的图：一行放按钮和说明，说明允许换行（它比按钮长） */
+.avatar-upload {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+
+.avatar-upload__note {
+  color: var(--ink-faint);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: normal;
+}
+
 /* ── 提示条 ─────────────────────────────────────────────── */
 .toasts {
   position: fixed;
@@ -1800,6 +2396,12 @@ body {
 
   .panel {
     position: static;
+  }
+
+  /* 三栏在这个宽度里每张稿纸不到 230px，正文会断成一条一条：折成两栏（四稿本来就是两栏） */
+  .drafts[data-count="3"] {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    --draft-h: clamp(220px, 34vh, 400px);
   }
 }
 
@@ -1873,6 +2475,7 @@ body {
     gap: 26px;
   }
 
+  /* 手机上不分栏：一张稿纸一行；高度也不再卡，整页滚（卡片里再滚一层太别扭） */
   .draft__body {
     max-height: none;
   }
@@ -1925,6 +2528,7 @@ body {
   .draft__foot,
   .drawer,
   .scrim,
+  .account,
   .toasts {
     display: none !important;
   }

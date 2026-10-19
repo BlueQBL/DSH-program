@@ -34,6 +34,34 @@
     <button type="button" class="ghost-btn" id="open-history">
       写作留档<span class="ghost-btn__count" id="history-count">0</span>
     </button>
+
+    <!--
+      账号：报头最右边，和干活的那几个按钮之间隔一道细线 ——
+      它回答的是「这些稿子归谁」，不是「下一步做什么」，所以不混进模板 / 留档那一组。
+      位置必须留在报头里：钉在视口左下角会压住稿片正文和卡片上的按钮。
+    -->
+    <span class="masthead__sep" aria-hidden="true"></span>
+    <div class="account" id="account">
+      <button type="button" class="account__signin" id="account-signin"
+        title="登录之后留档按账号分开；不登录也能用">登录 / 注册</button>
+      <button type="button" class="account__self" id="account-self" hidden
+        aria-haspopup="menu" aria-expanded="false">
+        <span class="avatar" id="account-avatar">
+          <img class="avatar__img" id="account-avatar-img" alt="" hidden>
+          <span class="avatar__text"></span>
+        </span>
+        <span class="account__name" id="account-name"></span>
+      </button>
+      <div class="account-menu" id="account-menu" role="menu" hidden>
+        <p class="account-menu__head" id="account-menu-head"></p>
+        <button type="button" class="account-menu__item" id="account-avatar-edit" role="menuitem">换头像…</button>
+        <button type="button" class="account-menu__item" id="account-rename" role="menuitem">改名字…</button>
+        <button type="button" class="account-menu__item" id="account-password" role="menuitem">改密码…</button>
+        <button type="button" class="account-menu__item account-menu__item--danger" id="account-logout"
+          role="menuitem">退出登录</button>
+      </div>
+      <p class="account__note" id="account-note" hidden></p>
+    </div>
   </div>
 </header>
 
@@ -241,12 +269,133 @@
 
 <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
 
+<!-- 登录 / 注册：一张浮在稿纸上的卡片 -->
+<div class="auth-overlay" id="auth-overlay" hidden>
+  <div class="auth-card" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+    <header class="auth-card__head">
+      <h2 class="auth-card__title" id="auth-title">登录</h2>
+      <button type="button" class="icon-btn" id="auth-close" aria-label="关闭登录">✕</button>
+    </header>
+
+    <div class="auth-tabs" id="auth-tabs" role="tablist" aria-label="登录还是注册">
+      <button type="button" class="auth-tab" id="auth-tab-login" role="tab"
+        aria-selected="true" data-mode="login">登录</button>
+      <button type="button" class="auth-tab" id="auth-tab-register" role="tab"
+        aria-selected="false" data-mode="register">注册</button>
+    </div>
+
+    <p class="auth-card__body" id="auth-body" hidden></p>
+
+    <label class="auth-field" id="auth-name-field">
+      <span class="auth-field__label" id="auth-name-label">名字</span>
+      <input class="input" type="text" id="auth-name" autocomplete="username"
+        spellcheck="false" maxlength="20" placeholder="中文、字母、数字都可以">
+    </label>
+
+    <div class="auth-recent" id="auth-recent" role="group" aria-label="最近登录过的账号" hidden></div>
+
+    <label class="auth-field" id="auth-password-field">
+      <span class="auth-field__label" id="auth-password-label">密码</span>
+      <input class="input" type="password" id="auth-password" autocomplete="current-password" maxlength="200">
+    </label>
+
+    <label class="auth-field" id="auth-code-field" hidden>
+      <span class="auth-field__label" id="auth-code-label">恢复码</span>
+      <input class="input input--code" type="text" id="auth-code" autocomplete="off"
+        spellcheck="false" maxlength="24" placeholder="ABCD-EFGH-JKMN">
+    </label>
+
+    <label class="auth-field" id="auth-new-field" hidden>
+      <span class="auth-field__label" id="auth-new-label">新密码</span>
+      <input class="input" type="password" id="auth-new" autocomplete="new-password" maxlength="200">
+    </label>
+
+    <label class="auth-field" id="auth-confirm-field" hidden>
+      <span class="auth-field__label" id="auth-confirm-label">再输一遍</span>
+      <input class="input" type="password" id="auth-confirm" autocomplete="new-password" maxlength="200">
+    </label>
+
+    <!-- 注册 / 找回成功之后，恢复码只在这里出现这一次 -->
+    <div class="auth-code" id="auth-code-shown" hidden>
+      <p class="auth-code__title" id="auth-code-title">这把钥匙只显示这一次</p>
+      <p class="auth-code__value" id="auth-code-value"></p>
+      <p class="auth-code__hint">
+        抄下来收好。忘了密码时用它 + 新密码就能自助重来；丢了就只能在本机运行
+        <code>node scripts/reset-password.js 你的名字 --random</code>。
+      </p>
+      <div class="auth-actions">
+        <button type="button" class="btn btn--small btn--primary" id="auth-code-copy">复制恢复码</button>
+        <button type="button" class="btn btn--small btn--line" id="auth-code-done">抄好了</button>
+      </div>
+    </div>
+
+    <label class="auth-remember" id="auth-remember-row">
+      <input type="checkbox" id="auth-remember" checked>
+      <span>记住我（30 天内不用重新登录）</span>
+    </label>
+
+    <p class="auth-error" id="auth-error" hidden></p>
+    <p class="auth-ok" id="auth-ok" hidden></p>
+    <p class="auth-hint" id="auth-hint"></p>
+
+    <div class="auth-actions" id="auth-actions">
+      <button type="button" class="btn btn--small btn--primary" id="auth-submit">登录</button>
+      <button type="button" class="btn btn--small btn--line" id="auth-cancel">取消</button>
+    </div>
+
+    <p class="auth-forgot" id="auth-forgot">
+      忘了密码？<button type="button" class="link-btn" id="auth-forget">用恢复码重置</button>
+    </p>
+
+    <p class="auth-note">
+      不登录也能用，功能一个不少。不登录时留档写在「本地模式」那一桶，
+      登录之后留档按账号分开 —— 退出登录再看，本地那一桶还在。
+    </p>
+  </div>
+</div>
+
+<!-- 换头像：emoji 或首字母 + 底色（不收图片上传，头像要进账号文件，越简单越稳） -->
+<div class="auth-overlay" id="avatar-overlay" hidden>
+  <div class="auth-card" role="dialog" aria-modal="true" aria-labelledby="avatar-title">
+    <header class="auth-card__head">
+      <h2 class="auth-card__title" id="avatar-title">换头像</h2>
+      <button type="button" class="icon-btn" id="avatar-close" aria-label="关闭换头像">✕</button>
+    </header>
+
+    <div class="avatar-preview">
+      <span class="avatar avatar--large" id="avatar-preview">
+        <img class="avatar__img" id="avatar-preview-img" alt="" hidden>
+        <span class="avatar__text"></span>
+      </span>
+      <span class="avatar-preview__name" id="avatar-preview-name"></span>
+    </div>
+
+    <div class="avatar-grid" id="avatar-grid" role="group" aria-label="选一个 emoji 头像"></div>
+    <div class="avatar-colors" id="avatar-colors" role="group" aria-label="选一个底色（首字母头像用）"></div>
+
+    <div class="avatar-upload">
+      <input type="file" id="avatar-file" accept="image/png,image/jpeg,image/webp" hidden>
+      <button type="button" class="btn btn--small btn--line" id="avatar-upload">上传我自己的图片…</button>
+      <span class="avatar-upload__note" id="avatar-upload-note">png / jpg / webp，会先压到 128px 再传（一般十几 KB）</span>
+    </div>
+
+    <p class="auth-error" id="avatar-error" hidden></p>
+
+    <div class="auth-actions">
+      <button type="button" class="btn btn--small btn--primary" id="avatar-save">保存</button>
+      <button type="button" class="btn btn--small btn--line" id="avatar-cancel">取消</button>
+    </div>
+  </div>
+</div>
+
 <script src="lib/modes.js"></script>
 <script src="lib/record.js"></script>
 <script src="lib/template.js"></script>
 <script src="lib/polisher.js"></script>
 <script src="lib/mock-writer.js"></script>
+<script src="lib/auth-rules.js"></script>
 <script src="js/core.js"></script>
+<script src="js/auth.js"></script>
 <script src="js/api.js"></script>
 <script src="js/app.js"></script>
 </body>

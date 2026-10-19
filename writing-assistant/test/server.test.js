@@ -19,7 +19,7 @@ process.env.WA_OFFLINE_SPEED = '0';   // 不要逐字延迟
 process.env.WA_OFFLINE_CHUNK = '200';
 
 const Polisher = require('../lib/polisher.js');
-const { start } = require('../server.js');
+const { start, users } = require('../server.js');
 
 let pass = 0;
 const failures = [];
@@ -554,6 +554,338 @@ function parseFrame(frame) {
     const list = await (await fetch(base + '/api/history')).json();
     eq(list.modes.filter((m) => m.id.indexOf('tpl_') === 0).length, 0, '自定义板块没了');
     eq(list.modes.length, 10, '只剩十个内置板块');
+  });
+
+  /* ── 账号 ───────────────────────────────────────────────── */
+  //
+  // 这一段把「登录之后留档按人分开」当成一条真的接口约定来测：
+  // 两个账号、一个没登录的桶，互相看不见，也不能拿别人的 id 越权。
+  const setCookies = (res) => {
+    const raw = typeof res.headers.getSetCookie === 'function'
+      ? res.headers.getSetCookie()
+      : [res.headers.get('set-cookie')].filter(Boolean);
+    return raw.join(' | ');
+  };
+  const sessionOf = (header) => {
+    const hit = /sanyi_session=([^;]*)/.exec(header || '');
+    return hit ? `sanyi_session=${hit[1]}` : '';
+  };
+  const call = (pathname, options) => {
+    const opt = options || {};
+    const headers = Object.assign({}, opt.headers || {});
+    if (opt.body !== undefined) headers['content-type'] = 'application/json';
+    if (opt.cookie) headers.cookie = opt.cookie;
+    return fetch(base + pathname, {
+      method: opt.method || 'GET',
+      headers,
+      body: opt.body === undefined ? undefined : JSON.stringify(opt.body),
+    });
+  };
+  const meOf = async (cookie) => (await (await call('/api/auth/me', { cookie })).json()).user;
+  const draft = (text) => ({
+    record: {
+      mode: 'continue',
+      material: { input: '登录之后写的素材' },
+      versions: [{ text }],
+    },
+  });
+
+  let cookieA = '';
+  let cookieB = '';
+  let userA = null;
+  let userB = null;
+
+  await group('账号：没登录时 /api/auth/me 回 null —— 这不是错误，是本地模式', async () => {
+    const res = await call('/api/auth/me');
+    eq(res.status, 200, '状态码 200');
+    const body = await res.json();
+    eq(body.user, null, '还没有人登录');
+    eq(body.registerOpen, true, '注册入口开着');
+    eq(body.authError, null, '账号文件好好的');
+    eq(sessionOf(setCookies(res)), '', '没登录就不下发 Cookie');
+    eq(await meOf(''), null, '带着空的 Cookie 也还是没人');
+    eq(await meOf(`sanyi_session=${'x'.repeat(40)}.${'y'.repeat(43)}`), null, '伪造的令牌认不出来');
+  });
+
+  await group('注册：下发 HttpOnly 的票，回给浏览器的用户信息里没有密码', async () => {
+    const res = await call('/api/auth/register', { method: 'POST', body: { name: '甲作者', password: 'pass-for-jia' } });
+    eq(res.status, 200, '注册成功');
+    const header = setCookies(res);
+    cookieA = sessionOf(header);
+    ok(cookieA.startsWith('sanyi_session='), '给了会话 Cookie');
+    ok(/HttpOnly/.test(header), 'HttpOnly：页面脚本读不到');
+    ok(/SameSite=Lax/.test(header), 'SameSite=Lax：跨站 POST 不带它');
+    ok(/Path=\//.test(header), 'Path=/');
+    ok(!/Secure/.test(header), '本机 http 下不加 Secure（加了这条 Cookie 永远发不出去）');
+
+    const body = await res.json();
+    userA = body.user;
+    eq(userA.name, '甲作者', '名字回来了');
+    ok(userA.id.startsWith('u_'), 'id 是服务端生成的');
+    eq(userA.password, undefined, '密码记录绝不出去');
+    eq(userA.tokenVersion, undefined, '令牌版本绝不出去');
+    eq(userA.avatar, { kind: 'initial', color: null }, '默认头像');
+
+    eq((await call('/api/auth/register', { method: 'POST', body: { name: '甲作者', password: 'another-pass' } })).status, 400, '重名挡住');
+    eq((await call('/api/auth/register', { method: 'POST', body: { name: '乙', password: 'pass-for-yi' } })).status, 400, '名字太短挡住');
+    eq((await call('/api/auth/register', { method: 'POST', body: { name: '丙作者', password: 'short' } })).status, 400, '密码太短挡住');
+
+    const me = await meOf(cookieA);
+    eq(me && me.name, '甲作者', '带着这张票能认出是谁');
+  });
+
+  await group('留档按人分开：登录之后看到的是自己的，没登录那一桶还在', async () => {
+    const before = await (await call('/api/history')).json();
+    const localCount = before.total;
+    ok(localCount >= 1, '没登录时已经写了 ' + localCount + ' 篇');
+
+    const mine = await (await call('/api/history', { cookie: cookieA })).json();
+    eq(mine.total, 0, '新账号自己的留档是空的');
+    eq(mine.localElsewhere, localCount, '并且告诉界面：没登录那一桶还有 ' + localCount + ' 篇');
+
+    const saved = await call('/api/history', { method: 'POST', cookie: cookieA, body: draft('甲作者的第一篇。') });
+    eq(saved.status, 201, '给自己存一篇');
+    const record = (await saved.json()).record;
+    eq(record.owner, userA.id, '稿子记在这个账号名下');
+    eq((await (await call('/api/history', { cookie: cookieA })).json()).total, 1, '自己看到 1 篇');
+    eq((await (await call('/api/history')).json()).total, localCount, '没登录那一桶没被掺进来');
+    eq((await (await call('/api/history', { cookie: cookieA })).json()).localElsewhere, localCount, '那一桶还在，只是不显示');
+
+    // 客户端带来的 owner 一律不听：主人由服务端按这张票决定
+    const forged = await call('/api/history', {
+      method: 'POST',
+      cookie: cookieA,
+      body: { record: { owner: 'u_别人的', mode: 'continue', versions: [{ text: '想写进别人名下。' }] } },
+    });
+    eq((await forged.json()).record.owner, userA.id, '客户端写的 owner 被忽略');
+    await call('/api/history?confirm=1', { method: 'DELETE', cookie: cookieA });
+    eq((await (await call('/api/history', { cookie: cookieA })).json()).total, 0, '清空只清清得动自己的');
+  });
+
+  await group('第二个账号：看不见第一个账号的稿子，按 id 也越不了权', async () => {
+    const res = await call('/api/auth/register', { method: 'POST', body: { name: '乙作者', password: 'pass-for-yi' } });
+    userB = (await res.json()).user;
+    cookieB = sessionOf(setCookies(res));
+    ok(cookieB && cookieB !== cookieA, '两个账号各有一张票');
+
+    const own = await (await call('/api/history', { method: 'POST', cookie: cookieA, body: draft('甲作者的私房稿。') })).json();
+    const id = own.record.id;
+    eq((await (await call('/api/history', { cookie: cookieB })).json()).total, 0, '乙作者看不到甲作者的稿子');
+
+    eq((await call('/api/history/' + id, { cookie: cookieB })).status, 404, '拿 id 直接取也取不到');
+    eq((await call('/api/history/' + id, { method: 'PATCH', cookie: cookieB, body: { starred: true } })).status, 404, '想改别人的也改不了');
+    eq((await call('/api/history/' + id, { method: 'DELETE', cookie: cookieB })).status, 404, '想删别人的也删不掉');
+    eq((await call('/api/history/' + id, { cookie: cookieA })).status, 200, '自己取自己的没问题');
+
+    // 清空只清自己那一桶
+    const clearedB = await (await call('/api/history?confirm=1', { method: 'DELETE', cookie: cookieB })).json();
+    eq(clearedB.removed, 0, '乙作者清空只影响自己（他本来就没有）');
+    eq((await (await call('/api/history', { cookie: cookieA })).json()).total, 1, '甲作者的稿子毫发无损');
+  });
+
+  await group('认领：把没登录时写的那一桶接到自己名下（只动这一桶）', async () => {
+    const claimed = await (await call('/api/history/claim', { method: 'POST', cookie: cookieA })).json();
+    ok(claimed.claimed >= 1, '认领了 ' + claimed.claimed + ' 篇');
+    const mine = await (await call('/api/history', { cookie: cookieA })).json();
+    ok(mine.total >= 2, '认领之后自己的留档变多了（' + mine.total + ' 篇）');
+    eq(mine.localElsewhere, 0, '那一桶空了，界面也就不必再提');
+    eq((await (await call('/api/history')).json()).total, 0, '没登录那边现在是空的（稿子跟着账号走了）');
+    eq((await (await call('/api/history/claim', { method: 'POST', cookie: cookieA })).json()).claimed, 0, '再认领一次没有东西可认领');
+  });
+
+  await group('换头像、改名字：名字不是凭证，改它不影响别的设备', async () => {
+    const avatar = await call('/api/auth/avatar', { method: 'POST', cookie: cookieA, body: { avatar: { kind: 'emoji', emoji: '📝' } } });
+    eq(avatar.status, 200, '换头像成功');
+    eq((await avatar.json()).user.avatar.emoji, '📝', '头像换成了 📝');
+    const bad = await call('/api/auth/avatar', { method: 'POST', cookie: cookieA, body: { avatar: { kind: 'emoji', emoji: '💩' } } });
+    eq((await bad.json()).user.avatar.kind, 'initial', '白名单外的 emoji 回落到首字母');
+
+    // 自己上传的图：客户端先压，服务端再验一道
+    const smallImg = 'data:image/png;base64,' + 'A'.repeat(2048);
+    const uploaded = await call('/api/auth/avatar', {
+      method: 'POST',
+      cookie: cookieA,
+      body: { avatar: { kind: 'image', dataUrl: smallImg } },
+    });
+    eq(uploaded.status, 200, '图片头像能存');
+    const uploadedUser = (await uploaded.json()).user;
+    eq(uploadedUser.avatar.kind, 'image', '头像变成了图片');
+    eq(uploadedUser.avatar.dataUrl.length, smallImg.length, '图原样存下来（客户端已经压过了）');
+    eq(await meOf(cookieA) !== null, true, '存完之后还是登录着');
+
+    const tooBig = 'data:image/png;base64,' + 'A'.repeat(70 * 1024);
+    const rejected = await call('/api/auth/avatar', {
+      method: 'POST',
+      cookie: cookieA,
+      body: { avatar: { kind: 'image', dataUrl: tooBig } },
+    });
+    eq((await rejected.json()).user.avatar.kind, 'initial', '超过上限的图被拒，回落到首字母（不收客户端说了算的大图）');
+
+    const svg = 'data:image/svg+xml;base64,AAAA';
+    const svgRejected = await call('/api/auth/avatar', {
+      method: 'POST',
+      cookie: cookieA,
+      body: { avatar: { kind: 'image', dataUrl: svg } },
+    });
+    eq((await svgRejected.json()).user.avatar.kind, 'initial', 'svg 不收（它能带脚本）');
+
+    const renamed = await call('/api/auth/name', { method: 'POST', cookie: cookieA, body: { name: '甲主编' } });
+    eq(renamed.status, 200, '改名字成功');
+    eq((await renamed.json()).user.name, '甲主编', '名字换了');
+    eq((await meOf(cookieA)).name, '甲主编', '还是同一张票（名字不是凭证，不该把人踢下线）');
+    eq((await call('/api/auth/name', { method: 'POST', cookie: cookieA, body: { name: '乙作者' } })).status, 400, '改成别人的名字挡住');
+    const same = await (await call('/api/auth/name', { method: 'POST', cookie: cookieA, body: { name: '甲主编' } })).json();
+    eq(same.unchanged, true, '一字不差就是没变');
+  });
+
+  await group('改密码：旧票立刻作废，新票接着用', async () => {
+    const wrongOld = await call('/api/auth/password', {
+      method: 'POST',
+      cookie: cookieA,
+      body: { oldPassword: '不是原密码', newPassword: 'brand-new-pass' },
+    });
+    eq(wrongOld.status, 400, '原密码不对就不改');
+
+    const res = await call('/api/auth/password', {
+      method: 'POST',
+      cookie: cookieA,
+      body: { oldPassword: 'pass-for-jia', newPassword: 'brand-new-pass' },
+    });
+    eq(res.status, 200, '改密码成功');
+    const fresh = sessionOf(setCookies(res));
+    ok(fresh && fresh !== cookieA, '给自己补发了一张新票（不然改完就被踢出去）');
+    const oldCookie = cookieA;
+    cookieA = fresh;
+
+    eq(await meOf(oldCookie), null, '旧票立刻失效');
+    eq((await meOf(fresh)) === null, false, '新票能用');
+    eq((await call('/api/auth/login', { method: 'POST', body: { name: '甲主编', password: 'pass-for-jia' } })).status, 401, '旧密码登不上了');
+    eq((await call('/api/auth/login', { method: 'POST', body: { name: '甲主编', password: 'brand-new-pass' } })).status, 200, '新密码能登');
+  });
+
+  await group('登录：密码错了不说是名字错；试太多次会慢下来', async () => {
+    const wrong = await call('/api/auth/login', { method: 'POST', body: { name: '乙作者', password: '不是密码' } });
+    eq(wrong.status, 401, '密码错 401');
+    const body = await wrong.json();
+    eq(body.error, '名字或密码不对', '不告诉对方是名字错还是密码错');
+    eq((await (await call('/api/auth/login', { method: 'POST', body: { name: '压根没这个人', password: '随便什么' } })).json()).error, '名字或密码不对', '没这个人也是同一句话');
+    eq(sessionOf(setCookies(wrong)), '', '失败不下发票');
+
+    let lastStatus = 0;
+    for (let i = 0; i < 9; i += 1) {
+      const res = await call('/api/auth/login', { method: 'POST', body: { name: '被爆破的账号', password: '猜一个' } });
+      lastStatus = res.status;
+      if (i < 7) eq(res.status, 401, `第 ${i + 1} 次还是 401`);
+    }
+    eq(lastStatus, 429, '连续试错之后被挡住');
+    eq((await (await call('/api/auth/login', { method: 'POST', body: { name: '乙作者', password: 'pass-for-yi' } })).status), 200, '别人照常能登录（不连坐）');
+  });
+
+  await group('跨站写操作一律拒掉（Cookie 之外的第二道闸）', async () => {
+    const evil = await call('/api/auth/login', {
+      method: 'POST',
+      headers: { origin: 'http://evil.example' },
+      body: { name: '乙作者', password: 'pass-for-yi' },
+    });
+    eq(evil.status, 403, '带外站 Origin 的登录被拒绝');
+    const evilWrite = await call('/api/history', {
+      method: 'POST',
+      headers: { origin: 'http://evil.example' },
+      cookie: cookieB,
+      body: draft('外站想塞进来的稿子。'),
+    });
+    eq(evilWrite.status, 403, '外站连存留档都不行');
+    const sameish = await call('/api/auth/me', { headers: { origin: base } });
+    eq(sameish.status, 200, '同源请求照旧（Origin 与 Host 一致）');
+    const curl = await call('/api/auth/me');
+    eq(curl.status, 200, '没有 Origin 的客户端（curl / 脚本）放行');
+  });
+
+  await group('退出登录：浏览器忘掉那张票，稿子一篇都不动', async () => {
+    const before = (await (await call('/api/history', { cookie: cookieA })).json()).total;
+    const res = await call('/api/auth/logout', { method: 'POST', cookie: cookieA });
+    eq(res.status, 200, '退出成功');
+    ok(/Max-Age=0/.test(setCookies(res)), '用一个立刻过期的空值覆盖那张票');
+    eq(await meOf(sessionOf(setCookies(res))), null, '退出的票确实作废了');
+
+    // 说清一件事：服务端不维护「已注销名单」，那张票在过期前技术上还能用 ——
+    // 退出只是让浏览器忘掉它。想立刻作废所有设备，改一次密码（tokenVersion +1）。
+    eq((await (await call('/api/history', { cookie: cookieA })).json()).total, before, '稿子一篇都没动');
+    cookieA = sessionOf(setCookies(await call('/api/auth/login', { method: 'POST', body: { name: '甲主编', password: 'brand-new-pass' } })));
+    eq((await (await call('/api/history', { cookie: cookieA })).json()).total, before, '重新登录一篇不少');
+  });
+
+  await group('需要登录的接口：没带票一律 401', async () => {
+    for (const pathname of ['/api/auth/avatar', '/api/auth/name', '/api/auth/password']) {
+      eq((await call(pathname, { method: 'POST', body: {} })).status, 401, `${pathname} 需要登录`);
+    }
+  });
+
+  await group('健康检查：报的是当前这个人的留档数，以及账号总数', async () => {
+    const anon = await (await call('/api/health')).json();
+    const mine = await (await call('/api/health', { cookie: cookieA })).json();
+    eq(anon.accounts.count, 2, '一共 2 个账号');
+    eq(anon.accounts.registerOpen, true, '注册入口开着');
+    eq(anon.accounts.broken, false, '账号文件没坏');
+    eq(anon.history.count, 0, '没登录的人自己那一桶是 0');
+    ok(mine.history.count >= 2, '登录的人看到自己的 ' + mine.history.count + ' 篇');
+  });
+
+  await group('静态托管：账号的服务端一半取不到，共用的规则取得到', async () => {
+    eq((await fetch(base + '/lib/auth.js')).status, 403, 'lib/auth.js（签名与哈希）不发给浏览器');
+    eq((await fetch(base + '/lib/auth-rules.js')).status, 200, 'lib/auth-rules.js 要给浏览器（它要当场提示规则）');
+    eq((await fetch(base + '/data/users.json')).status, 403, '账号文件在 data/ 下，取不到');
+    eq((await fetch(base + '/data/auth-secret')).status, 403, '签名密钥也取不到');
+  });
+
+  await group('找回密码：用恢复码重置，恢复即登录，旧码当场作废', async () => {
+    const reg = await call('/api/auth/register', { method: 'POST', body: { name: '丙作者', password: 'pass-for-bing' } });
+    const regBody = await reg.json();
+    const oldCode = regBody.recoveryCode;
+    const oldCookie = sessionOf(setCookies(reg));
+    ok(/^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(oldCode), '注册时给了一串恢复码：' + oldCode);
+    eq(regBody.user.recovery, undefined, '恢复码本身不进 publicUser');
+    eq(regBody.user.recoveryCode, undefined, '也不叫 recoveryCode 混在用户信息里');
+
+    const wrong = await call('/api/auth/recover', {
+      method: 'POST',
+      body: { name: '丙作者', code: 'AAAA-AAAA-AAAA', newPassword: 'bing-new-pass' },
+    });
+    eq(wrong.status, 400, '恢复码不对就拒');
+    eq((await wrong.json()).error, '名字或恢复码不对', '不告诉对方是名字错还是码错');
+
+    // 小写、空格、少打的短横线都认（人抄一串码时出这些错太正常了）
+    const okRecover = await call('/api/auth/recover', {
+      method: 'POST',
+      body: { name: '丙作者', code: oldCode.toLowerCase().replace(/-/g, ' '), newPassword: 'bing-new-pass' },
+    });
+    eq(okRecover.status, 200, '恢复码对了就重置');
+    const okBody = await okRecover.json();
+    ok(okBody.recoveryCode && okBody.recoveryCode !== oldCode, '顺手换了一把新钥匙：' + okBody.recoveryCode);
+    const freshCookie = sessionOf(setCookies(okRecover));
+    ok(freshCookie, '恢复成功就直接登录了（不用再打一遍新密码）');
+    eq(await meOf(oldCookie), null, '恢复之后旧票作废（tokenVersion + 1）');
+    eq((await meOf(freshCookie)) !== null, true, '新票能用');
+
+    eq((await call('/api/auth/login', { method: 'POST', body: { name: '丙作者', password: 'pass-for-bing' } })).status, 401, '旧密码登不上了');
+    eq((await call('/api/auth/login', { method: 'POST', body: { name: '丙作者', password: 'bing-new-pass' } })).status, 200, '新密码能登');
+    eq((await call('/api/auth/recover', {
+      method: 'POST',
+      body: { name: '丙作者', code: oldCode, newPassword: 'third-pass-9' },
+    })).status, 400, '旧的恢复码作废了（不然它就是永久后门）');
+
+    // 加恢复码之前注册的账号：明确告诉用户走本机命令行那条路
+    const legacy = users.byName('乙作者');
+    eq(Boolean(legacy), true, '找到那个老账号');
+    if (legacy) legacy.recovery = null;
+    const legacyCall = await call('/api/auth/recover', {
+      method: 'POST',
+      body: { name: '乙作者', code: 'ABCD-EFGH-JKMN', newPassword: 'legacy-new-pass' },
+    });
+    eq(legacyCall.status, 409, '没有恢复码的账号回 409');
+    const legacyBody = await legacyCall.json();
+    eq(legacyBody.code, 'no_recovery', '并且说清是「没有恢复码」');
+    ok(legacyBody.error.indexOf('reset-password.js') > 0, '指到本机那条路：' + legacyBody.error);
   });
 
   await app.close();

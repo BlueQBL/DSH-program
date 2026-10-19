@@ -81,6 +81,16 @@ group('app.js 里用到的 class 都在样式表里有定义', () => {
   ok(missing.length === 0, `样式表里没有的 class：${uniq(missing).join('、')}`);
 });
 
+group('带 hidden 的元素真的藏得住（作者样式的 display 抢不回来）', () => {
+  // 浏览器给 [hidden] 的默认样式是「浏览器默认样式」，作者样式里随便一条 display 就能盖掉它。
+  // 这里钉死两件事：有全局兜底，且没有别处用 display !important 反抢。
+  ok(/\[hidden\]\s*\{[^}]*display:\s*none\s*!important/.test(css), '样式表里有 `[hidden] { display: none !important }`');
+  const strong = uniq(matchAll(css, /display:\s*([a-z-]+)\s*!important/g)).filter((v) => v !== 'none');
+  ok(strong.length === 0, `没有别处用 display !important 抢回来：${strong.join('、')}`);
+  // 页面上带 hidden 的元素至少要有一个（否则这条规则本身就是空话）
+  ok(/\shidden(\s|>|=)/.test(html), 'index.html 里确实有带 hidden 的元素');
+});
+
 group('样式表用的每个 CSS 变量都定义过', () => {
   const defined = new Set(matchAll(css, /^\s*(--[a-z0-9-]+):/gm));
   const used = uniq(matchAll(css, /var\((--[a-z0-9-]+)/g));
@@ -97,7 +107,9 @@ group('script 标签按依赖顺序、且文件都在', () => {
     'lib/template.js',
     'lib/polisher.js',
     'lib/mock-writer.js',
+    'lib/auth-rules.js',
     'js/core.js',
+    'js/auth.js',
     'js/api.js',
     'js/app.js',
   ];
@@ -144,6 +156,40 @@ function idToCamel(id) {
   const parts = id.split('-');
   return parts[0] + parts.slice(1).map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join('');
 }
+
+group('账号在报头里（不遮挡稿纸），头像是圆的', () => {
+  const masthead = html.slice(html.indexOf('<header class="masthead"'), html.indexOf('</header>'));
+  const accountRule = (css.match(/\.account \{[^}]*\}/) || [''])[0];
+  const menuRule = (css.match(/\.account-menu \{[^}]*\}/) || [''])[0];
+  const avatarRule = (css.match(/\n\.avatar \{[^}]*\}/) || [''])[0];
+  ok(masthead.indexOf('id="account"') >= 0, '账号块在报头里');
+  // 钉在视口上的浮层会压住稿片正文和卡片上的按钮 —— 这条钉死「别钉」
+  ok(!/position:\s*fixed/.test(accountRule), '账号不是固定浮层（固定住就会盖住内容）');
+  ok(/position:\s*relative/.test(accountRule), '账号跟着报头走');
+  ok(/top:\s*calc\(100% \+ 8px\)/.test(menuRule), '菜单在报头里往下弹');
+  ok(/border-radius:\s*50%/.test(avatarRule), '头像是圆的');
+  ok(html.indexOf('class="masthead__sep"') > 0, '和「模板 / 写作留档」之间有一道细线分开');
+});
+
+group('稿片的栏宽跟着稿数走（一稿占满、两稿各半、三稿三分之一、四稿 2×2）', () => {
+  // .drafts 在台面布局里也出现过一次（只管 grid-area），所以挑「写了 grid-template-columns」的那条
+  const blocks = css.match(/\.drafts \{[^}]*\}/g) || [];
+  const grid = blocks.find((b) => b.includes('grid-template-columns')) || '';
+  const ruleOf = (n) => (css.match(new RegExp(`\\.drafts\\[data-count="${n}"\\] \\{[^}]*\\}`)) || [''])[0];
+  ok(/grid-template-columns:\s*minmax\(0, 1fr\)/.test(grid), '默认一栏（一稿占满）');
+  ok(/repeat\(2, minmax\(0, 1fr\)\)/.test(ruleOf('2')), '2 稿分 2 栏');
+  ok(/repeat\(3, minmax\(0, 1fr\)\)/.test(ruleOf('3')), '3 稿分 3 栏');
+  ok(/repeat\(2, minmax\(0, 1fr\)\)/.test(ruleOf('4')), '4 稿是 2×2（两栏，不是四栏）');
+  ok(!/auto-fit/.test(grid), '不再用 auto-fit（它按容器宽度定栏宽，一稿时反而挤成一条）');
+  ok(app.includes('dom.drafts.dataset.count = String(state.versions.length)'), 'app.js 把稿数写到 data-count 上');
+  ok(/\.drafts\[data-count="3"\] \.draft__foot/.test(css), '窄栏时稿片底部改成上下两行（按钮不挤成一竖条）');
+  ok(/--draft-h:/.test(grid), '给了稿片正文一个高度上限（不然稿子一长就撑到页面最底部）');
+  ok(/max-height:\s*var\(--draft-h/.test(css), '稿片正文按 --draft-h 卡高');
+  ok(/scrollbar-width:\s*thin/.test(css) && /::-webkit-scrollbar-thumb/.test(css), '卡片里那根滚动条是细的（要滚，但别压着稿纸）');
+  const mobile = css.slice(css.indexOf('@media (max-width: 720px)'));
+  ok(/\.drafts \{[^}]*minmax\(0, 1fr\)/.test(mobile), '手机上永远一栏');
+  ok(/\.draft__body \{[^}]*max-height:\s*none/.test(mobile), '手机上不卡高度（整页滚，不再套一层卡片滚动）');
+});
 
 group('所有用户可见的文字都走 DOM 节点（不拼 innerHTML）', () => {
   scripts.forEach((text) => {

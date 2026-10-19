@@ -206,7 +206,16 @@ const collectText = (el) =>
     el.dataset.export = m[1];
     return el;
   });
-  [...html.matchAll(/id="([^"]+)"/g)].forEach((m) => byId(m[1]));
+  // 按标签扫描：id 之外还要记住这个标签上写没写 hidden / inert / disabled，
+  // 否则「一开始浮层是关着的」这种事在桩里永远是 false，测出来的只是桩的形状。
+  html.split('>').forEach((chunk) => {
+    const id = chunk.match(/\sid="([^"]+)"/);
+    if (!id) return;
+    const el = byId(id[1]);
+    if (/\shidden(\s|=|$)/.test(chunk)) el.hidden = true;
+    if (/\sinert(\s|=|$)/.test(chunk)) el.setAttribute('inert', '');
+    if (/\sdisabled(\s|=|$)/.test(chunk)) el.disabled = true;
+  });
 
   const document = {
     readyState: 'complete',
@@ -219,6 +228,26 @@ const collectText = (el) =>
   };
 
   const storage = new Map();
+  /**
+   * 一个极小的 Cookie 罐子。
+   * 为什么要它：登录态是 HttpOnly Cookie，而 Node 的 fetch 不会自动保存 ——
+   * 不补这一层，「注册之后还是未登录」根本测不出来。
+   */
+  const jar = new Map();
+  const applySetCookie = (lines) => {
+    lines.forEach((line) => {
+      const [pair, ...attrs] = String(line).split(';');
+      const eq = pair.indexOf('=');
+      if (eq < 0) return;
+      const name = pair.slice(0, eq).trim();
+      const value = pair.slice(eq + 1).trim();
+      const expired = attrs.some((a) => /^\s*max-age\s*=\s*0\s*$/i.test(a));
+      if (!value || expired) jar.delete(name);
+      else jar.set(name, value);
+    });
+  };
+  const cookieHeader = () => Array.from(jar.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
+
   const win = {
     document,
     location: { protocol: 'http:', href: base + '/' },
@@ -232,8 +261,21 @@ const collectText = (el) =>
     setTimeout,
     clearTimeout,
     console,
-    // 指到真服务端：relative URL 补上 base
-    fetch: (url, init) => fetch(/^https?:/.test(url) ? url : base + url, init),
+    // 指到真服务端：relative URL 补上 base；顺手把登录态那张票带上
+    fetch: async (url, init) => {
+      const abs = /^https?:/.test(url) ? url : base + url;
+      const options = Object.assign({}, init || {});
+      const headers = new Headers(options.headers || {});
+      const cookie = cookieHeader();
+      if (cookie) headers.set('cookie', cookie);
+      options.headers = headers;
+      const res = await fetch(abs, options);
+      const lines = typeof res.headers.getSetCookie === 'function'
+        ? res.headers.getSetCookie()
+        : [res.headers.get('set-cookie')].filter(Boolean);
+      applySetCookie(lines);
+      return res;
+    },
     navigator: { clipboard: { writeText: () => Promise.resolve() } },
     URL: { createObjectURL: () => 'blob:x', revokeObjectURL: () => {} },
     Blob: function Blob() {},
@@ -252,7 +294,18 @@ const collectText = (el) =>
   win.structuredClone = (v) => v;
 
   const context = vm.createContext(win);
-  for (const f of ['lib/modes.js', 'lib/record.js', 'lib/template.js', 'lib/polisher.js', 'lib/mock-writer.js', 'js/core.js', 'js/api.js', 'js/app.js']) {
+  for (const f of [
+    'lib/modes.js',
+    'lib/record.js',
+    'lib/template.js',
+    'lib/polisher.js',
+    'lib/mock-writer.js',
+    'lib/auth-rules.js',
+    'js/core.js',
+    'js/auth.js',
+    'js/api.js',
+    'js/app.js',
+  ]) {
     vm.runInContext(fs.readFileSync(path.join(ROOT, f), 'utf8'), context, { filename: f });
   }
 
@@ -360,14 +413,50 @@ const collectText = (el) =>
     ok(okDone, '稿片区出现了成稿');
     ok(collectText(firstDraft()).indexOf('第一稿') >= 0, '稿签写着第一稿：' + collectText(firstDraft()).slice(0, 12));
     ok(/\d+ 稿/.test(summary()), '参数摘要标了这一批几稿：' + summary());
+    // 栏宽跟着稿数走：3 稿 → data-count=3（CSS 据此分成三栏）
+    eq(ids.get('drafts').dataset.count, String(drafts().length), '稿数写进了 data-count（' + ids.get('drafts').dataset.count + '）');
+    eq(drafts().length, 3, '默认出三稿');
   });
 
   await agroup('换板块：上一个板块的原稿与成稿都不跟过来', async () => {
     click('内容改写');
     eq(box().value, '', '新板块的原稿是空的（没带上续写那段）');
     eq(drafts().length, 0, '稿片区也是空的（没挂着续写的稿片）');
+    eq(ids.get('drafts').dataset.count, '0', '没有稿子时 data-count 是 0（栏宽回到一栏）');
     typeIn('本公司产品具有性能稳定、操作便捷的特点。');
     eq(box().value, '本公司产品具有性能稳定、操作便捷的特点。', '在新板块里能正常写东西');
+  });
+
+  await agroup('一稿就占满：把「一次几稿」调成一，data-count 跟着变成 1', async () => {
+    // 参数栏里「一次几稿」的第一颗按钮 = 一稿
+    const one = findAll(ids.get('ctl-versions'), '.chip').find((b) => collectText(b) === '一');
+    ok(one, '参数栏里有「一」这颗按钮');
+    one.click();
+    ok(summary().indexOf('1 稿') >= 0, '参数摘要说这一批 1 稿：' + summary().slice(0, 24));
+    ids.get('generate').click();
+    const done = await waitFor(() => drafts().length === 1 && draftText(firstDraft()).length > 5);
+    ok(done, '只出了一稿（' + drafts().length + ' 稿，' + draftText(firstDraft()).length + ' 字）');
+    eq(ids.get('drafts').dataset.count, '1', 'data-count 是 1（CSS 据此让这张稿纸占满整行）');
+
+    // 调回三稿，栏数跟着回去
+    const three = findAll(ids.get('ctl-versions'), '.chip').find((b) => collectText(b) === '三');
+    if (three) three.click();
+    ids.get('generate').click();
+    ok(await waitFor(() => drafts().length === 3), '三稿并排又回来了');
+    eq(ids.get('drafts').dataset.count, '3', 'data-count 回到 3');
+  });
+
+  await agroup('四稿是 2×2：栏数是两栏，不是四栏', async () => {
+    const four = findAll(ids.get('ctl-versions'), '.chip').find((b) => collectText(b) === '四');
+    ok(four, '参数栏里有「四」这颗按钮');
+    if (four) four.click();
+    ids.get('generate').click();
+    ok(await waitFor(() => drafts().length === 4), '出了四稿');
+    eq(ids.get('drafts').dataset.count, '4', 'data-count 是 4');
+    // 稿数是 4，但 CSS 里给的是两栏 —— 两行两列，每张稿纸占一半宽
+    const css = fs.readFileSync(path.join(ROOT, 'css/styles.css'), 'utf8');
+    const rule = (css.match(/\.drafts\[data-count="4"\] \{[^}]*\}/) || [''])[0];
+    ok(/repeat\(2, minmax\(0, 1fr\)\)/.test(rule), '四稿在样式表里是 repeat(2, …)：' + rule.replace(/\s+/g, ' ').slice(0, 60));
   });
 
   await agroup('换回去：续写那份原稿与成稿原样还在', async () => {
@@ -408,6 +497,175 @@ const collectText = (el) =>
     eq(ids.get('compare').hidden, false, '对比面板显示了');
     ok((ids.get('compare-summary')._text || '').length > 0, '摘要给出了差异：' + (ids.get('compare-summary')._text || '').slice(0, 40));
     ok((findAll(ids.get('compare-changes'), 'li') || []).length >= 1, '改动清单里有条目');
+  });
+
+  // ── 账号：登录、留档按人分开、认领、退出 ──────────────────
+  const accountSignin = () => ids.get('account-signin');
+  const accountSelf = () => ids.get('account-self');
+  const historyCount = () => Number(ids.get('history-count')._text || '0') || 0;
+  let recoveryCode = '';
+
+  await agroup('登录浮层：点「登录 / 注册」打开，能切到注册', async () => {
+    eq(ids.get('auth-overlay').hidden, true, '一开始浮层是藏着的');
+    accountSignin().click();
+    eq(ids.get('auth-overlay').hidden, false, '点一下打开了');
+    eq(ids.get('auth-title')._text, '登录', '默认停在登录');
+    ids.get('auth-tab-register').click();
+    eq(ids.get('auth-title')._text, '注册', '切到注册');
+    eq(ids.get('auth-confirm-field').hidden, false, '注册要输两遍密码');
+    ids.get('auth-cancel').click();
+    eq(ids.get('auth-overlay').hidden, true, '取消就关掉，什么都没改');
+  });
+
+  await agroup('注册：报头换成账号，留档立刻按这个账号算', async () => {
+    const before = historyCount();
+    ok(before >= 1, '注册前，没登录那一桶里有 ' + before + ' 篇');
+    accountSignin().click();
+    ids.get('auth-tab-register').click();
+    ids.get('auth-name').value = '三易测试员';
+    ids.get('auth-password').value = 'test-pass-2024';
+    ids.get('auth-confirm').value = 'test-pass-2024';
+    ids.get('auth-submit').click();
+    const done = await waitFor(() => accountSelf().hidden === false);
+    ok(done, '注册成功：报头出现了账号');
+    eq(ids.get('account-name')._text, '三易测试员', '名字显示出来了');
+    // 恢复码只出现这一次 → 注册之后浮层不关，先把这串码摆出来
+    eq(ids.get('auth-code-shown').hidden, false, '停在「恢复码」那一屏');
+    recoveryCode = ids.get('auth-code-value')._text || '';
+    ok(/^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(recoveryCode), '恢复码是 ABCD-EFGH-JKMN 这样：' + recoveryCode);
+    eq(ids.get('auth-actions').hidden, true, '那一屏只剩「抄好了」，没有别的按钮');
+    ids.get('auth-code-done').click();
+    eq(ids.get('auth-overlay').hidden, true, '点「抄好了」浮层才关');
+    ok(
+      String(ids.get('account-avatar').attrs['aria-label'] || '').indexOf('三易测试员') === 0,
+      '头像画出来了：' + ids.get('account-avatar').attrs['aria-label']
+    );
+    await waitFor(() => historyCount() === 0);
+    eq(historyCount(), 0, '新账号看到的是自己的留档：0 篇');
+  });
+
+  await agroup('认领：把「没登录时写的」接到这个账号名下', async () => {
+    const text = () => collectText(ids.get('history-list'));
+    ok(text().indexOf('本地模式') >= 0, '抽屉里说清了本地还有几篇：' + text().slice(0, 40));
+    const btn = findAll(ids.get('history-list'), 'button').find((b) => collectText(b).indexOf('认领') >= 0);
+    ok(Boolean(btn), '有一个「认领到这个账号」按钮');
+    if (btn) btn.click();
+    const claimed = await waitFor(() => historyCount() >= 1);
+    ok(claimed, '认领之后留档回来了（' + historyCount() + ' 篇）');
+  });
+
+  await agroup('退出登录：账号没了，稿子跟着账号走', async () => {
+    accountSelf().click();
+    eq(ids.get('account-menu').hidden, false, '点账号打开菜单');
+    ids.get('account-logout').click();
+    const out = await waitFor(() => accountSignin().hidden === false);
+    ok(out, '退出了：报头又是「登录 / 注册」');
+    eq(accountSelf().hidden, true, '账号块收起来了');
+    eq(ids.get('account-name')._text, '', '名字清掉了');
+    // 认领过的稿子已经归账号，没登录那一桶现在是空的 —— 这正是「按人分开」的意思
+    await waitFor(() => historyCount() === 0);
+    eq(historyCount(), 0, '没登录那一桶现在是空的：稿子跟着账号走了');
+  });
+
+  await agroup('登录：密码错了不放行，对了就回到自己的留档', async () => {
+    accountSignin().click();
+    ids.get('auth-name').value = '三易测试员';
+    ids.get('auth-password').value = 'wrong-password';
+    ids.get('auth-submit').click();
+    const failed = await waitFor(() => ids.get('auth-error').hidden === false);
+    ok(failed, '密码不对时说一句：' + ids.get('auth-error')._text);
+    eq(accountSelf().hidden, true, '没放进去：报头还是「登录 / 注册」');
+
+    ids.get('auth-password').value = 'test-pass-2024';
+    ids.get('auth-submit').click();
+    const back = await waitFor(() => accountSelf().hidden === false);
+    ok(back, '密码对了就登上了');
+    await waitFor(() => historyCount() >= 1);
+    ok(historyCount() >= 1, '这个账号的留档还在（' + historyCount() + ' 篇）');
+  });
+
+  await agroup('最近登录过的账号：退出之后再登录，名字点一下就填上', async () => {
+    accountSelf().click();
+    ids.get('account-logout').click();
+    ok(await waitFor(() => accountSignin().hidden === false), '先退出登录');
+
+    accountSignin().click();
+    eq(ids.get('auth-recent').hidden, false, '登录框下面列出了最近登录过的账号');
+    const chips = (ids.get('auth-recent').children || []).map((c) => collectText(c));
+    ok(chips.indexOf('三易测试员') >= 0, '刚才那个名字在列表里：' + chips.join('、'));
+    const chip = (ids.get('auth-recent').children || []).find((c) => collectText(c).indexOf('三易测试员') >= 0);
+    if (chip) chip.click();
+    eq(ids.get('auth-name').value, '三易测试员', '点一下就填好了名字');
+
+    ids.get('auth-password').value = 'test-pass-2024';
+    ids.get('auth-submit').click();
+    ok(await waitFor(() => accountSelf().hidden === false), '只需要再打一次密码就登进去了');
+  });
+
+  await agroup('改名字：只露一个「新名字」框，不要密码', async () => {
+    accountSelf().click();
+    ids.get('account-rename').click();
+    eq(ids.get('auth-title')._text, '改名字', '标题是「改名字」');
+    eq(ids.get('auth-name-field').hidden, false, '名字框露着');
+    eq(ids.get('auth-password-field').hidden, true, '密码框藏着（改名字不要密码）');
+    eq(ids.get('auth-name-label')._text, '新名字', '标签写的是「新名字」');
+    ids.get('auth-name').value = '改过的名字';
+    ids.get('auth-submit').click();
+    const renamed = await waitFor(() => ids.get('account-name')._text === '改过的名字');
+    ok(renamed, '报头上的名字跟着换了：' + ids.get('account-name')._text);
+  });
+
+  await agroup('换头像：格子点一个 emoji，保存后头像跟着换', async () => {
+    accountSelf().click();
+    ids.get('account-avatar-edit').click();
+    eq(ids.get('avatar-overlay').hidden, false, '头像浮层打开了');
+    const grid = ids.get('avatar-grid');
+    eq((grid.children || []).length, 20, '有 20 个 emoji 可选');
+    const pick = grid.children[2];
+    pick.click();
+    eq(findAll(grid, '.avatar-choice--on').length, 1, '选中的只有一个');
+    ids.get('avatar-save').click();
+    const saved = await waitFor(() => ids.get('avatar-overlay').hidden === true);
+    ok(saved, '保存之后浮层自己关了');
+    ok(
+      String(ids.get('account-avatar').attrs['aria-label'] || '').indexOf('emoji') >= 0,
+      '报头上的头像换成了 emoji：' + ids.get('account-avatar').attrs['aria-label']
+    );
+  });
+
+  await agroup('忘了密码：用恢复码重置，重置完直接登进去', async () => {
+    // 先退出来，模拟「密码忘了、人在登录框前」
+    accountSelf().click();
+    ids.get('account-logout').click();
+    ok(await waitFor(() => accountSignin().hidden === false), '已退出登录');
+
+    accountSignin().click();
+    eq(ids.get('auth-forgot').hidden, false, '登录框下面有「忘了密码？」');
+    ids.get('auth-forget').click();
+    eq(ids.get('auth-title')._text, '用恢复码重置密码', '切到找回密码那一屏');
+    eq(ids.get('auth-code-field').hidden, false, '多了一个「恢复码」框');
+    eq(ids.get('auth-new-field').hidden, false, '还要填新密码');
+
+    // 输错恢复码：当场拦住，不发请求
+    ids.get('auth-name').value = '改过的名字';
+    ids.get('auth-code').value = 'AAAA-AAAA-AAAA';
+    ids.get('auth-new').value = 'reset-pass-2025';
+    ids.get('auth-confirm').value = 'reset-pass-2025';
+    ids.get('auth-submit').click();
+    ok(await waitFor(() => ids.get('auth-error').hidden === false), '错码被服务端挡回来：' + (ids.get('auth-error')._text || ''));
+    eq(accountSelf().hidden, true, '没放进去');
+
+    // 换成真码
+    ids.get('auth-code').value = recoveryCode;
+    ids.get('auth-submit').click();
+    ok(await waitFor(() => accountSelf().hidden === false), '恢复码对了就重置并登录');
+    eq(ids.get('auth-code-shown').hidden, false, '重置完同样把新的恢复码摆出来');
+    const fresh = ids.get('auth-code-value')._text || '';
+    ok(fresh && fresh !== recoveryCode, '恢复码换了一把新的：' + fresh);
+    ids.get('auth-code-done').click();
+    eq(ids.get('auth-overlay').hidden, true, '看完就关');
+    await waitFor(() => historyCount() >= 1);
+    ok(historyCount() >= 1, '留档一篇没丢（' + historyCount() + ' 篇）');
   });
 
   console.log('\n通过 ' + pass + '/' + (pass + failures.length));

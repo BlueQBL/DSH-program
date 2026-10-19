@@ -89,6 +89,9 @@
 
     const record = {
       id: /^[A-Za-z0-9_-]{4,40}$/.test(String(input.id || '')) ? String(input.id) : makeId(),
+      // 这篇稿子归谁：登录后是账号 id（u_xxx），没登录就是 'local'。
+      // 服务端在存盘那一刻**强制写死**（不信客户端带来的值），这里只是把形状说清楚。
+      owner: /^[A-Za-z0-9_-]{1,40}$/.test(String(input.owner || '')) ? String(input.owner) : 'local',
       createdAt: input.createdAt || nowIso(),
       updatedAt: input.updatedAt || input.createdAt || nowIso(),
       mode: params.mode,

@@ -13,16 +13,32 @@
     isNode ? require('../lib/polisher.js') : root.WriterPolisher,
     isNode ? require('../lib/mock-writer.js') : root.WriterMock,
     isNode ? require('./core.js') : root.WriterCore,
-    isNode ? require('../lib/template.js') : root.WriterTemplate
+    isNode ? require('../lib/template.js') : root.WriterTemplate,
+    isNode ? require('./auth.js') : root.WriterAuth
   );
   if (isNode) module.exports = api;
   if (root) root.WriterApi = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (Modes, Polisher, Mock, Core, Template) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (Modes, Polisher, Mock, Core, Template, Auth) {
   'use strict';
 
   const HEALTH_TIMEOUT = 2500;
   const LOCAL_CHUNK = 6;
   const LOCAL_SPEED = 14;
+
+  /**
+   * 「票过期了」的唯一出口。
+   * 任何一个 /api/auth 请求回 401 都会叫它一次 —— 过期可能在任何一步被发现
+   * （改头像、改名字、存留档），每个调用点各写一遍「要不要切回未登录」必然漏掉一处。
+   */
+  const authLost = { handler: null };
+
+  function onAuthLost(handler) {
+    authLost.handler = typeof handler === 'function' ? handler : null;
+  }
+
+  const notifyAuthLost = (err) => {
+    if (authLost.handler) authLost.handler(err);
+  };
 
   class ApiError extends Error {
     constructor(message, status) {
@@ -102,6 +118,9 @@
       kind: 'server',
       info: health,
       base,
+
+      /** 账号：登录、注册、改头像 / 名字 / 密码（没登录时这些只是回 401） */
+      auth: Auth.createAuthApi({ onUnauthorized: notifyAuthLost }),
 
       /** 起稿：SSE 逐字推进，多个版本并行 */
       async generate(params, material, handlers, signal, model, template) {
@@ -257,6 +276,12 @@
           const data = await getJson('/api/health');
           return (data.history && data.history.count) || 0;
         },
+        /** 把「没登录时写的」那些稿子认领到当前账号名下 */
+        async claim() {
+          const res = await fetch(base + '/api/history/claim', { method: 'POST' });
+          if (!res.ok) throw await readError(res);
+          return (await res.json()).claimed || 0;
+        },
         async exportAll(format, opts) {
           const o = opts || {};
           const q = new URLSearchParams({ format: format || 'md' });
@@ -382,6 +407,42 @@
       /** 本地模式的模板库存在浏览器里（表单一关也能留着） */
       templates: Core.createLocalTemplateStore(storage),
 
+      /**
+       * 本地模式没有服务端，也就没有账号：如实说清楚，而不是假装失败。
+       * （账号是「留档按人分开」这件事的前提，浏览器里那本本来就只有你一个人。）
+       */
+      auth: {
+        async me() {
+          return {
+            ok: true,
+            user: null,
+            registerOpen: false,
+            authError: '本地模式（直接打开的 index.html）没有账号服务；起 node server.js 之后就能登录',
+          };
+        },
+        async register() {
+          throw new ApiError('本地模式没有账号服务：先起 node server.js');
+        },
+        async login() {
+          throw new ApiError('本地模式没有账号服务：先起 node server.js');
+        },
+        async logout() {
+          return { ok: true, user: null };
+        },
+        async setAvatar() {
+          throw new ApiError('本地模式没有账号，也就没有头像可换');
+        },
+        async rename() {
+          throw new ApiError('本地模式没有账号服务：先起 node server.js');
+        },
+        async changePassword() {
+          throw new ApiError('本地模式没有账号服务：先起 node server.js');
+        },
+        async recover() {
+          throw new ApiError('本地模式没有账号服务，也就没有密码可找回：先起 node server.js');
+        },
+      },
+
       history,
     };
   }
@@ -428,6 +489,7 @@
     createLocalApi,
     memoryStorage,
     parseFrame,
+    onAuthLost,
     LOCAL_SPEED,
     LOCAL_CHUNK,
   };
