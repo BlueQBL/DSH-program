@@ -1,0 +1,31 @@
+{
+  "name": "ai-image-generator",
+  "version": "1.0.0",
+  "private": true,
+  "description": "蓝晒 · AI 图片生成器：文字生成图片（尺寸 / 风格 / 画质可选）、AI 优化提示词、按可用性筛选出图模型、历史记录与下载（零依赖 Node + 原生前端）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node test/run-tests.js",
+    "test:models": "node test/models.test.js",
+    "test:upstream": "node test/upstream.test.js",
+    "test:store": "node test/store.test.js",
+    "test:offline": "node test/offline.test.js",
+    "test:server": "node test/server.test.js",
+    "test:ui": "node test/ui.test.js",
+    "fake:upstream": "node scripts/fake-upstream.js",
+    "shot": "node scripts/capture.js"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "keywords": [
+    "image-generation",
+    "text-to-image",
+    "openai-compatible",
+    "prompt",
+    "zero-dependency"
+  ],
+  "license": "MIT"
+}

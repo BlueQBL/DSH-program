@@ -137,6 +137,7 @@ http://localhost:5173
 | **云图 · 天气台** | `cloud-atlas/` | 零依赖 HTML + CSS + 原生 JS + Node 服务（含 API 代理） | `cd cloud-atlas && node server.js` → http://127.0.0.1:5240 |
 | **对谈录 · AI 聊天助手** | `ai-chat/` | 零依赖 HTML + CSS + 原生 JS + Node 服务（SSE 流式 + 本地持久化） | `cd ai-chat && node server.mjs` → http://127.0.0.1:5250 |
 | **三易 · 智能写作台** | `writing-assistant/` | 零依赖 HTML + CSS + 原生 JS + Node 服务（十个写作板块 + 自定义提示词模板 + 多语言翻译 + 多稿并推 + 版本对比 + 逐处朱批 + 留档） | `cd writing-assistant && node server.js` → http://127.0.0.1:5260 |
+| **蓝晒 · AI 图片生成器** | `ai-image-generator/` | 零依赖 HTML + CSS + 原生 JS + Node 服务（文生图 + 尺寸/风格/画质 + AI 优化提示词 + 出图模型筛选与可用性检测 + 历史留档与下载） | `cd ai-image-generator && node server.js` → http://127.0.0.1:5270 |
 
 后续新增项目会继续追加到本表。
 

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="蓝晒">
+  <rect width="64" height="64" rx="6" fill="#113a58"/>
+  <circle cx="42" cy="21" r="9" fill="#eef6f9" opacity="0.92"/>
+  <path d="M0 40 L18 26 L30 36 L42 28 L64 44 L64 64 L0 64 Z" fill="#0a2338"/>
+  <path d="M0 47 L16 38 L32 46 L48 40 L64 50 L64 64 L0 64 Z" fill="#06182a"/>
+  <rect x="6" y="6" width="52" height="52" rx="3" fill="none" stroke="#eef6f9" stroke-opacity="0.35" stroke-width="1.5"/>
+  <rect x="6" y="6" width="10" height="52" fill="#eef6f9" opacity="0.08"/>
+</svg>

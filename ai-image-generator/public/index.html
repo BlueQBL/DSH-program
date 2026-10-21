@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#123a58" />
+    <title>蓝晒 · AI 图片生成器</title>
+    <meta name="description" content="描述一句画面，选尺寸和风格，生成图片；AI 帮你扩写提示词，出图自动存档、随时下载。" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/css/styles.css" />
+  </head>
+  <body>
+    <div class="paper-light" aria-hidden="true"></div>
+
+    <header class="masthead">
+      <div class="brand">
+        <span class="brand__stamp" aria-hidden="true">蓝晒</span>
+        <div class="brand__text">
+          <h1 class="brand__name">AI 图片生成器</h1>
+          <p class="brand__sub mono">CYANOTYPE · 描述即显影</p>
+        </div>
+      </div>
+
+      <div class="masthead__tools">
+        <div class="model">
+          <label class="model__label" for="model-select">出图模型</label>
+          <div class="model__row">
+            <select id="model-select" class="select" aria-describedby="model-line">
+              <option value="">正在读取模型……</option>
+            </select>
+            <button id="verify-model" class="btn btn--ghost btn--small" type="button" title="真的生成一张最低画质的图来确认这个模型能用（会消耗少量额度）">
+              检测
+            </button>
+          </div>
+          <p id="model-line" class="model__line mono">正在问上游有哪些模型……</p>
+        </div>
+
+        <div class="status">
+          <span id="engine-badge" class="pill pill--muted">正在连接</span>
+          <button id="open-history" class="btn btn--quiet btn--small" type="button" aria-haspopup="dialog">
+            历史 <span id="history-count" class="mono">0</span>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main class="layout">
+      <!-- ── 曝光台：所有输入 ─────────────────────────────── -->
+      <section class="console" aria-labelledby="console-title">
+        <header class="console__head">
+          <p class="eyebrow mono">EXPOSURE TABLE / 01</p>
+          <h2 id="console-title" class="console__title">曝光台</h2>
+          <p class="console__hint">写你想要的画面，选好画幅和风格，然后按下曝光。</p>
+        </header>
+
+        <div class="field">
+          <div class="field__head">
+            <label class="field__label" for="prompt">画面描述</label>
+            <button id="optimize" class="btn btn--link" type="button">✦ 优化提示词</button>
+          </div>
+          <textarea
+            id="prompt"
+            class="textarea"
+            rows="5"
+            maxlength="2000"
+            placeholder="例：雨后的老城区，一个人撑着红伞走过积水，路灯刚亮"
+          ></textarea>
+          <div class="field__foot">
+            <span id="prompt-count" class="mono">0 / 2000</span>
+            <span id="optimize-note" class="note" role="status"></span>
+            <button id="revert-prompt" class="btn btn--link btn--tiny" type="button" hidden>还原原文</button>
+          </div>
+        </div>
+
+        <fieldset class="field">
+          <legend class="field__label">画幅</legend>
+          <div id="ratio-group" class="chips" role="group" aria-label="画幅比例"></div>
+          <div class="field__row">
+            <div id="tier-group" class="segmented" role="group" aria-label="清晰度"></div>
+            <span id="size-preview" class="mono size-preview">1024 × 1024</span>
+          </div>
+          <p id="size-note" class="note" hidden></p>
+        </fieldset>
+
+        <fieldset class="field">
+          <legend class="field__label">风格</legend>
+          <div id="style-group" class="chips chips--styles" role="group" aria-label="画面风格"></div>
+        </fieldset>
+
+        <fieldset class="field">
+          <legend class="field__label">
+            画质
+            <span class="legend__hint">越低越省额度</span>
+          </legend>
+          <div id="quality-group" class="segmented" role="group" aria-label="画质"></div>
+          <p id="quality-note" class="note"></p>
+        </fieldset>
+
+        <div class="expose">
+          <button id="generate" class="btn btn--primary" type="button">
+            <span class="btn__label">曝光</span>
+            <span class="mono btn__key">Ctrl ↵</span>
+          </button>
+          <span id="generate-hint" class="note mono"></span>
+        </div>
+
+        <details class="final">
+          <summary class="final__summary">最终发给模型的那段提示词</summary>
+          <p id="final-prompt" class="final__text mono"></p>
+        </details>
+      </section>
+
+      <!-- ── 接触印相纸：出图的相纸 ──────────────────────── -->
+      <section class="sheet" aria-labelledby="sheet-title">
+        <header class="sheet__head">
+          <div>
+            <p class="eyebrow mono">CONTACT SHEET / 02</p>
+            <h2 id="sheet-title" class="sheet__title">接触印相纸</h2>
+          </div>
+          <p class="sheet__meta mono"><span id="sheet-count">0</span> 张 <span id="sheet-size"></span></p>
+        </header>
+
+        <div id="frames" class="frames" aria-live="polite"></div>
+
+        <div id="empty" class="empty">
+          <p class="empty__title">还没有曝光过。</p>
+          <p class="empty__text">左边写一句描述、挑一个画幅，按下「曝光」，第一张就显影在这里。</p>
+        </div>
+      </section>
+    </main>
+
+    <!-- ── 历史抽屉 ───────────────────────────────────────── -->
+    <div id="history-drawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="history-title" hidden>
+      <div class="drawer__scrim" data-close="drawer"></div>
+      <div class="drawer__panel">
+        <header class="drawer__head">
+          <div>
+            <p class="eyebrow mono">ARCHIVE / 03</p>
+            <h2 id="history-title" class="drawer__title">历史记录</h2>
+          </div>
+          <button class="btn btn--quiet btn--small" type="button" data-close="drawer">关闭</button>
+        </header>
+        <div class="drawer__tools">
+          <input id="history-search" class="input" type="search" placeholder="搜描述、风格或模型" aria-label="搜索历史" />
+          <button id="history-clear" class="btn btn--link btn--small" type="button">清空</button>
+        </div>
+        <div id="history-list" class="drawer__list"></div>
+        <p id="history-empty" class="drawer__empty" hidden>没有匹配的记录。</p>
+      </div>
+    </div>
+
+    <!-- ── 看大图 ─────────────────────────────────────────── -->
+    <div id="viewer" class="viewer" role="dialog" aria-modal="true" aria-labelledby="viewer-caption" hidden>
+      <div class="viewer__scrim" data-close="viewer"></div>
+      <figure class="viewer__figure">
+        <img id="viewer-image" class="viewer__image" alt="" />
+        <figcaption id="viewer-caption" class="viewer__caption mono"></figcaption>
+        <div class="viewer__actions">
+          <button id="viewer-download" class="btn btn--primary btn--small" type="button">下载这张</button>
+          <button id="viewer-copy" class="btn btn--ghost btn--small" type="button">复制提示词</button>
+          <button class="btn btn--quiet btn--small" type="button" data-close="viewer">关闭</button>
+        </div>
+      </figure>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+    <noscript>
+      <p class="noscript">这个页面需要 JavaScript：请启用后再打开。</p>
+    </noscript>
+
+    <!-- 前后端共用的纯函数（尺寸表 / 风格表 / 提示词拼法）先加载，
+         界面上的「最终提示词」才和真正发给上游的那段完全一致 -->
+    <script src="/lib/styles.js"></script>
+    <script src="/js/api.js"></script>
+    <script src="/js/app.js"></script>
+  </body>
+</html>
