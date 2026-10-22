@@ -115,5 +115,27 @@ const SVG = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="8" heigh
     not(Images.downloadName({}).includes('undefined'), '空记录也不炸');
   });
 
+  console.log('读像素尺寸');
+
+  await group('PNG / JPEG / GIF 都能读出宽高（从链接导入时要靠它填尺寸）', () => {
+    const png = Offline.encodePng(8, 5, Buffer.alloc(8 * 5 * 3, 0));
+    eq(Images.dimensionsOf(png), { width: 8, height: 5 }, 'PNG');
+
+    // 手搓一个最小 JPEG 头：SOI + SOF0
+    const jpeg = Buffer.concat([
+      Buffer.from([0xff, 0xd8]),
+      Buffer.from([0xff, 0xc0, 0x00, 0x11, 0x08]),
+      Buffer.from([0x02, 0x58, 0x03, 0x20]),
+      Buffer.alloc(20, 0),
+    ]);
+    eq(Images.dimensionsOf(jpeg), { width: 800, height: 600 }, 'JPEG');
+
+    const gif = Buffer.concat([Buffer.from('GIF89a', 'latin1'), Buffer.from([0x40, 0x01, 0xf0, 0x00]), Buffer.alloc(16, 0)]);
+    eq(Images.dimensionsOf(gif), { width: 320, height: 240 }, 'GIF');
+
+    eq(Images.dimensionsOf(Buffer.from('<html>nope</html>')), null, '不是图片返回 null');
+    eq(Images.dimensionsOf(Buffer.alloc(0)), null, '空 buffer 返回 null');
+  });
+
   report('image');
 })();

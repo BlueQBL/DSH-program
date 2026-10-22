@@ -54,10 +54,49 @@
           <p class="console__hint">写你想要的画面，选好画幅和风格，然后按下曝光。</p>
         </header>
 
+        <!-- 印相配方：风格 + 画幅 + 清晰度 + 画质 + 一段附加词，一键套用 -->
+        <div class="field">
+          <div class="field__head">
+            <span class="field__label">印相配方</span>
+            <span class="field__tools">
+              <button
+                id="save-preset"
+                class="btn btn--link btn--tiny"
+                type="button"
+                title="把当前的风格 / 画幅 / 清晰度 / 画质存成一个预设"
+              >
+                存下当前设置
+              </button>
+            </span>
+          </div>
+          <div id="preset-group" class="chips chips--presets" role="group" aria-label="预设"></div>
+        </div>
+
+        <!-- 改图模式：从相纸或本地图片进来时出现 -->
+        <div id="edit-bar" class="editbar" hidden>
+          <img id="edit-source" class="editbar__thumb" alt="" />
+          <div class="editbar__body">
+            <p class="editbar__title">正在改这张</p>
+            <p id="edit-source-note" class="editbar__note mono"></p>
+          </div>
+          <button id="edit-cancel" class="btn btn--quiet btn--small" type="button">取消改图</button>
+        </div>
+
         <div class="field">
           <div class="field__head">
             <label class="field__label" for="prompt">画面描述</label>
-            <button id="optimize" class="btn btn--link" type="button">✦ 优化提示词</button>
+            <span class="field__tools">
+              <button id="optimize" class="btn btn--link btn--tiny" type="button">✦ 优化提示词</button>
+              <button
+                id="pick-source"
+                class="btn btn--link btn--tiny"
+                type="button"
+                title="选一张本机图片作为原图来改"
+              >
+                用本地图片改
+              </button>
+            </span>
+            <input id="source-file" type="file" accept="image/png,image/jpeg,image/webp" hidden />
           </div>
           <textarea
             id="prompt"
@@ -104,6 +143,7 @@
           </button>
           <span id="generate-hint" class="note mono"></span>
         </div>
+        <p class="note expose__note">一次出一张。想多要几个方案就再按一次 —— 每次都是独立的一张、独立计费。</p>
 
         <details class="final">
           <summary class="final__summary">最终发给模型的那段提示词</summary>
@@ -118,7 +158,12 @@
             <p class="eyebrow mono">CONTACT SHEET / 02</p>
             <h2 id="sheet-title" class="sheet__title">接触印相纸</h2>
           </div>
-          <p class="sheet__meta mono"><span id="sheet-count">0</span> 张 <span id="sheet-size"></span></p>
+          <div class="sheet__tools">
+            <button id="open-community" class="btn btn--quiet btn--small" type="button" aria-haspopup="dialog">
+              社区 <span id="community-count" class="mono">0</span>
+            </button>
+            <p class="sheet__meta mono"><span id="sheet-count">0</span> 张 <span id="sheet-size"></span></p>
+          </div>
         </header>
 
         <div id="frames" class="frames" aria-live="polite"></div>
@@ -143,24 +188,90 @@
         </header>
         <div class="drawer__tools">
           <input id="history-search" class="input" type="search" placeholder="搜描述、风格或模型" aria-label="搜索历史" />
+          <button id="history-import" class="btn btn--link btn--small" type="button" title="把上游控制台里那张图的链接贴进来，收回历史">从链接导入</button>
           <button id="history-clear" class="btn btn--link btn--small" type="button">清空</button>
+        </div>
+        <div id="import-row" class="drawer__import" hidden>
+          <input
+            id="import-url"
+            class="input"
+            type="url"
+            placeholder="粘贴图片链接：https://…/xxx.png 或 data:image/…"
+            aria-label="图片链接"
+          />
+          <button id="import-submit" class="btn btn--primary btn--small" type="button">导入</button>
         </div>
         <div id="history-list" class="drawer__list"></div>
         <p id="history-empty" class="drawer__empty" hidden>没有匹配的记录。</p>
       </div>
     </div>
 
-    <!-- ── 看大图 ─────────────────────────────────────────── -->
+    <!-- ── 社区抽屉 ───────────────────────────────────────── -->
+    <div id="community-drawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="community-title" hidden>
+      <div class="drawer__scrim" data-close="community"></div>
+      <div class="drawer__panel drawer__panel--wide">
+        <header class="drawer__head">
+          <div>
+            <p class="eyebrow mono">GALLERY / 04</p>
+            <h2 id="community-title" class="drawer__title">社区展墙</h2>
+            <p class="drawer__hint note">这台机器上的分享。点「拿来改」可以把别人的提示词带回去接着改。</p>
+          </div>
+          <button class="btn btn--quiet btn--small" type="button" data-close="community">关闭</button>
+        </header>
+        <div class="drawer__tools">
+          <div id="community-sort" class="segmented" role="group" aria-label="排序"></div>
+          <span id="community-total" class="note mono"></span>
+        </div>
+        <div id="community-list" class="cards"></div>
+        <p id="community-empty" class="drawer__empty" hidden>还没有人分享。出图之后点相纸上的「分享」就挂上来了。</p>
+      </div>
+    </div>
+
+    <!-- ── 分享对话框 ─────────────────────────────────────── -->
+    <div id="share-dialog" class="dialog" role="dialog" aria-modal="true" aria-labelledby="share-title" hidden>
+      <div class="dialog__scrim" data-close="share"></div>
+      <form id="share-form" class="dialog__panel">
+        <p class="eyebrow mono">SHARE / 05</p>
+        <h2 id="share-title" class="dialog__title">把这张挂到社区</h2>
+        <img id="share-thumb" class="dialog__thumb" alt="" />
+        <label class="field__label" for="share-author">署名</label>
+        <input id="share-author" class="input" type="text" maxlength="24" placeholder="想让人怎么称呼你" />
+        <label class="field__label" for="share-note">一句说明（可选）</label>
+        <textarea id="share-note" class="textarea textarea--short" maxlength="120" rows="2" placeholder="这张是怎么想出来的"></textarea>
+        <label class="check">
+          <input id="share-hide-prompt" type="checkbox" />
+          <span>不公开提示词（别人看得到图，看不到描述）</span>
+        </label>
+        <div class="dialog__actions">
+          <button id="share-submit" class="btn btn--primary btn--small" type="submit">挂上去</button>
+          <button class="btn btn--quiet btn--small" type="button" data-close="share">取消</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- ── 看大图（带放大） ───────────────────────────────── -->
     <div id="viewer" class="viewer" role="dialog" aria-modal="true" aria-labelledby="viewer-caption" hidden>
       <div class="viewer__scrim" data-close="viewer"></div>
       <figure class="viewer__figure">
-        <img id="viewer-image" class="viewer__image" alt="" />
+        <div id="viewer-stage" class="viewer__stage">
+          <img id="viewer-image" class="viewer__image" alt="" draggable="false" />
+        </div>
+        <div class="viewer__zoom" role="group" aria-label="缩放">
+          <button id="zoom-out" class="btn btn--quiet btn--small" type="button" aria-label="缩小">−</button>
+          <span id="zoom-level" class="mono">适应</span>
+          <button id="zoom-in" class="btn btn--quiet btn--small" type="button" aria-label="放大">＋</button>
+          <button id="zoom-fit" class="btn btn--quiet btn--small" type="button">适应</button>
+          <button id="zoom-actual" class="btn btn--quiet btn--small" type="button" title="按原始像素看 1:1，能看出细节和噪点">1:1</button>
+        </div>
         <figcaption id="viewer-caption" class="viewer__caption mono"></figcaption>
         <div class="viewer__actions">
           <button id="viewer-download" class="btn btn--primary btn--small" type="button">下载这张</button>
           <button id="viewer-copy" class="btn btn--ghost btn--small" type="button">复制提示词</button>
+          <button id="viewer-edit" class="btn btn--ghost btn--small" type="button">改这张</button>
+          <button id="viewer-share" class="btn btn--ghost btn--small" type="button">分享</button>
           <button class="btn btn--quiet btn--small" type="button" data-close="viewer">关闭</button>
         </div>
+        <p class="viewer__hint note mono">滚轮缩放 · 拖动平移 · 双击在 1:1 与适应之间切换</p>
       </figure>
     </div>
 

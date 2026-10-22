@@ -96,7 +96,7 @@ function respond(status, payload, options) {
 
   console.log('出图请求');
 
-  await group('请求形状对：model / prompt / size / quality / n / response_format', async () => {
+  await group('请求形状对：model / prompt / size / quality / response_format（且不带 n）', async () => {
     let captured = null;
     globalThis.fetch = async (url, init) => {
       captured = { url: String(url), headers: init.headers, body: JSON.parse(init.body) };
@@ -109,7 +109,6 @@ function respond(status, payload, options) {
       prompt: 'a white cat',
       size: '1024x1024',
       quality: 'low',
-      n: 1,
     });
     eq(captured.url, 'http://fake.local/v1/images/generations', '打的是 /images/generations');
     eq(captured.headers.authorization, 'Bearer ' + fake('sk', 'test', '1234567890'), '带上 Bearer');
@@ -117,10 +116,20 @@ function respond(status, payload, options) {
     eq(captured.body.prompt, 'a white cat', '提示词');
     eq(captured.body.size, '1024x1024', '尺寸');
     eq(captured.body.quality, 'low', '画质');
-    eq(captured.body.n, 1, '张数');
+    eq('n' in captured.body, false, '报文里根本没有 n：一次就一张，别让平台按 2 张扣钱');
     eq(captured.body.response_format, 'b64_json', '默认要 base64，方便自己落盘');
     eq(out.images.length, 1, '拿到一张');
     eq(out.images[0].b64, 'aGVsbG8=', 'base64 原样带出');
+  });
+
+  await group('就算调用方误传 n=4，报文里也不会出现 n', async () => {
+    let body = null;
+    globalThis.fetch = async (url, init) => {
+      body = JSON.parse(init.body);
+      return respond(200, { data: [{ b64_json: 'aGVsbG8=' }] });
+    };
+    await Upstream.generateImage({ apiKey: 'k'.repeat(12), baseUrl: 'http://f/v1', model: 'm', prompt: 'p', n: 4 });
+    eq('n' in body, false, 'upstream.js 是最后一道闸门：谁的 n 都传不出去');
   });
 
   await group('data: 前缀的 base64 也认（平台文档里的返回就是这样）', async () => {
@@ -272,6 +281,111 @@ function respond(status, payload, options) {
     eq(bodies[0].response_format.type, 'json_object', '第一次要 JSON');
     eq('response_format' in bodies[1], false, '第二次去掉了');
     eq(out.text, '{"prompt":"x"}', '拿到内容');
+  });
+
+  console.log('改图（multipart）');
+
+  await group('改图请求的形状对：model / prompt / image / size / quality（且不带 n）', async () => {
+    let captured = null;
+    globalThis.fetch = async (url, init) => {
+      captured = { url: String(url), headers: init.headers, body: init.body };
+      return respond(200, { data: [{ b64_json: 'aGVsbG8=' }] });
+    };
+    const out = await Upstream.editImage({
+      apiKey: fake('sk', 'test', '1234567890'),
+      baseUrl: 'http://f/v1',
+      model: 'gpt-image-2',
+      prompt: '把背景换成夜景',
+      images: [{ buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47]), mime: 'image/png', filename: 'src.png' }],
+      size: '1024x1024',
+      quality: 'low',
+    });
+    eq(captured.url, 'http://f/v1/images/edits', '打的是 /images/edits');
+    eq(captured.headers.authorization, 'Bearer ' + fake('sk', 'test', '1234567890'), '带上 Bearer');
+    eq('content-type' in captured.headers, false, 'content-type 交给 fetch 自己填（要带 boundary）');
+    ok(captured.body instanceof FormData, '请求体是 FormData');
+    eq(captured.body.get('model'), 'gpt-image-2', 'model 字段');
+    eq(captured.body.get('prompt'), '把背景换成夜景', 'prompt 字段');
+    eq(captured.body.get('size'), '1024x1024', 'size 字段');
+    eq(captured.body.get('quality'), 'low', 'quality 字段');
+    eq(captured.body.get('n'), null, '表单里没有 n：一次只改出一张');
+    eq(captured.body.get('response_format'), 'b64_json', '默认要 base64');
+    ok(captured.body.get('image') !== null, '单张时字段名是 image');
+    eq(out.images.length, 1, '拿到改好的图');
+  });
+
+  await group('多张参考图用 image[]（gpt-image 的多图参考）', async () => {
+    let captured = null;
+    globalThis.fetch = async (url, init) => {
+      captured = init.body;
+      return respond(200, { data: [{ url: 'https://x/y.png' }] });
+    };
+    await Upstream.editImage({
+      apiKey: 'k'.repeat(12),
+      baseUrl: 'http://f/v1',
+      model: 'gpt-image-2',
+      prompt: 'p',
+      images: [
+        { buffer: Buffer.from([1, 2, 3]), mime: 'image/png' },
+        { buffer: Buffer.from([4, 5, 6]), mime: 'image/jpeg' },
+      ],
+    });
+    eq(captured.getAll('image[]').length, 2, '两张都挂到 image[] 上');
+    eq(captured.get('image'), null, '不再用单数 image 字段');
+  });
+
+  await group('改图不认 response_format 时去掉重试一次', async () => {
+    const bodies = [];
+    globalThis.fetch = async (url, init) => {
+      bodies.push(init.body);
+      if (init.body.get('response_format')) return respond(400, { error: { message: 'unsupported' } });
+      return respond(200, { data: [{ url: 'https://x/z.png' }] });
+    };
+    const out = await Upstream.editImage({
+      apiKey: 'k'.repeat(12),
+      baseUrl: 'http://f/v1',
+      model: 'dall-e-3',
+      prompt: 'p',
+      images: [{ buffer: Buffer.from([1, 2, 3]), mime: 'image/png' }],
+    });
+    eq(bodies.length, 2, '试了两次');
+    eq(bodies[1].get('response_format'), null, '第二次去掉了');
+    eq(out.images[0].url, 'https://x/z.png', '拿到了图');
+  });
+
+  await group('没有原图 / 上游报错 / 返回里没图 都说清楚', async () => {
+    try {
+      await Upstream.editImage({ apiKey: 'k'.repeat(12), baseUrl: 'http://f/v1', model: 'm', prompt: 'p', images: [] });
+      ok(false, '应该报错');
+    } catch (err) {
+      has(err.message, '原图', '说明缺原图');
+    }
+
+    globalThis.fetch = async () => respond(400, { error: { message: 'image must be a png' } });
+    try {
+      await Upstream.editImage({
+        apiKey: 'k'.repeat(12),
+        baseUrl: 'http://f/v1',
+        model: 'm',
+        prompt: 'p',
+        images: [{ buffer: Buffer.from([1]), mime: 'image/png' }],
+      });
+    } catch (err) {
+      has(err.message, '上游', '把上游的原因带出来');
+    }
+
+    globalThis.fetch = async () => respond(200, { data: [{ revised_prompt: '只有提示词' }] });
+    try {
+      await Upstream.editImage({
+        apiKey: 'k'.repeat(12),
+        baseUrl: 'http://f/v1',
+        model: 'm',
+        prompt: 'p',
+        images: [{ buffer: Buffer.from([1]), mime: 'image/png' }],
+      });
+    } catch (err) {
+      has(err.message, '改图', '说清是改图拿不到图');
+    }
   });
 
   console.log('下载上游图片');

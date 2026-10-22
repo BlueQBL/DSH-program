@@ -146,6 +146,10 @@ function createStore(options) {
       quality: String(r.quality || '').slice(0, 12),
       model: String(r.model || '').slice(0, 80),
       engine: r.engine === 'offline' ? 'offline' : 'live',
+      // 'generate' 直接出图，'edit' 基于已有图片改
+      kind: r.kind === 'edit' ? 'edit' : 'generate',
+      parentId: String(r.parentId || '').slice(0, 40),
+      parentFile: path.basename(String(r.parentFile || '')),
       file: path.basename(String(r.file || '')),
       mime: String(r.mime || 'image/png').slice(0, 40),
       bytes: Number(r.bytes) || 0,
@@ -269,7 +273,9 @@ function createStore(options) {
     const target = path.join(imageDir, file);
     const tmp = `${target}.tmp-${process.pid}-${random4()}`;
     await fsp.writeFile(tmp, buffer);
-    await fsp.rename(tmp, target);
+    // 和 JSON 那边同一个坑：Windows 上刚写完的大文件可能正被杀毒软件扫描，
+    // rename 会短暂 EPERM。一次出多张时连续写好几个文件，正好最容易撞上。
+    await renameWithRetry(tmp, target);
     return file;
   }
 

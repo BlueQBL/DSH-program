@@ -17,7 +17,9 @@ const DEFAULTS = {
   imageModel: 'gpt-image-2',
   stallMs: 60000,
   chatTimeoutMs: 90000,
-  imageTimeoutMs: 300000,
+  // 出图（尤其是一次多张 / 高画质）本来就慢：一张 1K 图常见 75~150 秒，
+  // 一批两张甚至能到几分钟。超时定得太短，钱花了图却被我们自己掐断 —— 那是最冤的。
+  imageTimeoutMs: 600000,
   listTimeoutMs: 15000,
   downloadTimeoutMs: 60000,
   maxImageBytes: 32 * 1024 * 1024,
@@ -192,6 +194,13 @@ function toError(err, guard, label, apiKey) {
   return new UpstreamError(`${label}失败：${redact((err && err.message) || err, apiKey)}`, 0);
 }
 
+/** 出图/改图的超时：默认 10 分钟，可用 AI_IMAGE_TIMEOUT_MS 覆盖（一次多张时给宽一点） */
+function imageTimeoutMsOf(options) {
+  const fromOptions = Number(options && options.timeoutMs);
+  if (Number.isFinite(fromOptions) && fromOptions > 0) return fromOptions;
+  return num(process.env.AI_IMAGE_TIMEOUT_MS, DEFAULTS.imageTimeoutMs);
+}
+
 function authHeaders(apiKey) {
   return { authorization: `Bearer ${apiKey}` };
 }
@@ -354,7 +363,9 @@ function collectImageEntries(data) {
   for (const item of buckets) {
     const entry = entryOf(item);
     if (!entry) continue;
-    const key = entry.b64 ? entry.b64.slice(0, 64) : entry.url;
+    // 去重用**整段**数据：base64 的头几十个字符对所有 PNG 都一样，
+    // 只比前缀会把「一次出多张」里除了第一张以外全当成重复丢掉
+    const key = entry.b64 || entry.url;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(entry);
@@ -378,8 +389,12 @@ function describeShape(data) {
 /**
  * 文生图。
  *
+ * **报文里不带 `n`**：一次就一张。平台对 n 的脾气很不一致（有的直接 400，
+ * 有的收下 n 却只回一张），而额度是按 n 扣的 —— 一次要 2 张却只拿回 1 张，
+ * 是最难受的失败。所以这里干脆不管 n，默认值就是 1。
+ *
  * @param {object} options
- *   apiKey, baseUrl, model, prompt, size, quality, n, responseFormat, signal, timeoutMs
+ *   apiKey, baseUrl, model, prompt, size, quality, responseFormat, signal, timeoutMs
  * @returns {Promise<{images: Array<{b64: string, url: string, revisedPrompt: string, source: string}>, usage: object|null, raw: object}>}
  */
 async function generateImage(options) {
@@ -388,14 +403,13 @@ async function generateImage(options) {
   const base = {
     model: o.model,
     prompt: o.prompt,
-    n: Number(o.n) || 1,
     response_format: requestedFormat,
   };
   if (o.size) base.size = o.size;
   if (o.quality) base.quality = o.quality;
 
   const attempt = async (payload) => {
-    const guard = makeGuard(o.signal, 0, num(o.timeoutMs, DEFAULTS.imageTimeoutMs));
+    const guard = makeGuard(o.signal, 0, imageTimeoutMsOf(o));
     try {
       const res = await fetch(`${o.baseUrl}/images/generations`, {
         method: 'POST',
@@ -431,14 +445,110 @@ async function generateImage(options) {
       throw new UpstreamError(redact(data.error.message || '上游返回错误', o.apiKey), 0);
     }
     const images = collectImageEntries(data);
+    const shape = describeShape(data);
+    if (typeof o.log === 'function') {
+      const kinds = images.map((img) => (img.b64 ? 'b64' : 'url'));
+      o.log(`上游出图 → 拿到 ${images.length} 张（${kinds.join('/') || '没有'  }）`);
+    }
     if (!images.length) {
+      // 调不通的时候把「上游到底返回了什么」写进日志和错误里 —— 这一步是花钱买的，不能白花
+      if (process.env.AIG_DEBUG === '1') {
+        console.error('[上游原始返回]', redact(bodyText, o.apiKey).slice(0, 600));
+      }
       throw new UpstreamError(
-        `上游返回成功，但里面找不到图片数据（${describeShape(data)}）。这一次的额度可能已经扣了 —— ` +
+        `上游返回成功，但里面找不到图片数据（${shape}）。这一次的额度可能已经扣了 —— ` +
           '把这段贴出来就能定位是哪种返回形状没认出来',
         0
       );
     }
-    return { images, usage: (data && data.usage) || null, raw: data };
+    return { images, usage: (data && data.usage) || null, raw: data, shape };
+  } finally {
+    guard.dispose();
+  }
+}
+
+/**
+ * 改图：基于一张（或多张）已有图片，按提示词改。
+ *
+ * 走的是 `/v1/images/edits`（multipart/form-data），响应形状和文生图一样，
+ * 所以解析那段（collectImageEntries）与出图共用。
+ *
+ * @param {object} options
+ *   apiKey, baseUrl, model, prompt, images: [{buffer, mime, filename}], size, quality, signal, timeoutMs
+ */
+async function editImage(options) {
+  const o = options || {};
+  const list = (o.images || []).filter((img) => img && img.buffer && img.buffer.length);
+  if (!list.length) throw new UpstreamError('没有可编辑的原图', 0);
+
+  const build = (withFormat) => {
+    const form = new FormData();
+    form.append('model', String(o.model || ''));
+    form.append('prompt', String(o.prompt || ''));
+    if (o.size) form.append('size', String(o.size));
+    if (o.quality) form.append('quality', String(o.quality));
+    // 和出图一样：表单里不带 n，一次就改出一张
+    if (withFormat) form.append('response_format', o.responseFormat || 'b64_json');
+    // gpt-image 支持多张参考图，字段名是 image[]；单张也用它，平台两种都收
+    const field = list.length > 1 ? 'image[]' : 'image';
+    list.forEach((img, index) => {
+      const blob = new Blob([img.buffer], { type: img.mime || 'image/png' });
+      form.append(field, blob, img.filename || `source-${index + 1}.png`);
+    });
+    return form;
+  };
+
+  const attempt = async (withFormat) => {
+    const guard = makeGuard(o.signal, 0, imageTimeoutMsOf(o));
+    try {
+      const res = await fetch(`${o.baseUrl}/images/edits`, {
+        method: 'POST',
+        // multipart 的 content-type（含 boundary）由 fetch 自己填，别手动设
+        headers: Object.assign({ accept: 'application/json' }, authHeaders(o.apiKey)),
+        body: build(withFormat),
+        signal: guard.signal,
+      });
+      const bodyText = await res.text().catch(() => '');
+      return { res, bodyText, guard };
+    } catch (err) {
+      guard.dispose();
+      throw toError(err, guard, '请求上游改图', o.apiKey);
+    }
+  };
+
+  let { res, bodyText, guard } = await attempt(true);
+  if (!res.ok && (res.status === 400 || res.status === 422)) {
+    // 有的平台不认 response_format：去掉再试一次（拿回 URL 我们自己下载）
+    guard.dispose();
+    ({ res, bodyText, guard } = await attempt(false));
+  }
+  try {
+    if (!res.ok) throw new UpstreamError(describeStatus(res.status, bodyText, o.apiKey), res.status);
+    let data;
+    try {
+      data = JSON.parse(bodyText);
+    } catch {
+      throw new UpstreamError('上游返回的不是合法 JSON', 0);
+    }
+    if (data && data.error) {
+      throw new UpstreamError(redact(data.error.message || '上游返回错误', o.apiKey), 0);
+    }
+    const images = collectImageEntries(data);
+    const shape = describeShape(data);
+    if (typeof o.log === 'function') {
+      const kinds = images.map((img) => (img.b64 ? 'b64' : 'url'));
+      o.log(`上游改图 → 拿到 ${images.length} 张（${kinds.join('/') || '没有'}）`);
+    }
+    if (!images.length) {
+      if (process.env.AIG_DEBUG === '1') {
+        console.error('[上游原始返回]', redact(bodyText, o.apiKey).slice(0, 600));
+      }
+      throw new UpstreamError(
+        `上游返回成功，但里面找不到改好的图片（${shape}）。这个模型可能不支持改图，换个模型试试`,
+        0
+      );
+    }
+    return { images, usage: (data && data.usage) || null, raw: data, shape };
   } finally {
     guard.dispose();
   }
@@ -555,10 +665,12 @@ module.exports = {
   redact,
   listModels,
   generateImage,
+  editImage,
   collectImageEntries,
   describeShape,
   chatOnce,
   fetchImageBytes,
   makeGuard,
   stallMsOf,
+  imageTimeoutMsOf,
 };

@@ -112,13 +112,14 @@ async function post(base, route, body, headers) {
           'ideogram-v2',
           'midjourney-v6-image',
           'gemini-2.5-flash-image',
+          'gpt-4o-image',
         ], '筛出来的出图模型按偏好排好');
         not(ids.includes('gpt-4o-mini'), '聊天模型不在出图清单里');
         not(ids.includes('whisper-1'), '语音模型不在');
         not(ids.includes('text-embedding-3-small'), '向量模型不在');
         not(ids.includes('sora-1'), '视频模型不在');
-        eq(out.counts.all, 16, '原始列表条数也报出来');
-        eq(out.counts.image, 8, '能出图的数量');
+        eq(out.counts.all, 17, '原始列表条数也报出来');
+        eq(out.counts.image, 9, '能出图的数量');
         eq(out.current, 'gpt-image-2', '默认用配置里的那个');
         eq(out.chat.model, 'gpt-4o-mini', '优化提示词用的聊天模型是 1 token 探活选出来的');
       });
@@ -296,6 +297,263 @@ async function post(base, route, body, headers) {
           body: '{不是 JSON',
         });
         eq(bad.status, 400, '坏 JSON 被拒');
+      });
+
+      console.log('一次一张（批量已拆掉）/ 改图 / 预设 / 社区');
+
+      async function countShares() {
+        const out = await (await fetch(base + '/api/community')).json();
+        return out.items.length;
+      }
+
+      await group('批量已拆掉：传 n=4 也只出一张，并说明为什么', async () => {
+        const out = await post(base, '/api/images/generate', {
+          prompt: '同一个小院子的四季',
+          styleId: 'film',
+          size: '1024x1024',
+          quality: 'low',
+          model: 'gpt-image-2',
+          n: 4,
+        });
+        eq(out.status, 200, '出图成功（不是报错，老界面也不会炸）');
+        eq(out.data.records.length, 1, '只要到 1 条记录');
+        eq(out.data.record.id, out.data.records[0].id, 'record 和 records[0] 是同一张');
+        eq(out.data.requested, undefined, '不再回显「你要了几张」');
+        has((out.data.notes || []).join('；'), '一次只出一张', '备注里说明张数被忽略');
+        eq(out.data.records[0].batchId, undefined, '记录里没有批次概念了');
+        eq(out.data.records[0].batchTotal, undefined, '也没有「第几张/共几张」');
+        const record = out.data.records[0];
+        eq((await fetch(base + `/api/images/${record.file}`)).status, 200, '图能取');
+        generated.push(record);
+      });
+
+      await group('拒绝「一次一张」的模型也能正常出图（不再有逐张退路）', async () => {
+        // 假上游对所有模型都要求 n=1；我们的报文本来就不带 n，所以哪个模型都能过
+        const out = await post(base, '/api/images/generate', {
+          prompt: '同一只猫的两种姿势',
+          styleId: 'photo',
+          size: '1024x1024',
+          quality: 'low',
+          model: 'gpt-4o-image',
+        });
+        eq(out.status, 200, '出图成功');
+        eq(out.data.records.length, 1, '一张');
+        not((out.data.notes || []).join('；').includes('一张一张来'), '没有「改成一张一张来」这种补画逻辑了');
+        generated.push(out.data.records[0]);
+      });
+
+      await group('dall-e-3 也照常出图（以前它只支持 1 张，需要特判）', async () => {
+        const out = await post(base, '/api/images/generate', {
+          prompt: '一只猫在窗台上',
+          styleId: 'photo',
+          size: '1024x1024',
+          quality: 'low',
+          model: 'dall-e-3',
+        });
+        eq(out.status, 200, '照常出图');
+        eq(out.data.records.length, 1, '一张');
+        generated.push(out.data.records[0]);
+      });
+
+      await group('改图：基于历史里的那张改，记录里记得住「源」是谁', async () => {
+        const source = generated[0];
+        const out = await post(base, '/api/images/edit', {
+          prompt: '把背景换成夜景，人物保留',
+          styleId: 'cinema',
+          size: '1280x720',
+          quality: 'low',
+          model: 'gpt-image-2',
+          sourceId: source.id,
+        });
+        eq(out.status, 200, '改图成功');
+        const record = out.data.records[0];
+        eq(record.kind, 'edit', '标记为改图');
+        eq(record.parentId, source.id, '记住了原图 id');
+        eq(record.parentFile, source.file, '也记住了原图文件');
+        has((out.data.notes || []).join('；'), '基于', '备注里说清基于哪张改的');
+        ok(record.file && record.file !== source.file, '改出来的是新文件');
+        const img = await fetch(base + `/api/images/${record.file}`);
+        eq(img.status, 200, '改出来的图能取');
+      });
+
+      await group('改图：也能用浏览器传来的本地图片（base64）', async () => {
+        const source = generated[0];
+        const bytes = Buffer.from(await (await fetch(base + `/api/images/${source.file}`)).arrayBuffer());
+        const out = await post(base, '/api/images/edit', {
+          prompt: '把这张的色调调暖一点',
+          styleId: 'photo',
+          size: '1024x1024',
+          quality: 'low',
+          model: 'gpt-image-2',
+          sourceB64: 'data:image/png;base64,' + bytes.toString('base64'),
+        });
+        eq(out.status, 200, '上传的图也能改');
+        eq(out.data.records[0].parentId, '', '没有历史记录当源时 parentId 为空');
+        has((out.data.notes || []).join('；'), '本地图片', '备注里说明基于本地图片');
+      });
+
+      await group('改图的几种错法都给出人话', async () => {
+        const none = await post(base, '/api/images/edit', { prompt: '改点什么' });
+        eq(none.status, 400, '没给原图 → 400');
+        has(none.data.message, '哪张图', '说清缺原图');
+
+        const badKey = await post(base, '/api/images/edit', { prompt: '改点什么', sourceId: 'img_nope' });
+        eq(badKey.status, 400, '原图不存在 → 400');
+
+        const badB64 = await post(base, '/api/images/edit', {
+          prompt: '改点什么',
+          sourceB64: 'data:image/png;base64,@@@',
+        });
+        eq(badB64.status, 400, '原图数据坏了 → 400');
+        has(badB64.data.message, '读不了', '说清是本地图片读不了');
+
+        const noPrompt = await post(base, '/api/images/edit', { prompt: '', sourceId: generated[0].id });
+        eq(noPrompt.status, 400, '没写要改什么 → 400');
+      });
+
+      await group('印相配方：内置的 + 自己存的，能存能删', async () => {
+        const list = await (await fetch(base + '/api/presets/saved')).json();
+        eq(list.ok, true, '取到了');
+        eq(list.saved, [], '一开始没有自己存的');
+        ok(list.builtin.length >= 4, '内置配方都在');
+
+        const saved = await post(base, '/api/presets/saved', {
+          preset: { name: '我的横版夜景', styleId: 'cyberpunk', ratio: '16:9', tier: '2K', quality: 'medium' },
+        });
+        eq(saved.status, 200, '存下了');
+        eq(saved.data.saved.length, 1, '列表里有一条');
+        ok(saved.data.preset.id.startsWith('ps_'), '有 id');
+
+        const again = await post(base, '/api/presets/saved', {
+          preset: { name: '我的横版夜景', styleId: 'photo', ratio: '1:1', tier: '1K', quality: 'low' },
+        });
+        eq(again.data.replaced, true, '同名是覆盖');
+        eq(again.data.saved.length, 1, '没有重复堆');
+
+        const bad = await post(base, '/api/presets/saved', { preset: { styleId: 'photo' } });
+        eq(bad.status, 400, '没名字存不了');
+
+        const removed = await fetch(base + `/api/presets/saved/${encodeURIComponent(saved.data.preset.id)}`, {
+          method: 'DELETE',
+        });
+        eq(removed.status, 200, '删得掉');
+        const after = await (await fetch(base + '/api/presets/saved')).json();
+        eq(after.saved.length, 0, '删完就空了');
+      });
+
+      await group('社区：分享 → 列表 → 点赞 → 热门排序', async () => {
+        const record = generated[0];
+        const shared = await post(base, '/api/community', {
+          recordId: record.id,
+          author: '小飞',
+          note: '雨后的老城区',
+        });
+        eq(shared.status, 200, '分享成功');
+        eq(shared.data.count, 1, '社区里有 1 张');
+        const entryId = shared.data.entry.id;
+        ok(entryId.startsWith('sh_'), '分享 id 形状对');
+
+        const list = await (await fetch(base + '/api/community?sort=new&viewer=v_test')).json();
+        eq(list.items.length, 1, '列表里有');
+        eq(list.items[0].prompt, record.prompt, '提示词一并带出来（方便别人「拿来改」）');
+        eq(list.items[0].liked, false, '还没点赞');
+
+        const liked = await fetch(base + `/api/community/${entryId}/like`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-viewer-id': 'v_test' },
+          body: '{}',
+        });
+        const likeData = await liked.json();
+        eq(likeData.likes, 1, '1 个赞');
+        eq(likeData.liked, true, '标记为已赞');
+
+        const likedList = await (await fetch(base + '/api/community?viewer=v_test')).json();
+        eq(likedList.items[0].liked, true, '列表里也是已赞状态');
+
+        const hot = await (await fetch(base + '/api/community?sort=hot')).json();
+        eq(hot.sort, 'hot', '排序方式回显');
+
+        const img = await fetch(base + `/api/images/${list.items[0].file}`);
+        eq(img.status, 200, '社区里的图能直接看');
+
+        const entry = await (await fetch(base + `/api/community/${entryId}`)).json();
+        eq(entry.entry.author, '小飞', '单条也能取');
+      });
+
+      await group('社区：删掉那张图，分享也会一起撤下来', async () => {
+        const list = await (await fetch(base + '/api/community')).json();
+        const recordId = list.items[0].recordId;
+        eq(await countShares(), 1, '当前 1 条分享');
+        const del = await fetch(base + `/api/history/${recordId}`, { method: 'DELETE' });
+        eq(del.status, 200, '图片删掉了');
+        const payload = await del.json();
+        eq(payload.unshared, 1, '顺手撤了 1 条分享');
+        eq(await countShares(), 0, '社区里没有了');
+        // 这张已经删了，后面的组别再用它
+        const idx = generated.findIndex((r) => r.id === recordId);
+        if (idx >= 0) generated.splice(idx, 1);
+      });
+
+      await group('社区：撤下与健康检查里的计数', async () => {
+        // 挑一张确实存到本地的（远程-only 的那张分享不了，这是设计如此）
+        const target = generated.find((r) => r.file) || generated[0];
+        const shared = await post(base, '/api/community', { recordId: target.id, author: '小飞' });
+        eq(shared.status, 200, '又分享了一张');
+        const entryId = shared.data.entry.id;
+
+        const health = await (await fetch(base + '/api/health')).json();
+        eq(health.community.count, 1, '健康检查里能看到社区条数');
+        eq(typeof health.savedPresets, 'number', '也报了自己存了几个预设');
+
+        const unshare = await fetch(base + `/api/community/${entryId}`, { method: 'DELETE' });
+        eq(unshare.status, 200, '撤下来了');
+        eq(await countShares(), 0, '社区空了');
+      });
+
+      await group('从链接导入：把「没存下来」的那张收回历史', async () => {
+        // 拿一张 URL-only 模型的图（它的 remoteUrl 就是上游给的真实地址）
+        const made = await post(base, '/api/images/generate', {
+          prompt: '一只狗在草地上跑',
+          styleId: 'photo',
+          size: '1024x1024',
+          quality: 'low',
+          model: 'flux-schnell',
+        });
+        const remote = made.data.record.remoteUrl;
+        ok(String(remote).startsWith('http'), '拿到上游地址');
+
+        const imported = await post(base, '/api/images/import', { url: remote, prompt: '一只狗在草地上跑' });
+        eq(imported.status, 200, '导入成功');
+        const record = imported.data.record;
+        ok(record.file, '落了本地文件');
+        eq(record.size.actual, '1024x1024', '尺寸是从图里读出来的');
+        eq(record.prompt, '一只狗在草地上跑', '描述带进来');
+        has((record.notes || []).join('；'), '从链接导入', '备注里标明来源');
+        eq((await fetch(base + `/api/images/${record.file}`)).status, 200, '导入的图能取');
+        eq((await fetch(base + `/api/history/${record.id}/download`)).status, 200, '也能下载');
+      });
+
+      await group('从链接导入：data URL 也收；坏链接 / 图床坏了都给出人话', async () => {
+        const source = generated.find((r) => r.file);
+        const bytes = Buffer.from(await (await fetch(base + `/api/images/${source.file}`)).arrayBuffer());
+        const inline = await post(base, '/api/images/import', {
+          url: 'data:image/png;base64,' + bytes.toString('base64'),
+        });
+        eq(inline.status, 200, 'data URL 也能导入');
+
+        const empty = await post(base, '/api/images/import', { url: '' });
+        eq(empty.status, 400, '空链接拒绝');
+        const wrongScheme = await post(base, '/api/images/import', { url: 'file:///etc/passwd' });
+        eq(wrongScheme.status, 400, '只认 http(s) 和 data:image');
+        has(wrongScheme.data.message, 'http', '说清支持什么');
+
+        // 假上游的 /files/broken-* 会返回 HTML 错误页 —— 模拟图床过期
+        const broken = await post(base, '/api/images/import', {
+          url: `http://127.0.0.1:${fakePort}/files/broken-import.png`,
+        });
+        eq(broken.status, 502, '取不回来就是 502');
+        eq(broken.data.code, 'import_failed', '带上原因码');
+        has(broken.data.message, '过期', '提示链接可能过期了');
       });
 
       console.log('优化提示词');

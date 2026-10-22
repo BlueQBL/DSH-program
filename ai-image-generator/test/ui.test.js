@@ -203,5 +203,72 @@ function idsUsedInApp() {
     has(server, '没存到本地', '备注里说清为什么没存下来');
   });
 
+  await group('后来的几件事都接好线了（改图 / 配方 / 社区 / 放大）', () => {
+    const need = [
+      'preset-group',
+      'save-preset',
+      'edit-bar',
+      'edit-source',
+      'edit-source-note',
+      'edit-cancel',
+      'pick-source',
+      'source-file',
+      'open-community',
+      'community-drawer',
+      'community-list',
+      'community-sort',
+      'community-total',
+      'community-empty',
+      'community-count',
+      'share-dialog',
+      'share-form',
+      'share-thumb',
+      'share-author',
+      'share-note',
+      'share-hide-prompt',
+      'share-submit',
+      'viewer-stage',
+      'zoom-in',
+      'zoom-out',
+      'zoom-fit',
+      'zoom-actual',
+      'zoom-level',
+      'viewer-edit',
+      'viewer-share',
+    ];
+    const have = idsInHtml();
+    eq(need.filter((id) => !have.has(id)), [], '新加的控件都在 HTML 里');
+
+    has(apiJs, 'edit: (payload)', '取数层有改图接口');
+    has(apiJs, 'savedPresets', '取数层有预设接口');
+    has(apiJs, 'community', '取数层有社区接口');
+    has(apiJs, '/api/images/edit', '改图打的是这个路由');
+    has(apiJs, '/api/presets/saved', '预设用的是这个路由');
+
+    has(appJs, 'function enterEditMode(', '有进入改图的入口');
+    has(appJs, 'sourceB64', '本地图片改图走 base64');
+    has(appJs, 'function applyPreset(', '配方能一键套用');
+    has(appJs, 'function openShare(', '能分享');
+    has(appJs, 'function toggleLike(', '能点赞');
+    has(appJs, 'function remix(', '能把别人的提示词拿来改');
+    has(appJs, 'function zoomActual(', '有 1:1 看细节');
+    has(appJs, 'wheel', '滚轮缩放');
+    has(appJs, 'pointerdown', '拖动平移');
+    has(appJs, '#share=', '支持分享深链');
+
+    // 批量已经拆掉：界面上不该再有张数这一组，代码里也不该再往上带 n
+    not(html.includes('count-group'), '没有「张数」那一组按钮了');
+    not(/\bstate\.n\b/.test(appJs), '前端状态里没有 n 了');
+    not(html.includes('一次出几张'), '文案里不再承诺一次多张');
+
+    // 这些新块的样式也得在
+    const classes = ['editbar', 'chip--preset', 'chip__x', 'badge--edit', 'badge--shared', 'card', 'like', 'dialog', 'viewer__stage', 'viewer__zoom'];
+    eq(
+      classes.filter((name) => !new RegExp('\\.' + name.replace(/[-_]/g, '[-_]') + '\\b').test(css)),
+      [],
+      '新加的类名都有样式'
+    );
+  });
+
   report('ui');
 })();

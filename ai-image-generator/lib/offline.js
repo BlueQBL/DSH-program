@@ -123,6 +123,177 @@ function scale(a, k) {
   return [a[0] * k, a[1] * k, a[2] * k];
 }
 
+/* ── 解 PNG：离线「改图」要用 ─────────────────────────────── */
+
+/**
+ * 解一张 PNG（8 位的 RGB / RGBA、非隔行、filter 0~4）。
+ *
+ * 为什么只支持这些：这是我们自己写出去的格式，也是绝大多数工具导出的默认格式；
+ * JPEG / WebP / 隔行 PNG 一律明确拒绝 —— 宁可说「离线改不了，接上 Key 再改」，
+ * 也别解出一张花屏。
+ *
+ * @returns {{width:number, height:number, channels:number, rgb:Buffer}}
+ */
+function decodePng(buffer) {
+  if (!buffer || buffer.length < 24) throw new Error('这不是一张 PNG');
+  if (!buffer.subarray(0, 8).equals(PNG_SIGNATURE)) throw new Error('这不是一张 PNG');
+
+  let pos = 8;
+  let width = 0;
+  let height = 0;
+  let bitDepth = 0;
+  let colorType = 0;
+  let interlace = 0;
+  const idat = [];
+
+  while (pos + 8 <= buffer.length) {
+    const len = buffer.readUInt32BE(pos);
+    const type = buffer.subarray(pos + 4, pos + 8).toString('latin1');
+    const data = buffer.subarray(pos + 8, pos + 8 + len);
+    if (type === 'IHDR') {
+      width = data.readUInt32BE(0);
+      height = data.readUInt32BE(4);
+      bitDepth = data[8];
+      colorType = data[9];
+      interlace = data[12];
+    } else if (type === 'IDAT') {
+      idat.push(data);
+    } else if (type === 'IEND') {
+      break;
+    }
+    pos += 12 + len;
+  }
+
+  if (!width || !height) throw new Error('PNG 头信息读不出来');
+  if (bitDepth !== 8) throw new Error(`只支持 8 位深的 PNG（这张是 ${bitDepth} 位）`);
+  if (interlace) throw new Error('不支持隔行扫描的 PNG');
+  const channels = colorType === 2 ? 3 : colorType === 6 ? 4 : 0;
+  if (!channels) throw new Error(`只支持 RGB / RGBA 的 PNG（这张的颜色类型是 ${colorType}）`);
+  if (!idat.length) throw new Error('PNG 里没有图像数据');
+
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  const stride = width * channels;
+  if (raw.length < (stride + 1) * height) throw new Error('PNG 数据不完整');
+
+  const out = Buffer.alloc(stride * height);
+  for (let y = 0; y < height; y += 1) {
+    const filter = raw[y * (stride + 1)];
+    const src = y * (stride + 1) + 1;
+    const dst = y * stride;
+    for (let x = 0; x < stride; x += 1) {
+      const left = x >= channels ? out[dst + x - channels] : 0;
+      const up = y > 0 ? out[dst - stride + x] : 0;
+      const upLeft = y > 0 && x >= channels ? out[dst - stride + x - channels] : 0;
+      const value = raw[src + x];
+      let next = value;
+      if (filter === 1) next = value + left;
+      else if (filter === 2) next = value + up;
+      else if (filter === 3) next = value + ((left + up) >> 1);
+      else if (filter === 4) {
+        const p = left + up - upLeft;
+        const pa = Math.abs(p - left);
+        const pb = Math.abs(p - up);
+        const pc = Math.abs(p - upLeft);
+        const pred = pa <= pb && pa <= pc ? left : pb <= pc ? up : upLeft;
+        next = value + pred;
+      } else if (filter !== 0) {
+        throw new Error(`PNG 用了不认识的过滤方式（${filter}）`);
+      }
+      out[dst + x] = next & 0xff;
+    }
+  }
+
+  // 统一成 RGB（丢掉 alpha）
+  if (channels === 3) return { width, height, channels: 3, rgb: out };
+  const rgb = Buffer.alloc(width * height * 3);
+  for (let i = 0; i < width * height; i += 1) {
+    rgb[i * 3] = out[i * 4];
+    rgb[i * 3 + 1] = out[i * 4 + 1];
+    rgb[i * 3 + 2] = out[i * 4 + 2];
+  }
+  return { width, height, channels: 4, rgb };
+}
+
+/** 盒式缩放（离线图不需要多好的重采样，够用且快） */
+function resizeRgb(rgb, width, height, targetWidth, targetHeight) {
+  if (width === targetWidth && height === targetHeight) return rgb;
+  const out = Buffer.alloc(targetWidth * targetHeight * 3);
+  const xRatio = width / targetWidth;
+  const yRatio = height / targetHeight;
+  for (let y = 0; y < targetHeight; y += 1) {
+    const y0 = Math.floor(y * yRatio);
+    const y1 = Math.max(y0 + 1, Math.floor((y + 1) * yRatio));
+    for (let x = 0; x < targetWidth; x += 1) {
+      const x0 = Math.floor(x * xRatio);
+      const x1 = Math.max(x0 + 1, Math.floor((x + 1) * xRatio));
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let count = 0;
+      for (let sy = y0; sy < y1 && sy < height; sy += 1) {
+        for (let sx = x0; sx < x1 && sx < width; sx += 1) {
+          const o = (sy * width + sx) * 3;
+          r += rgb[o];
+          g += rgb[o + 1];
+          b += rgb[o + 2];
+          count += 1;
+        }
+      }
+      const o = (y * targetWidth + x) * 3;
+      const n = count || 1;
+      out[o] = Math.round(r / n);
+      out[o + 1] = Math.round(g / n);
+      out[o + 2] = Math.round(b / n);
+    }
+  }
+  return out;
+}
+
+/**
+ * 离线「改图」：真的在原来那张图上动手（不是另画一张）。
+ *
+ * 做三件事：把画面往所选风格的配色上拉一点 → 四角压暗 → 加一点颗粒。
+ * 幅度都收着点，因为这是离线演示：接上 Key 之后改图是上游按提示词重画。
+ */
+function applyEdit(input) {
+  const i = input || {};
+  const style = Styles.findStyle(i.styleId);
+  const palette = (style.palette || ['#0d1f33', '#3d6b88', '#e9c46a']).map(hexToRgb);
+  const tint = mix(palette[1], palette[2], 0.35);
+
+  const decoded = decodePng(i.buffer);
+  const target = sizeFor(`${decoded.width}x${decoded.height}`);
+  const rgb = resizeRgb(decoded.rgb, decoded.width, decoded.height, target.width, target.height);
+  const { width, height } = target;
+  const seed = hashSeed(`${i.prompt || ''}|${style.id}|${width}x${height}`);
+  const amount = typeof i.strength === 'number' ? Math.max(0, Math.min(1, i.strength)) : 0.22;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const o = (y * width + x) * 3;
+      const vx = (x / width - 0.5) * 2;
+      const vy = (y / height - 0.5) * 2;
+      const vignette = 1 - 0.18 * Math.min(1, (vx * vx + vy * vy) * 0.55);
+      const noise = ((Math.imul(x + 1, 73856093) ^ Math.imul(y + 1, 19349663) ^ seed) >>> 0) % 9;
+      const grain = (noise - 4) * 0.8;
+      for (let c = 0; c < 3; c += 1) {
+        const shifted = rgb[o + c] + (tint[c] - rgb[o + c]) * amount;
+        rgb[o + c] = Math.max(0, Math.min(255, Math.round(shifted * vignette + grain)));
+      }
+    }
+  }
+
+  return {
+    buffer: encodePng(width, height, rgb),
+    mime: 'image/png',
+    ext: '.png',
+    width,
+    height,
+    capped: target.capped,
+    styleId: style.id,
+  };
+}
+
 /* ── 画一张 ───────────────────────────────────────────────── */
 
 /** 请求的尺寸太大就等比压到 1280，返回实际要画的尺寸 */
@@ -147,6 +318,7 @@ function render(input) {
   const [back, mid, light] = [palette[0], palette[1], palette[2]];
 
   const { width, height, capped } = sizeFor(i.size);
+  // 种子只由「描述 + 风格 + 尺寸」决定：同一句描述永远画出同一张图（可复现，测试好写）
   const seed = hashSeed(`${i.prompt || ''}|${style.id}|${width}x${height}`);
   const rand = mulberry32(seed);
 
@@ -290,6 +462,9 @@ function render(input) {
 module.exports = {
   CAP_MAX_SIDE,
   encodePng,
+  decodePng,
+  resizeRgb,
+  applyEdit,
   hashSeed,
   mulberry32,
   render,

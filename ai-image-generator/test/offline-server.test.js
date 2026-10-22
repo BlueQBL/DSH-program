@@ -152,6 +152,70 @@ async function post(base, route, body) {
       has(dl.headers.get('content-disposition') || '', 'attachment', '是附件');
     });
 
+    await group('离线也一次只出一张：传 n=2 只回 1 张', async () => {
+      const out = await post(base, '/api/images/generate', {
+        prompt: '同一个小院子的四季',
+        styleId: 'film',
+        size: '256x256',
+        quality: 'low',
+        n: 2,
+      });
+      eq(out.status, 200, '出图成功');
+      eq(out.data.records.length, 1, '只有一张（批量已经拆掉）');
+      eq(out.data.records[0].batchTotal, undefined, '记录里没有批次字段');
+      has((out.data.notes || []).join('；'), '一次只出一张', '备注里说明张数被忽略');
+    });
+
+    await group('改图：离线时真的在原图上动手（不是另画一张）', async () => {
+      const out = await post(base, '/api/images/edit', {
+        prompt: '把色调改成赛博朋克的霓虹',
+        styleId: 'cyberpunk',
+        size: '1024x768',
+        quality: 'low',
+        sourceId: record.id,
+      });
+      eq(out.status, 200, '改图成功');
+      const edited = out.data.records[0];
+      eq(edited.kind, 'edit', '标记为改图');
+      eq(edited.parentId, record.id, '记住了原图');
+      has((out.data.notes || []).join('；'), '离线改图', '备注里说明这是离线改图');
+      eq(edited.engine, 'offline', '离线引擎');
+
+      const before = Buffer.from(await (await fetch(base + `/api/images/${record.file}`)).arrayBuffer());
+      const after = Buffer.from(await (await fetch(base + `/api/images/${edited.file}`)).arrayBuffer());
+      eq(after.subarray(0, 4).equals(PNG_SIG), true, '改出来的还是 PNG');
+      eq(after.equals(before), false, '内容和原图不一样');
+      eq(edited.width, 1024, '宽度保持原图');
+      eq(edited.height, 768, '高度保持原图');
+    });
+
+    await group('改图：改不了的原图（JPEG）明确说清，而不是给出花屏', async () => {
+      const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(128, 7)]);
+      const out = await post(base, '/api/images/edit', {
+        prompt: '改一下',
+        styleId: 'photo',
+        size: '512x512',
+        sourceB64: 'data:image/jpeg;base64,' + jpeg.toString('base64'),
+      });
+      eq(out.status, 400, '拒绝');
+      eq(out.data.code, 'offline_edit_unsupported', '带上原因码');
+      has(out.data.message, 'PNG', '说清离线只支持 PNG');
+    });
+
+    await group('预设与社区在离线模式下也能用', async () => {
+      const saved = await post(base, '/api/presets/saved', {
+        preset: { name: '离线配方', styleId: 'film', ratio: '4:3', tier: '1K', quality: 'low' },
+      });
+      eq(saved.status, 200, '预设存得下');
+      eq(saved.data.saved.length, 1, '列表里有一条');
+
+      const shared = await post(base, '/api/community', { recordId: record.id, author: '离线的小飞' });
+      eq(shared.status, 200, '分享得上去');
+      const list = await (await fetch(base + '/api/community')).json();
+      eq(list.items.length, 1, '社区里有一张');
+      eq(list.items[0].author, '离线的小飞', '署名对');
+    });
+
     await group('优化提示词走离线扩写，也给出更具体的东西', async () => {
       const out = await post(base, '/api/prompt/optimize', {
         prompt: '一只白猫',
@@ -169,8 +233,8 @@ async function post(base, route, body) {
 
     await group('历史记录里能看到这一张，统计也对', async () => {
       const out = await (await fetch(base + '/api/history')).json();
-      eq(out.stats.count, 1, '一张记录');
-      eq(out.items[0].id, record.id, '就是刚才那张');
+      ok(out.stats.count >= 3, `记录数对得上（${out.stats.count} 张：出图 + 一次一张 + 改图）`);
+      ok(out.items.some((r) => r.id === record.id), '最初那张还在列表里');
       ok(out.stats.bytes > 0, '总大小有数');
       const one = await (await fetch(base + `/api/history/${record.id}`)).json();
       eq(one.record.prompt, '雨后的老城区，一个人撑着红伞走过积水', '描述存住了');
@@ -181,7 +245,7 @@ async function post(base, route, body) {
       const del = await fetch(base + `/api/history/${record.id}`, { method: 'DELETE' });
       eq(del.status, 200, '删除成功');
       const after = await (await fetch(base + '/api/history')).json();
-      eq(after.stats.count, 0, '列表空了');
+      ok(!after.items.some((r) => r.id === record.id), '列表里没有它了');
       ok(!fs.existsSync(path.join(dataDir, 'images', record.file)), '图片文件也删了');
     });
 

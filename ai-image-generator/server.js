@@ -1,4 +1,4 @@
-﻿/*!
+/*!
  * 蓝晒 · AI 图片生成器 —— 服务端（server.js）
  *
  * 零依赖：只做四件事。
@@ -26,6 +26,8 @@ const Models = require('./lib/models.js');
 const Images = require('./lib/image.js');
 const Offline = require('./lib/offline.js');
 const Store = require('./lib/store.js');
+const Presets = require('./lib/presets.js');
+const Community = require('./lib/community.js');
 
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -34,6 +36,8 @@ const BASE_PORT = Number(process.argv[2] || process.env.PORT || 5270);
 const HOST = process.env.HOST || '127.0.0.1';
 const DATA_DIR = process.env.AIG_DATA_DIR || path.join(ROOT, 'data');
 const BODY_LIMIT = 256 * 1024;
+// 改图要把原图传回来（浏览器读成 data URL 再发过来），所以这一个接口单独放宽
+const EDIT_BODY_LIMIT = 32 * 1024 * 1024;
 
 const config = Upstream.readConfig();
 const store = Store.createStore({
@@ -48,6 +52,14 @@ const statusStore = Store.createModelStatusStore({
 const registry = Models.createModelRegistry(config, {
   log: (line) => console.log('  ' + line),
   statusStore,
+});
+const presets = Presets.createPresetStore({
+  file: path.join(DATA_DIR, 'presets.json'),
+  log: (line) => console.log('  ' + line),
+});
+const community = Community.createCommunityStore({
+  file: path.join(DATA_DIR, 'community.json'),
+  log: (line) => console.log('  ' + line),
 });
 
 /* ── 小工具 ─────────────────────────────────────────────── */
@@ -80,13 +92,14 @@ function json(res, status, payload) {
   res.end(body);
 }
 
-function readBody(req) {
+function readBody(req, limit) {
+  const max = Number(limit) || BODY_LIMIT;
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
     req.on('data', (chunk) => {
       size += chunk.length;
-      if (size > BODY_LIMIT) {
+      if (size > max) {
         reject(new Error('请求体过大'));
         req.destroy();
         return;
@@ -310,6 +323,186 @@ async function materialize(image, opts) {
   throw new Error('上游既没有给 base64，也没有给图片地址');
 }
 
+/* ── 落盘：一张图变成一条记录 ───────────────────────────── */
+
+const sizeOfRecord = (size) => {
+  const parsed = Styles.parseSize(size);
+  return { width: parsed ? parsed.width : 0, height: parsed ? parsed.height : 0 };
+};
+
+/**
+ * 把一张「已经拿到手的东西」存成记录。
+ * @param {object} input {id, startedAt, prompt, finalPrompt, style, size, quality, model, engine, stored, notes, kind, parent}
+ */
+async function persistImage(input) {
+  const i = input;
+  const file = await store.saveImage(i.id, i.stored.buffer, i.stored.ext);
+  const dims = sizeOfRecord(i.size);
+  return store.create({
+    id: i.id,
+    createdAt: i.startedAt,
+    prompt: i.prompt,
+    finalPrompt: i.finalPrompt,
+    style: i.style,
+    size: { requested: i.requestedSize || i.size, actual: i.size, ratio: Styles.ratioLabel(i.size) },
+    quality: i.quality,
+    model: i.model,
+    engine: i.engine,
+    file,
+    mime: i.stored.mime,
+    bytes: i.stored.buffer.length,
+    width: dims.width,
+    height: dims.height,
+    remoteUrl: i.stored.remoteUrl || '',
+    elapsedMs: Date.now() - i.startedAt,
+    notes: i.notes,
+    kind: i.kind,
+    parentId: i.parent && i.parent.id,
+    parentFile: i.parent && i.parent.file,
+  });
+}
+
+/**
+ * 图片取不回来，但上游给了地址：留一个「只有上游链接」的记录。
+ * 宁可留一个会过期的地址，也不能把已经付过钱的图丢掉。
+ */
+async function persistRemoteOnly(input) {
+  const i = input;
+  const dims = sizeOfRecord(i.size);
+  return store.create({
+    id: i.id,
+    createdAt: i.startedAt,
+    prompt: i.prompt,
+    finalPrompt: i.finalPrompt,
+    style: i.style,
+    size: { requested: i.requestedSize || i.size, actual: i.size, ratio: Styles.ratioLabel(i.size) },
+    quality: i.quality,
+    model: i.model,
+    engine: i.engine,
+    file: '',
+    mime: '',
+    bytes: 0,
+    width: dims.width,
+    height: dims.height,
+    remoteUrl: i.remoteUrl,
+    elapsedMs: Date.now() - i.startedAt,
+    notes: i.notes,
+    kind: i.kind,
+    parentId: i.parent && i.parent.id,
+    parentFile: i.parent && i.parent.file,
+  });
+}
+
+/**
+ * 把上游返回的图片存成记录。
+ *
+ * 我们只请求一张，正常情况这里就循环一次。留成循环只是为了**不丢已经付过钱的图**：
+ * 万一某个网关不听话多回了一张，就多存一条记录，而不是悄悄扔掉。
+ * 每张都单独处理 —— 某一张取不回来，不该拖累其它已经到手的。
+ */
+async function persistImages(input) {
+  const i = input;
+  const records = [];
+  const notes = (i.notes || []).slice();
+  const failures = [];
+  let anyRemoteOnly = false;
+  let dropped = 0;
+
+  for (let index = 0; index < i.images.length; index += 1) {
+    const image = i.images[index];
+    const id = store.newId('img');
+    // 只有「多回了一张」时才用得上这个标号
+    const tag = i.images.length > 1 ? `（第 ${index + 1}/${i.images.length} 张）` : '';
+    let stored = null;
+    let failure = null;
+    try {
+      stored = await materialize(image, { signal: i.signal });
+    } catch (err) {
+      failure = err;
+    }
+
+    if (stored) {
+      records.push(
+        await persistImage({
+          id,
+          startedAt: i.startedAt,
+          prompt: i.prompt,
+          finalPrompt: i.finalPrompt,
+          requestedSize: i.requestedSize,
+          style: i.style,
+          size: i.size,
+          quality: i.quality,
+          model: i.model,
+          engine: i.engine,
+          stored,
+          notes,
+          kind: i.kind,
+          parent: i.parent,
+        })
+      );
+      continue;
+    }
+
+    const remote = String((image && image.url) || '');
+    const reason = (failure && failure.message) || '取图失败';
+    console.error(`[出图] ${i.model}${tag} 取图失败：${reason}` + (remote ? `（保留上游地址 ${remote.slice(0, 120)}）` : ''));
+    if (!/^https?:\/\//i.test(remote)) {
+      // 连地址都没有：这一张确实救不回来，记下原因继续处理下一张
+      dropped += 1;
+      failures.push(`第 ${index + 1} 张：${reason}`);
+      continue;
+    }
+    anyRemoteOnly = true;
+    if (!notes.some((n) => String(n).includes('没存到本地'))) {
+      notes.push(`有图片没存到本地（${reason}），显示的是上游临时链接，可能会过期`);
+    }
+    records.push(
+      await persistRemoteOnly({
+        id,
+        startedAt: i.startedAt,
+        prompt: i.prompt,
+        finalPrompt: i.finalPrompt,
+        requestedSize: i.requestedSize,
+        style: i.style,
+        size: i.size,
+        quality: i.quality,
+        model: i.model,
+        engine: i.engine,
+        remoteUrl: remote,
+        notes: notes.concat(`这张没存到本地（${reason}），显示的是上游临时链接，可能会过期`),
+        kind: i.kind,
+        parent: i.parent,
+      })
+    );
+  }
+
+  return { records, notes, anyRemoteOnly, dropped, failures };
+}
+
+/**
+ * 向上游要一张图。
+ *
+ * 这里**不传 n**：一次就要一张。曾经做过批量（要 2 张、4 张），现实是网关对 n
+ * 的支持五花八门，而额度按 n 扣 —— 花了 2 张的钱只看到 1 张，比多等几秒糟得多。
+ * 现在一张一张来，出了问题也只是「这一张没出来」，一眼就能说清。
+ */
+async function requestImages(options) {
+  const o = options;
+  const log = o.log || (() => {});
+  const base = {
+    apiKey: config.apiKey,
+    baseUrl: config.baseUrl,
+    model: o.model,
+    prompt: o.prompt,
+    size: o.size,
+    quality: o.quality,
+    responseFormat: 'b64_json',
+    signal: o.signal,
+    log,
+  };
+  return Upstream.generateImage(base);
+}
+
 async function handleGenerate(req, res) {
   let body;
   try {
@@ -341,6 +534,8 @@ async function handleGenerate(req, res) {
     model: picked.model,
   });
   const notes = [picked.note, request.sizeNote, request.qualityNote].filter(Boolean);
+  // 旧版界面还会带 n 上来。一次只出一张，别让「以为要了 2 张」这种错觉留着
+  if (Number(body.n) > 1) notes.push('一次只出一张，已忽略请求里的张数');
 
   const ctrl = new AbortController();
   // 客户端走了就中止上游请求。听 res 而不是 req：请求体读完 req 也会 close，
@@ -349,21 +544,18 @@ async function handleGenerate(req, res) {
     if (!res.writableEnded) ctrl.abort();
   });
   const startedAt = Date.now();
-  const id = store.newId('img');
 
   if (config.live) {
+    const logLine = (line) => console.log('  ' + line);
     let out;
     try {
-      out = await Upstream.generateImage({
-        apiKey: config.apiKey,
-        baseUrl: config.baseUrl,
+      out = await requestImages({
         model: picked.model,
         prompt: request.finalPrompt,
         size: request.size,
         quality: request.quality,
-        n: request.n,
-        responseFormat: 'b64_json',
         signal: ctrl.signal,
+        log: logLine,
       });
     } catch (err) {
       if (ctrl.signal.aborted) return json(res, 499, { ok: false, message: '已取消' });
@@ -380,110 +572,353 @@ async function handleGenerate(req, res) {
       });
     }
 
-    let stored;
-    let materializeError = null;
-    try {
-      stored = await materialize(out.images[0], { signal: ctrl.signal });
-    } catch (err) {
-      materializeError = err;
-    }
-
-    // 图片取不回来，但上游给了地址：**宁可留一个临时链接，也不能把已经付过钱的图丢掉**。
-    // 界面上会明确标出「没存到本地」，下载也老老实实说明原因。
-    if (!stored) {
-      const remote = String((out.images[0] && out.images[0].url) || '');
-      const reason = (materializeError && materializeError.message) || '取图失败';
-      console.error(`[出图] ${picked.model} 取图失败：${reason}` + (remote ? `（保留上游地址 ${remote.slice(0, 120)}）` : ''));
-      if (!/^https?:\/\//i.test(remote)) {
-        return json(res, 502, { ok: false, code: 'bad_image', message: reason });
-      }
-      notes.push(`这张没存到本地（${reason}），显示的是上游临时链接，可能会过期`);
-      const loose = await store.create({
-        id,
-        createdAt: startedAt,
-        prompt,
-        finalPrompt: request.finalPrompt,
-        style: request.style,
-        size: { requested: request.requestedSize || request.size, actual: request.size, ratio: Styles.ratioLabel(request.size) },
-        quality: request.quality,
-        model: picked.model,
-        engine: 'live',
-        file: '',
-        mime: '',
-        bytes: 0,
-        width: Styles.parseSize(request.size) ? Styles.parseSize(request.size).width : 0,
-        height: Styles.parseSize(request.size) ? Styles.parseSize(request.size).height : 0,
-        remoteUrl: remote,
-        elapsedMs: Date.now() - startedAt,
-        notes,
-      });
-      registry.rememberStatus(picked.model, { ok: true, message: '' });
-      return json(res, 200, { ok: true, engine: 'live', record: loose, notes, usage: out.usage || null, remoteOnly: true });
-    }
-
-    let file;
-    try {
-      file = await store.saveImage(id, stored.buffer, stored.ext);
-    } catch (err) {
-      return json(res, 500, { ok: false, message: '图片没能存到本地：' + err.message });
-    }
-    console.log(
-      `[出图] ${picked.model} ${request.size} quality=${request.quality || '-'} ` +
-        `${((Date.now() - startedAt) / 1000).toFixed(1)}s → ${stored.via} ${stored.ext.slice(1)} ${Math.round(stored.buffer.length / 1024)}KB`
-    );
-
-    registry.rememberStatus(picked.model, { ok: true, message: '' });
-    const record = await store.create({
-      id,
-      createdAt: startedAt,
+    const result = await persistImages({
+      startedAt,
       prompt,
       finalPrompt: request.finalPrompt,
+      requestedSize: request.requestedSize,
       style: request.style,
-      size: { requested: request.requestedSize || request.size, actual: request.size, ratio: Styles.ratioLabel(request.size) },
+      size: request.size,
       quality: request.quality,
       model: picked.model,
       engine: 'live',
-      file,
-      mime: stored.mime,
-      bytes: stored.buffer.length,
-      width: Styles.parseSize(request.size) ? Styles.parseSize(request.size).width : 0,
-      height: Styles.parseSize(request.size) ? Styles.parseSize(request.size).height : 0,
-      remoteUrl: stored.remoteUrl || '',
-      elapsedMs: Date.now() - startedAt,
       notes,
+      kind: 'generate',
+      signal: ctrl.signal,
+      images: out.images,
     });
-    return json(res, 200, { ok: true, engine: 'live', record, notes, usage: out.usage || null });
+
+    if (!result.records.length) {
+      const detail = result.failures.length ? result.failures.join('；') : result.notes.slice(-1)[0] || '未知原因';
+      return json(res, 502, {
+        ok: false,
+        code: 'bad_image',
+        message: '上游返回了，但图取不回来：' + detail,
+        shape: out.shape || '',
+      });
+    }
+
+    registry.rememberStatus(picked.model, { ok: true, message: '' });
+    const total = result.records.reduce((sum, r) => sum + (r.bytes || 0), 0);
+    console.log(
+      `[出图] ${picked.model} ${request.size} quality=${request.quality || '-'} ` +
+        `${((Date.now() - startedAt) / 1000).toFixed(1)}s → ${Math.round(total / 1024)}KB`
+    );
+    return json(res, 200, {
+      ok: true,
+      engine: 'live',
+      records: result.records,
+      record: result.records[0],
+      notes: result.notes,
+      usage: out.usage || null,
+      remoteOnly: result.anyRemoteOnly,
+      shape: out.shape || '',
+    });
   }
 
-  // 离线显影：画一张真的有内容的 PNG，让「出图 → 落盘 → 历史 → 下载」这条路能走通
-  const painted = Offline.render({ prompt: request.finalPrompt, styleId: request.style.id, size: request.size });
-  let file;
-  try {
-    file = await store.saveImage(id, painted.buffer, painted.ext);
-  } catch (err) {
-    return json(res, 500, { ok: false, message: '图片没能存到本地：' + err.message });
-  }
-  if (painted.capped) notes.push(`离线显影把最长边压到 ${Offline.CAP_MAX_SIDE}px，接上 Key 之后就按真实尺寸出图`);
-  const record = await store.create({
-    id,
-    createdAt: startedAt,
+  // 离线显影：画一张真的有内容的 PNG，让整条链路能走通
+  const painted = Offline.render({
+    prompt: request.finalPrompt,
+    styleId: request.style.id,
+    size: request.size,
+  });
+  const localNotes = notes.slice();
+  if (painted.capped) localNotes.push(`离线显影把最长边压到 ${Offline.CAP_MAX_SIDE}px，接上 Key 之后就按真实尺寸出图`);
+  const record = await persistImage({
+    id: store.newId('img'),
+    startedAt,
     prompt,
     finalPrompt: request.finalPrompt,
+    requestedSize: request.requestedSize,
     style: request.style,
-    size: { requested: request.requestedSize || request.size, actual: `${painted.width}x${painted.height}`, ratio: Styles.ratioLabel(request.size) },
+    size: `${painted.width}x${painted.height}`,
     quality: request.quality,
     model: '离线显影引擎',
     engine: 'offline',
-    file,
-    mime: painted.mime,
-    bytes: painted.buffer.length,
-    width: painted.width,
-    height: painted.height,
-    remoteUrl: '',
-    elapsedMs: Date.now() - startedAt,
-    notes,
+    stored: { buffer: painted.buffer, mime: painted.mime, ext: painted.ext, remoteUrl: '' },
+    notes: localNotes,
+    kind: 'generate',
   });
-  return json(res, 200, { ok: true, engine: 'offline', record, notes, usage: null });
+  return json(res, 200, { ok: true, engine: 'offline', records: [record], record, notes: localNotes, usage: null });
+}
+
+/* ── 改图：基于已有图片 ─────────────────────────────────── */
+
+/**
+ * 取原图。两种来源：
+ *   1. `sourceId`：历史里的一张（最常见 —— 从相纸上点「编辑」）
+ *   2. `sourceB64`：浏览器读进来的本地图片（data URL）
+ */
+async function loadSourceImage(body) {
+  const sourceId = String(body.sourceId || '').trim();
+  if (sourceId) {
+    const record = await store.get(sourceId);
+    if (!record) return { ok: false, message: '要改的那张图已经不在了' };
+    if (!record.file) return { ok: false, message: '那张图没存到本地（只有上游链接），没法作为原图' };
+    const file = store.resolveImage(record.file);
+    try {
+      const buffer = await fsp.readFile(file);
+      const stored = Images.toStoredImage(buffer, { contentType: record.mime });
+      return { ok: true, record, buffer: stored.buffer, mime: stored.mime, ext: stored.ext, name: record.file };
+    } catch {
+      return { ok: false, message: '原图文件读不出来（可能被删了）' };
+    }
+  }
+
+  const sourceB64 = String(body.sourceB64 || '').trim();
+  if (sourceB64) {
+    try {
+      const decoded = Images.decodeBase64Image(sourceB64);
+      const stored = Images.toStoredImage(decoded.buffer, { contentType: decoded.declaredType });
+      return { ok: true, record: null, buffer: stored.buffer, mime: stored.mime, ext: stored.ext, name: `upload${stored.ext}` };
+    } catch (err) {
+      return { ok: false, message: '这张本地图片读不了：' + err.message };
+    }
+  }
+
+  return { ok: false, message: '没有指定要改哪张图' };
+}
+
+async function handleEdit(req, res) {
+  let body;
+  try {
+    body = await readBody(req, EDIT_BODY_LIMIT);
+  } catch (err) {
+    return json(res, 400, { ok: false, message: err.message === '请求体过大' ? '原图太大了（超过 24MB），换一张小一点的' : err.message });
+  }
+
+  // 改图时「描述」是「要改什么」，可以比出图更短，但也不能空
+  const prompt = Styles.cleanPrompt(body.prompt);
+  if (!prompt) {
+    return json(res, 400, { ok: false, message: '写一句「要怎么改」，例如：把背景换成夜景，人物保留' });
+  }
+
+  const source = await loadSourceImage(body);
+  if (!source.ok) return json(res, 400, { ok: false, message: source.message });
+
+  const picked = registry.resolveImageModel(body.model);
+  if (picked.unavailable) {
+    return json(res, 400, {
+      ok: false,
+      code: 'model_unavailable',
+      model: picked.model,
+      message: picked.note + '。换一个模型，或者重新检测一次。',
+    });
+  }
+
+  const request = Styles.buildRequest({
+    prompt,
+    styleId: body.styleId,
+    size: body.size,
+    quality: body.quality,
+    model: picked.model,
+  });
+  const parent = source.record;
+  const notes = [picked.note, request.sizeNote, request.qualityNote].filter(Boolean);
+  if (Number(body.n) > 1) notes.push('一次只改出一张，已忽略请求里的张数');
+  if (parent) {
+    // PLATE 编号是界面按时间顺序排出来的，服务端不知道，所以这里只给记录 id 的尾巴
+    notes.push(`基于原图（${String(parent.id).slice(-6)}）修改`);
+  } else {
+    notes.push('基于本地图片修改');
+  }
+
+  const ctrl = new AbortController();
+  res.on('close', () => {
+    if (!res.writableEnded) ctrl.abort();
+  });
+  const startedAt = Date.now();
+
+  if (config.live) {
+    const logLine = (line) => console.log('  ' + line);
+    let out;
+    try {
+      out = await Upstream.editImage({
+        apiKey: config.apiKey,
+        baseUrl: config.baseUrl,
+        model: picked.model,
+        prompt: request.finalPrompt,
+        images: [{ buffer: source.buffer, mime: source.mime, filename: source.name }],
+        size: request.size,
+        quality: request.quality,
+        responseFormat: 'b64_json',
+        signal: ctrl.signal,
+        log: logLine,
+      });
+    } catch (err) {
+      if (ctrl.signal.aborted) return json(res, 499, { ok: false, message: '已取消' });
+      const status = (err && err.status) || 0;
+      if (status === 404) {
+        registry.rememberStatus(picked.model, { ok: false, message: (err && err.message) || '调不通' });
+      }
+      return json(res, statusFor(err), {
+        ok: false,
+        code: 'upstream_failed',
+        model: picked.model,
+        message: (err && err.message) || '上游改图失败',
+      });
+    }
+
+    const result = await persistImages({
+      startedAt,
+      prompt,
+      finalPrompt: request.finalPrompt,
+      requestedSize: request.requestedSize,
+      style: request.style,
+      size: request.size,
+      quality: request.quality,
+      model: picked.model,
+      engine: 'live',
+      notes,
+      kind: 'edit',
+      parent: parent ? { id: parent.id, file: parent.file } : null,
+      signal: ctrl.signal,
+      images: out.images,
+    });
+
+    if (!result.records.length) {
+      const detail = result.failures.length ? result.failures.join('；') : result.notes.slice(-1)[0] || '未知原因';
+      return json(res, 502, {
+        ok: false,
+        code: 'bad_image',
+        message: '上游返回了，但图取不回来：' + detail,
+        shape: out.shape || '',
+      });
+    }
+    registry.rememberStatus(picked.model, { ok: true, message: '' });
+    console.log(
+      `[改图] ${picked.model} ${request.size} ${((Date.now() - startedAt) / 1000).toFixed(1)}s`
+    );
+    return json(res, 200, {
+      ok: true,
+      engine: 'live',
+      records: result.records,
+      record: result.records[0],
+      notes: result.notes,
+      usage: out.usage || null,
+      remoteOnly: result.anyRemoteOnly,
+      shape: out.shape || '',
+    });
+  }
+
+  // 离线改图：真的在原图上动手（换风格配色 + 压暗四角 + 加颗粒），不是另画一张
+  notes.push('离线改图：在原图上换了风格配色、压暗四角、加了颗粒（接上 Key 之后是上游按描述重画）');
+  let painted;
+  try {
+    painted = Offline.applyEdit({
+      buffer: source.buffer,
+      styleId: request.style.id,
+      prompt: request.finalPrompt,
+    });
+  } catch (err) {
+    return json(res, 400, {
+      ok: false,
+      code: 'offline_edit_unsupported',
+      message:
+        '离线显影只能改 PNG 格式的原图（' +
+        err.message +
+        '）。接上 Key 之后，JPEG / WebP 也能改。',
+    });
+  }
+  const record = await persistImage({
+    id: store.newId('img'),
+    startedAt,
+    prompt,
+    finalPrompt: request.finalPrompt,
+    requestedSize: request.requestedSize,
+    style: request.style,
+    size: `${painted.width}x${painted.height}`,
+    quality: request.quality,
+    model: '离线显影引擎',
+    engine: 'offline',
+    stored: { buffer: painted.buffer, mime: painted.mime, ext: painted.ext, remoteUrl: '' },
+    notes,
+    kind: 'edit',
+    parent: parent ? { id: parent.id, file: parent.file } : null,
+  });
+  return json(res, 200, { ok: true, engine: 'offline', records: [record], record, notes, usage: null });
+}
+
+/* ── 从链接导入 ─────────────────────────────────────────── */
+
+/**
+ * 把一张「已经在别处生成好、但我们没存下来」的图收回历史。
+ *
+ * 真实场景就是它诞生的原因：某次出图上游成功了、也扣了钱，但我们这边取图失败
+ * （图床抽风 / 超时 / 返回形状没认出来），历史里就没这张。这时平台控制台里
+ * 那条记录的返回体通常还带着 `url`（例如 https://myfile.aibeke.com/img/...），
+ * 贴进来就能把图重新落盘 —— 还能正常下载、改图、分享。
+ */
+async function handleImport(req, res) {
+  let body;
+  try {
+    // 贴 data:image/... 的整段内嵌图片时，请求体会很大（base64 是原图的 4/3），
+    // 所以这个接口和改图一样放宽上限
+    body = await readBody(req, EDIT_BODY_LIMIT);
+  } catch (err) {
+    return json(res, 400, {
+      ok: false,
+      message: err.message === '请求体过大' ? '这张内嵌图片太大了（超过 24MB），改用 http(s) 链接导入' : err.message,
+    });
+  }
+
+  const raw = String(body.url || '').trim();
+  if (!raw) return json(res, 400, { ok: false, message: '贴一个图片链接（http(s):// 或 data:image/...）' });
+  if (!/^(https?:\/\/|data:image\/)/i.test(raw)) {
+    return json(res, 400, { ok: false, message: '只认 http(s) 链接或 data:image 开头的内嵌图片' });
+  }
+  // 只有 http(s) 链接需要防「贴错了」；data:image 本身就是一整段 base64，长度天然很长
+  if (!/^data:/i.test(raw) && raw.length > 2000) {
+    return json(res, 400, { ok: false, message: '链接太长了，检查一下是不是贴错了' });
+  }
+
+  const startedAt = Date.now();
+  let stored;
+  try {
+    if (/^data:/i.test(raw)) {
+      const decoded = Images.decodeBase64Image(raw);
+      stored = Images.toStoredImage(decoded.buffer, { contentType: decoded.declaredType });
+    } else {
+      const downloaded = await Upstream.fetchImageBytes(raw, { apiKey: config.apiKey });
+      stored = Images.toStoredImage(downloaded.buffer, { contentType: downloaded.contentType });
+    }
+  } catch (err) {
+    return json(res, 502, {
+      ok: false,
+      code: 'import_failed',
+      message:
+        '这张图取不回来：' +
+        ((err && err.message) || '未知原因') +
+        '。链接可能已经过期（这类中转的图床一般只留几天），或者需要登录才能看',
+    });
+  }
+
+  const dims = Images.dimensionsOf(stored.buffer);
+  const id = store.newId('img');
+  const styleId = String(body.styleId || '').trim();
+  const style = Styles.findStyle(styleId || 'photo');
+  let record;
+  try {
+    record = await persistImage({
+      id,
+      startedAt,
+      prompt: Styles.cleanPrompt(body.prompt) || '（从链接导入）',
+      finalPrompt: Styles.cleanPrompt(body.prompt) || '',
+      style: { id: style.id, label: style.label },
+      size: dims ? `${dims.width}x${dims.height}` : '',
+      quality: '',
+      model: '导入（原模型未知）',
+      engine: 'live',
+      stored: Object.assign({}, stored, { remoteUrl: /^https?:\/\//i.test(raw) ? raw : '' }),
+      notes: ['从链接导入：这张本来没存到本地（上游返回过图，但当时没取回来）'],
+      kind: 'generate',
+    });
+  } catch (err) {
+    return json(res, 500, { ok: false, message: '图片存不下来：' + err.message });
+  }
+
+  console.log(`[导入] ${record.file} ${Math.round(stored.buffer.length / 1024)}KB ← ${raw.slice(0, 90)}`);
+  return json(res, 200, { ok: true, record });
 }
 
 /* ── 历史记录 ───────────────────────────────────────────── */
@@ -543,13 +978,129 @@ async function handleHistory(req, res, url, method) {
       return json(res, 400, { ok: false, message: '清空历史需要 confirm=1' });
     }
     const removed = await store.clear();
-    return json(res, 200, { ok: true, removed });
+    // 图删了，挂在社区里的那份也没图可看了 —— 一起撤下来，别留一堆破图
+    const unshared = community.clear();
+    return json(res, 200, { ok: true, removed, unshared });
   }
 
   if (method === 'DELETE' && id) {
     const removed = await store.remove(id);
     if (!removed) return json(res, 404, { ok: false, message: '这张图已经不在了' });
-    return json(res, 200, { ok: true, id });
+    const unshared = community.removeByRecord(id);
+    return json(res, 200, { ok: true, id, unshared });
+  }
+
+  return json(res, 405, { ok: false, message: '不支持的方法' });
+}
+
+/* ── 预设（印相配方） ───────────────────────────────────── */
+
+const PRESET_ROUTE = '/api/presets/saved';
+
+async function handlePresets(req, res, url, method) {
+  if (method === 'GET') {
+    return json(res, 200, Object.assign({ ok: true }, presets.list()));
+  }
+
+  if (method === 'POST') {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch (err) {
+      return json(res, 400, { ok: false, message: err.message });
+    }
+    const out = presets.add(body.preset || body);
+    if (!out.ok) return json(res, 400, { ok: false, message: out.message });
+    return json(res, 200, Object.assign({ ok: true }, presets.list(), { preset: out.preset, replaced: out.replaced }));
+  }
+
+  if (method === 'DELETE') {
+    const id = decodeURIComponent(url.pathname.slice(PRESET_ROUTE.length).replace(/^\/+/, ''));
+    if (!id) return json(res, 400, { ok: false, message: '缺少预设 id' });
+    const removed = presets.remove(id);
+    if (!removed) return json(res, 404, { ok: false, message: '这个预设已经不在了' });
+    return json(res, 200, Object.assign({ ok: true, id }, presets.list()));
+  }
+
+  return json(res, 405, { ok: false, message: '不支持的方法' });
+}
+
+/* ── 社区分享 ───────────────────────────────────────────── */
+
+async function handleCommunity(req, res, url, method) {
+  const parts = url.pathname.split('/').filter(Boolean); // ['api','community', id?, 'like'?]
+  const id = parts[2] ? decodeURIComponent(parts[2]) : '';
+  const action = parts[3] || '';
+  const viewerId = String(req.headers['x-viewer-id'] || url.searchParams.get('viewer') || '').slice(0, 40);
+
+  if (method === 'GET' && !id) {
+    const out = community.list({
+      sort: url.searchParams.get('sort') || 'new',
+      limit: Number(url.searchParams.get('limit')) || 24,
+      viewerId,
+    });
+    return json(res, 200, Object.assign({ ok: true }, out));
+  }
+
+  if (method === 'GET' && id) {
+    const entry = community.get(id);
+    if (!entry) return json(res, 404, { ok: false, message: '这条分享已经不在了' });
+    return json(res, 200, { ok: true, entry, viewerId });
+  }
+
+  if (method === 'POST' && !id) {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch (err) {
+      return json(res, 400, { ok: false, message: err.message });
+    }
+    const record = await store.get(String(body.recordId || ''));
+    if (!record) return json(res, 404, { ok: false, message: '要分享的那张图已经不在了' });
+    if (!record.file) {
+      return json(res, 400, { ok: false, message: '这张没存到本地（只有上游临时链接），分享出去会失效' });
+    }
+    const out = community.add({
+      recordId: record.id,
+      file: record.file,
+      mime: record.mime,
+      author: body.author,
+      note: body.note,
+      prompt: record.optimized && record.optimized.prompt ? record.optimized.prompt : record.prompt,
+      hidePrompt: body.hidePrompt,
+      model: record.model,
+      styleId: record.style && record.style.id,
+      styleLabel: record.style && record.style.label,
+      size: record.size && record.size.actual,
+    });
+    if (!out.ok) return json(res, 400, { ok: false, message: out.message });
+    return json(res, 200, {
+      ok: true,
+      entry: community.list({ viewerId }).items.find((e) => e.recordId === record.id) || null,
+      updated: out.updated,
+      count: community.count(),
+    });
+  }
+
+  if (method === 'POST' && id && action === 'like') {
+    if (!viewerId) return json(res, 400, { ok: false, message: '缺少点赞标识（刷新一下页面再试）' });
+    const out = community.like(id, viewerId);
+    if (!out.ok) return json(res, 404, { ok: false, message: out.message });
+    return json(res, 200, { ok: true, likes: out.likes, liked: out.liked });
+  }
+
+  if (method === 'DELETE' && id) {
+    const removed = community.remove(id);
+    if (!removed) return json(res, 404, { ok: false, message: '这条分享已经不在了' });
+    return json(res, 200, { ok: true, id, count: community.count() });
+  }
+
+  if (method === 'DELETE' && !id) {
+    // 按图片撤销分享：?recordId=xxx
+    const recordId = url.searchParams.get('recordId') || '';
+    if (!recordId) return json(res, 400, { ok: false, message: '缺少 recordId' });
+    const removed = community.removeByRecord(recordId);
+    return json(res, 200, { ok: true, removed, count: community.count() });
   }
 
   return json(res, 405, { ok: false, message: '不支持的方法' });
@@ -660,6 +1211,8 @@ async function handle(req, res) {
         source: registry.cache.source,
       },
       history: { count: stats.count, bytes: stats.bytes },
+      community: { count: community.count() },
+      savedPresets: presets.list().saved.length,
       presets: Styles.listPresets(),
     });
   }
@@ -672,6 +1225,14 @@ async function handle(req, res) {
   if (url.pathname === '/api/models' && method === 'POST') return handleVerify(req, res);
   if (url.pathname === '/api/prompt/optimize' && method === 'POST') return handleOptimize(req, res);
   if (url.pathname === '/api/images/generate' && method === 'POST') return handleGenerate(req, res);
+  if (url.pathname === '/api/images/edit' && method === 'POST') return handleEdit(req, res);
+  if (url.pathname === '/api/images/import' && method === 'POST') return handleImport(req, res);
+  if (url.pathname === PRESET_ROUTE || url.pathname.startsWith(PRESET_ROUTE + '/')) {
+    return handlePresets(req, res, url, method);
+  }
+  if (url.pathname === '/api/community' || url.pathname.startsWith('/api/community/')) {
+    return handleCommunity(req, res, url, method);
+  }
   if (url.pathname.startsWith('/api/history')) return handleHistory(req, res, url, method);
   if (url.pathname.startsWith('/api/images/') && method === 'GET') return handleImageFile(req, res, url);
 

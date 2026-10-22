@@ -17,6 +17,10 @@
 const LIMITS = {
   promptMin: 2,
   promptMax: 2000,
+  // 一次只出 1 张。曾经做过「1 / 2 / 4 张」的批量，已经去掉了：
+  // 上游对 n 的支持很不一致（有的直接 400，有的收下 n 却只回一张），
+  // 而额度是按下发张数扣的 —— 用户花了 2 张的钱却只看到 1 张，是最难受的失败。
+  // 现在报文里根本不带 n（见 lib/upstream.js），一次一张，出不来就是没出。
   n: 1,
 };
 
@@ -284,7 +288,6 @@ function buildRequest(input) {
     quality: qualityOut.quality,
     qualityNote: qualityOut.note,
     finalPrompt: composePrompt(prompt, style.id, sizeOut.size),
-    n: LIMITS.n,
   };
 }
 

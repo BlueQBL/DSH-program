@@ -72,6 +72,62 @@ function toStoredImage(buffer, options) {
   return { buffer, mime: format.mime, ext: format.ext };
 }
 
+/**
+ * 读图片的像素尺寸（只认 PNG / JPEG / WebP / GIF 这几个最常见的头）。
+ * 为什么要它：从链接导入的图没有上游的 size 参数可抄，尺寸只能从图本身读出来。
+ */
+function dimensionsOf(buffer) {
+  if (!buffer || buffer.length < 24) return null;
+
+  // PNG：IHDR 紧跟在签名后面
+  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) {
+    return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+  }
+
+  // GIF：逻辑屏幕宽高（小端）
+  if (buffer.subarray(0, 3).toString('latin1') === 'GIF') {
+    return { width: buffer.readUInt16LE(6), height: buffer.readUInt16LE(8) };
+  }
+
+  // WebP：VP8X / VP8 / VP8L 三种块
+  if (buffer.subarray(0, 4).toString('latin1') === 'RIFF' && buffer.subarray(8, 12).toString('latin1') === 'WEBP') {
+    const chunk = buffer.subarray(12, 16).toString('latin1');
+    if (chunk === 'VP8X' && buffer.length >= 30) {
+      return { width: 1 + buffer.readUIntLE(24, 3), height: 1 + buffer.readUIntLE(27, 3) };
+    }
+    if (chunk === 'VP8 ' && buffer.length >= 30) {
+      return { width: buffer.readUInt16LE(26) & 0x3fff, height: buffer.readUInt16LE(28) & 0x3fff };
+    }
+    if (chunk === 'VP8L' && buffer.length >= 25) {
+      const bits = buffer.readUInt32LE(21);
+      return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 };
+    }
+    return null;
+  }
+
+  // JPEG：一路找 SOFn 段
+  if (buffer[0] === 0xff && buffer[1] === 0xd8) {
+    let pos = 2;
+    while (pos + 9 < buffer.length) {
+      if (buffer[pos] !== 0xff) {
+        pos += 1;
+        continue;
+      }
+      const marker = buffer[pos + 1];
+      const length = buffer.readUInt16BE(pos + 2);
+      // SOF0~SOF15（除了 DHT/JPG/DAC 那几个）
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        return { width: buffer.readUInt16BE(pos + 7), height: buffer.readUInt16BE(pos + 5) };
+      }
+      if (length < 2) break;
+      pos += 2 + length;
+    }
+    return null;
+  }
+
+  return null;
+}
+
 /** 下载时用的文件名：保留一点描述，去掉非法字符，长度收口 */
 function downloadName(record) {
   const prompt = String((record && record.prompt) || 'image')
@@ -89,5 +145,6 @@ module.exports = {
   sniffImage,
   decodeBase64Image,
   toStoredImage,
+  dimensionsOf,
   downloadName,
 };

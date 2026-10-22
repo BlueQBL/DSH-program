@@ -39,6 +39,17 @@
     nextPlate: 1,
     viewer: null,
     lastFocus: null,
+    // 改图：source = {kind:'record'|'file', id, file, dataUrl, label}
+    source: null,
+    // 印相配方（内置 + 自己存的）
+    recipes: { builtin: [], saved: [] },
+    activePresetId: '',
+    // 社区
+    community: { sort: 'new', items: [], total: 0 },
+    shareRecord: null,
+    sharedRecordIds: new Set(),
+    // 看大图的缩放
+    zoom: { scale: 1, x: 0, y: 0, mode: 'fit' },
   };
 
   /* ── 小工具 ───────────────────────────────────────────── */
@@ -237,9 +248,107 @@
         }, q.note)
       );
     });
+
+    renderPresets();
   }
 
-  function afterChoice() {
+  /* ── 印相配方（预设） ─────────────────────────────────── */
+
+  function renderPresets() {
+    const group = $('#preset-group');
+    if (!group) return;
+    group.innerHTML = '';
+    const all = (state.recipes.builtin || []).concat(state.recipes.saved || []);
+    if (!all.length) return;
+    all.forEach((preset) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'chip chip--preset';
+      btn.dataset.presetId = preset.id;
+      btn.setAttribute('aria-pressed', String(preset.id === state.activePresetId));
+      btn.title = preset.note || `${preset.styleId} · ${preset.ratio} · ${preset.tier} · 画质 ${preset.quality}`;
+      btn.innerHTML =
+        `<span>${esc(preset.name)}</span>` +
+        (preset.builtin ? '' : `<span class="chip__x" data-preset-remove="${esc(preset.id)}" role="button" aria-label="删除这个预设">×</span>`);
+      group.appendChild(btn);
+    });
+  }
+
+  /** 套用一个配方：风格 / 画幅 / 清晰度 / 画质 / 模型 +（可选）附加词 */
+  function applyPreset(preset) {
+    if (!preset) return;
+    state.styleId = preset.styleId;
+    state.ratio = preset.ratio;
+    state.tier = preset.tier;
+    state.quality = preset.quality;
+    if (preset.model) state.modelId = preset.model;
+    if (preset.extra) {
+      const box = $('#prompt');
+      const current = box.value.trim();
+      if (current && !current.toLowerCase().includes(preset.extra.toLowerCase())) {
+        box.value = `${current}, ${preset.extra}`;
+      } else if (!current) {
+        box.value = preset.extra;
+      }
+      updatePromptCount();
+    }
+    state.activePresetId = preset.id;
+    renderChoosers();
+    syncSelectionUi();
+    renderPresets();
+    updateSizeLine();
+    syncFinalPrompt();
+    savePrefs();
+    toast(`已套用「${preset.name}」`, 'ok', 2600);
+  }
+
+  async function loadPresets() {
+    try {
+      const out = await Api.savedPresets.list();
+      state.recipes = { builtin: out.builtin || [], saved: out.saved || [] };
+      renderPresets();
+    } catch (err) {
+      toast('预设读不了：' + err.message, 'error', 6000);
+    }
+  }
+
+  async function saveCurrentPreset() {
+    const name = window.prompt('给这组设置起个名字（例如：我的夜景）', '');
+    if (!name) return;
+    try {
+      const out = await Api.savedPresets.save({
+        preset: {
+          name,
+          styleId: state.styleId,
+          ratio: state.ratio,
+          tier: state.tier,
+          quality: state.quality,
+          model: state.modelId,
+        },
+      });
+      state.recipes = { builtin: out.builtin || [], saved: out.saved || [] };
+      renderPresets();
+      toast(out.replaced ? `已更新「${name}」` : `已存下「${name}」`, 'ok');
+    } catch (err) {
+      toast(err.message || '预设没存成', 'error', 6000);
+    }
+  }
+
+  async function removePreset(id) {
+    try {
+      const out = await Api.savedPresets.remove(id);
+      state.recipes = { builtin: out.builtin || [], saved: out.saved || [] };
+      if (state.activePresetId === id) state.activePresetId = '';
+      renderPresets();
+      toast('已删除这个预设', 'ok', 2400);
+    } catch (err) {
+      toast(err.message || '删不掉', 'error', 5000);
+    }
+  }
+
+  /** 只刷新「选中的是哪个」的视觉状态（不重建 DOM） */
+  function syncSelectionUi() {
+    if (!state.presets) return;
     $$('#ratio-group .chip').forEach((btn, i) => {
       btn.setAttribute('aria-pressed', String(state.presets.ratios[i].ratio === state.ratio));
     });
@@ -252,6 +361,12 @@
     $$('#quality-group .seg').forEach((btn, i) => {
       btn.setAttribute('aria-pressed', String(state.presets.qualities[i].id === state.quality));
     });
+  }
+
+  function afterChoice() {
+    state.activePresetId = '';
+    syncSelectionUi();
+    renderPresets();
     updateSizeLine();
     syncFinalPrompt();
     savePrefs();
@@ -448,6 +563,14 @@
     ].filter(Boolean);
 
     const notes = Array.isArray(record.notes) ? record.notes.filter(Boolean) : [];
+    const badges = [];
+    if (record.kind === 'edit') {
+      const parentPlate = record.parentId ? ` · 源 PLATE ${pad2(plateNumber(record.parentId))}` : '';
+      badges.push(`<span class="badge badge--edit">改图${esc(parentPlate)}</span>`);
+    }
+    if (state.sharedRecordIds.has(record.id)) {
+      badges.push('<span class="badge badge--shared">已分享</span>');
+    }
 
     el.innerHTML = `
       <div class="frame__perf" aria-hidden="true"></div>
@@ -456,15 +579,18 @@
           <span class="frame__plate mono">PLATE ${pad2(plate)}</span>
           <span class="frame__engine mono">${esc(record.model || '')}</span>
         </header>
-        <button class="frame__image" type="button" data-act="view" style="--frame-ratio:${ratioOf(record.size && record.size.actual)}" aria-label="看大图">
+        <button class="frame__image" type="button" data-act="view" style="--frame-ratio:${ratioOf(record.size && record.size.actual)}" aria-label="看大图（可放大看细节）">
           ${frameImageMarkup(record)}
         </button>
+        ${badges.length ? `<div class="frame__badges">${badges.join('')}</div>` : ''}
         <p class="frame__prompt">${esc(record.prompt)}</p>
         <p class="frame__meta mono">${esc(meta.join(' · '))}</p>
         <p class="frame__meta mono">${formatTime(record.createdAt)} · ${record.engine === 'offline' ? '离线显影' : '上游出图'}</p>
         ${notes.length ? `<p class="frame__note">${esc(notes.join('；'))}</p>` : ''}
         <div class="frame__actions">
           <button class="btn btn--tiny btn--ghost" type="button" data-act="download">${isRemoteOnly(record) ? '打开原图' : '下载'}</button>
+          <button class="btn btn--tiny btn--ghost" type="button" data-act="edit" ${isRemoteOnly(record) ? 'disabled title="没存到本地，不能作为原图"' : ''}>改这张</button>
+          <button class="btn btn--tiny btn--ghost" type="button" data-act="share" ${isRemoteOnly(record) ? 'disabled title="没存到本地，分享会失效"' : ''}>分享</button>
           <button class="btn btn--tiny btn--ghost" type="button" data-act="copy">复制描述</button>
           <button class="btn btn--tiny btn--danger" type="button" data-act="delete">删除</button>
         </div>
@@ -504,11 +630,33 @@
     $('#empty').hidden = state.records.length > 0;
   }
 
+  /** 把新记录塞到相纸最前面 */
+  function absorbRecords(records) {
+    const list = (records || []).filter(Boolean);
+    if (!list.length) return;
+    const before = $('#frames').firstChild;
+    list.forEach((record) => {
+      state.records.unshift(record);
+      state.byId.set(record.id, record);
+      $('#frames').insertBefore(frameElement(record, { fresh: true }), before);
+    });
+    state.stats = {
+      count: (state.stats ? state.stats.count : 0) + list.length,
+      bytes: ((state.stats && state.stats.bytes) || 0) + list.reduce((sum, r) => sum + (r.bytes || 0), 0),
+    };
+    updateCounts();
+  }
+
+  /**
+   * 曝光 / 改图：共用一个流程。
+   * 走哪条路由看有没有原图（state.source）：有原图就是「基于这张改」，没有就是新出一张。
+   */
   async function generate() {
     if (state.busy) return;
     const prompt = currentPrompt();
+    const editing = Boolean(state.source);
     if (prompt.length < 2) {
-      toast('先写一句你想看到的画面，再按「曝光」', 'error');
+      toast(editing ? '写一句「要怎么改」，例如：把背景换成夜景' : '先写一句你想看到的画面，再按「曝光」', 'error');
       $('#prompt').focus();
       return;
     }
@@ -517,53 +665,135 @@
     const btn = $('#generate');
     const label = $('.btn__label', btn);
     btn.disabled = true;
-    label.textContent = '显影中…';
+    label.textContent = editing ? '改性中…' : '显影中…';
     const startedAt = Date.now();
     const hint = $('#generate-hint');
     hint.textContent = '0s';
     const timer = setInterval(() => {
-      hint.textContent = `${Math.round((Date.now() - startedAt) / 1000)}s`;
+      const seconds = Math.round((Date.now() - startedAt) / 1000);
+      // 高画质本来就慢，别让人以为卡死了
+      const tip = seconds >= 45 && state.quality === 'high' ? '（高画质可能要几分钟，别关页面）' : '';
+      hint.textContent = `${seconds}s${tip}`;
     }, 500);
 
     const size = requestedSize();
-    const placeholder = developingElement({ prompt, size, model: state.modelId || (state.models && !state.models.live ? '离线显影引擎' : '') });
+    const placeholder = developingElement({
+      prompt,
+      size,
+      model: state.modelId || (state.models && !state.models.live ? '离线显影引擎' : ''),
+    });
     $('#frames').prepend(placeholder);
     $('#empty').hidden = true;
+    const clearPlaceholders = () => placeholder.remove();
 
     try {
-      const out = await Api.generate({
+      const payload = {
         prompt,
         styleId: state.styleId,
         size,
         quality: state.quality,
         model: state.modelId || undefined,
-      });
-      placeholder.remove();
-      state.records.unshift(out.record);
-      state.byId.set(out.record.id, out.record);
-      $('#frames').prepend(frameElement(out.record, { fresh: true }));
-      state.stats = { count: (state.stats ? state.stats.count : 0) + 1, bytes: ((state.stats && state.stats.bytes) || 0) + (out.record.bytes || 0) };
-      updateCounts();
+      };
+      const out = editing
+        ? await Api.edit(
+            Object.assign({}, payload, state.source.kind === 'record' ? { sourceId: state.source.id } : { sourceB64: state.source.dataUrl })
+          )
+        : await Api.generate(payload);
+
+      clearPlaceholders();
+      const records = out.records && out.records.length ? out.records : out.record ? [out.record] : [];
+      absorbRecords(records);
       const note = (out.notes || []).filter(Boolean).join('；');
+      const head = editing ? '改好了' : '出图完成';
       if (out.remoteOnly) {
-        toast(`出图完成，但${note || '这张没存到本地'}`, 'error', 10000);
+        toast(`${head}，但${note || '有图没存到本地'}`, 'error', 10000);
       } else {
-        toast(note ? `出图完成 —— ${note}` : '出图完成，已存进历史', 'ok', 6000);
+        toast(
+          `${head}${okCount && records.length > 1 ? `（${okCount} 张已存）` : ''}${note ? ` —— ${note}` : ''}`,
+          'ok',
+          6000
+        );
       }
       // 模型可用性可能刚刚变了（成功 = 已验证），顺手刷一下下拉框上的标记
       refreshModels(false);
     } catch (err) {
-      placeholder.remove();
+      clearPlaceholders();
       updateCounts();
-      toast(err.message || '出图失败', 'error', 9000);
+      toast(err.message || (editing ? '改图失败' : '出图失败'), 'error', 9000);
       if (err.code === 'model_unavailable') refreshModels(false);
     } finally {
       clearInterval(timer);
       state.busy = false;
       btn.disabled = false;
-      label.textContent = '曝光';
+      label.textContent = state.source ? '改这张' : '曝光';
       hint.textContent = '';
     }
+  }
+
+  /* ── 改图：进入 / 退出 ───────────────────────────────── */
+
+  function enterEditMode(source) {
+    state.source = source;
+    const bar = $('#edit-bar');
+    const thumb = $('#edit-source');
+    thumb.src = source.thumb || '';
+    bar.hidden = false;
+    $('#edit-source-note').textContent = source.label || '';
+    const label = $('.btn__label', $('#generate'));
+    label.textContent = '改这张';
+    $('#prompt').placeholder = '写要改什么，例如：把背景换成夜景，人物保留，光线更暖';
+    $('#prompt').focus();
+    syncFinalPrompt();
+  }
+
+  function exitEditMode() {
+    state.source = null;
+    $('#edit-bar').hidden = true;
+    $('#edit-source').removeAttribute('src');
+    const label = $('.btn__label', $('#generate'));
+    label.textContent = '曝光';
+    $('#prompt').placeholder = '例：雨后的老城区，一个人撑着红伞走过积水，路灯刚亮';
+    syncFinalPrompt();
+  }
+
+  function editRecord(record) {
+    if (!record) return;
+    if (isRemoteOnly(record)) {
+      toast('这张没存到本地，不能作为原图', 'error', 5000);
+      return;
+    }
+    enterEditMode({
+      kind: 'record',
+      id: record.id,
+      thumb: imageSrc(record),
+      label: `PLATE ${pad2(plateNumber(record.id))} · ${sizeLabel(record.size && record.size.actual)} · ${record.model || ''}`,
+    });
+    $('#prompt').scrollIntoView({ block: 'center', behavior: 'smooth' });
+    toast('已进入改图：描述里写要改什么', 'ok', 4200);
+  }
+
+  function editLocalFile(file) {
+    if (!file) return;
+    if (!/^image\//.test(file.type || '')) {
+      toast('选一张图片文件（PNG / JPEG / WebP）', 'error');
+      return;
+    }
+    if (file.size > 12 * 1024 * 1024) {
+      toast('图片太大了（超过 12MB），换一张', 'error');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      enterEditMode({
+        kind: 'file',
+        dataUrl: String(reader.result || ''),
+        thumb: String(reader.result || ''),
+        label: `${file.name} · ${Math.round(file.size / 1024)} KB`,
+      });
+      toast('已载入本地图片，写一句要怎么改', 'ok', 4200);
+    };
+    reader.onerror = () => toast('这张图片读不出来', 'error');
+    reader.readAsDataURL(file);
   }
 
   /* ── 优化提示词 ───────────────────────────────────────── */
@@ -645,6 +875,7 @@
       updateCounts();
       renderHistoryList();
       if (state.viewer && state.viewer.id === id) closeViewer();
+      loadCommunity(state.community.sort);
       toast('已删除', 'ok');
     } catch (err) {
       toast(err.message || '删除失败', 'error');
@@ -741,14 +972,356 @@
     ].filter(Boolean);
     $('#viewer-caption').textContent = `${meta.join(' · ')} —— ${record.prompt}`;
     $('#viewer-download').textContent = isRemoteOnly(record) ? '打开原图' : '下载这张';
+    // 社区里的条目没有本地记录，不能改也不能再分享一次
+    const owned = Boolean(state.byId.get(record.id));
+    $('#viewer-edit').disabled = !owned || isRemoteOnly(record);
+    $('#viewer-share').disabled = !owned || isRemoteOnly(record);
     $('#viewer').hidden = false;
+    resetZoom();
     $('#viewer-download').focus();
   }
 
   function closeViewer() {
     $('#viewer').hidden = true;
     state.viewer = null;
+    resetZoom();
     if (state.lastFocus && state.lastFocus.focus) state.lastFocus.focus();
+  }
+
+  /* ── 看大图的放大（看细节用） ─────────────────────────── */
+
+  /** 把当前的缩放 / 平移画到 img 上；mode='fit' 时退回 CSS 的自然适配 */
+  function applyZoom() {
+    const stage = $('#viewer-stage');
+    const img = $('#viewer-image');
+    const z = state.zoom;
+    const fit = z.mode === 'fit';
+    stage.classList.toggle('is-actual', !fit);
+    stage.classList.toggle('is-zoomed', !fit && z.scale > 1);
+    if (fit) {
+      img.style.transform = '';
+      $('#zoom-level').textContent = '适应';
+      return;
+    }
+    img.style.transform = `translate(${z.x}px, ${z.y}px) scale(${z.scale})`;
+    $('#zoom-level').textContent = `${Math.round(z.scale * 100)}%`;
+  }
+
+  function resetZoom() {
+    state.zoom = { scale: 1, x: 0, y: 0, mode: 'fit' };
+    applyZoom();
+  }
+
+  function zoomBy(factor) {
+    const z = state.zoom;
+    if (z.mode === 'fit') {
+      z.mode = 'zoom';
+      z.scale = 1;
+    }
+    z.scale = Math.max(1, Math.min(8, z.scale * factor));
+    if (z.scale <= 1.001) {
+      z.x = 0;
+      z.y = 0;
+    }
+    applyZoom();
+  }
+
+  /** 1:1 = 按原始像素看（能看出噪点、睫毛、文字边缘） */
+  function zoomActual() {
+    const img = $('#viewer-image');
+    const natural = img.naturalWidth || 1024;
+    const stage = $('#viewer-stage');
+    const boxWidth = stage.clientWidth || natural;
+    state.zoom = { scale: Math.max(1, natural / boxWidth), x: 0, y: 0, mode: 'zoom' };
+    applyZoom();
+  }
+
+  function toggleZoom() {
+    if (state.zoom.mode === 'fit') zoomActual();
+    else resetZoom();
+  }
+
+  function bindZoom() {
+    const stage = $('#viewer-stage');
+    const img = $('#viewer-image');
+
+    stage.addEventListener(
+      'wheel',
+      (event) => {
+        if ($('#viewer').hidden) return;
+        event.preventDefault();
+        if (state.zoom.mode === 'fit') {
+          state.zoom.mode = 'zoom';
+          state.zoom.scale = 1;
+        }
+        const factor = event.deltaY < 0 ? 1.14 : 1 / 1.14;
+        state.zoom.scale = Math.max(1, Math.min(8, state.zoom.scale * factor));
+        if (state.zoom.scale <= 1.001) {
+          state.zoom.x = 0;
+          state.zoom.y = 0;
+        }
+        applyZoom();
+      },
+      { passive: false }
+    );
+
+    // 拖动平移：只有放大之后才需要
+    let dragging = false;
+    let startX = 0;
+    let startY = 0;
+    let originX = 0;
+    let originY = 0;
+
+    stage.addEventListener('pointerdown', (event) => {
+      if (state.zoom.mode === 'fit' || state.zoom.scale <= 1) return;
+      dragging = true;
+      startX = event.clientX;
+      startY = event.clientY;
+      originX = state.zoom.x;
+      originY = state.zoom.y;
+      stage.classList.add('is-dragging');
+      stage.setPointerCapture(event.pointerId);
+    });
+
+    stage.addEventListener('pointermove', (event) => {
+      if (!dragging) return;
+      state.zoom.x = originX + (event.clientX - startX);
+      state.zoom.y = originY + (event.clientY - startY);
+      applyZoom();
+    });
+
+    const endDrag = (event) => {
+      if (!dragging) return;
+      dragging = false;
+      stage.classList.remove('is-dragging');
+      try {
+        stage.releasePointerCapture(event.pointerId);
+      } catch {
+        /* 指针已经没了 */
+      }
+    };
+    stage.addEventListener('pointerup', endDrag);
+    stage.addEventListener('pointercancel', endDrag);
+
+    stage.addEventListener('dblclick', toggleZoom);
+    img.addEventListener('load', () => {
+      if (state.zoom.mode === 'zoom') applyZoom();
+    });
+
+    $('#zoom-in').addEventListener('click', () => zoomBy(1.5));
+    $('#zoom-out').addEventListener('click', () => zoomBy(1 / 1.5));
+    $('#zoom-fit').addEventListener('click', resetZoom);
+    $('#zoom-actual').addEventListener('click', zoomActual);
+  }
+
+  /* ── 社区：分享 / 点赞 / 拿来改 ───────────────────────── */
+
+  function openShare(record) {
+    if (!record) return;
+    if (isRemoteOnly(record)) {
+      toast('这张没存到本地，分享出去会失效', 'error', 5000);
+      return;
+    }
+    state.shareRecord = record;
+    $('#share-thumb').src = imageSrc(record);
+    const savedAuthor = (() => {
+      try {
+        return window.localStorage.getItem('lan-shai:author') || '';
+      } catch {
+        return '';
+      }
+    })();
+    $('#share-author').value = savedAuthor;
+    $('#share-note').value = '';
+    $('#share-hide-prompt').checked = false;
+    $('#share-dialog').hidden = false;
+    $('#share-author').focus();
+  }
+
+  function closeShare() {
+    $('#share-dialog').hidden = true;
+    state.shareRecord = null;
+  }
+
+  async function submitShare(event) {
+    event.preventDefault();
+    const record = state.shareRecord;
+    if (!record) return;
+    const author = $('#share-author').value.trim() || '匿名';
+    const note = $('#share-note').value.trim();
+    const hidePrompt = $('#share-hide-prompt').checked;
+    try {
+      window.localStorage.setItem('lan-shai:author', author);
+    } catch {
+      /* 隐私模式下写不了，不影响分享 */
+    }
+    const btn = $('#share-submit');
+    btn.disabled = true;
+    btn.textContent = '挂上去…';
+    try {
+      const out = await Api.community.share({ recordId: record.id, author, note, hidePrompt });
+      state.sharedRecordIds.add(record.id);
+      closeShare();
+      renderFramesBadges();
+      await loadCommunity(state.community.sort);
+      toast(out.updated ? '分享信息已更新' : '已挂到社区墙上', 'ok');
+    } catch (err) {
+      toast(err.message || '分享失败', 'error', 7000);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '挂上去';
+    }
+  }
+
+  /** 分享之后要更新相纸上的「已分享」小标 */
+  function renderFramesBadges() {
+    const records = state.records.slice().sort((a, b) => b.createdAt - a.createdAt);
+    const frames = $$('#frames .frame[data-id]');
+    frames.forEach((frame) => {
+      const record = state.byId.get(frame.dataset.id);
+      if (!record) return;
+      const wantsShared = state.sharedRecordIds.has(record.id);
+      const hasBadge = Boolean(frame.querySelector('.badge--shared'));
+      if (wantsShared && !hasBadge) {
+        const box = frame.querySelector('.frame__badges') || document.createElement('div');
+        box.className = 'frame__badges';
+        box.insertAdjacentHTML('beforeend', '<span class="badge badge--shared">已分享</span>');
+        const image = frame.querySelector('.frame__image');
+        if (image && !box.parentNode) image.after(box);
+      } else if (!wantsShared && hasBadge) {
+        const badge = frame.querySelector('.badge--shared');
+        if (badge) badge.remove();
+      }
+    });
+    void records;
+  }
+
+  async function loadCommunity(sort) {
+    try {
+      const out = await Api.community.list({ sort: sort || state.community.sort, limit: 48 });
+      state.community = { sort: out.sort, items: out.items || [], total: out.total || 0 };
+      state.sharedRecordIds = new Set((out.items || []).map((e) => e.recordId));
+      renderCommunity();
+      renderCommunitySort();
+      renderFramesBadges();
+      $('#community-count').textContent = String(state.community.total);
+    } catch (err) {
+      toast('社区读不了：' + err.message, 'error', 6000);
+    }
+  }
+
+  function renderCommunitySort() {
+    const group = $('#community-sort');
+    if (!group) return;
+    group.innerHTML = '';
+    [
+      { id: 'new', label: '最新' },
+      { id: 'hot', label: '最热' },
+    ].forEach((option) => {
+      group.appendChild(
+        segButton(option.label, option.id === state.community.sort, () => {
+          state.community.sort = option.id;
+          loadCommunity(option.id);
+        }, option.id === 'hot' ? '按点赞数排' : '按分享时间排')
+      );
+    });
+    $('#community-total').textContent = `${state.community.total} 张`;
+  }
+
+  function renderCommunity() {
+    const list = $('#community-list');
+    if (!list) return;
+    list.innerHTML = '';
+    state.community.items.forEach((entry) => {
+      const card = document.createElement('article');
+      card.className = 'card';
+      card.dataset.entryId = entry.id;
+      card.dataset.recordId = entry.recordId;
+      card.innerHTML = `
+        <button class="card__image" type="button" data-act="view-share" aria-label="看大图">
+          <img src="${esc(Api.imageUrl(entry.file))}" alt="${esc(entry.note || entry.prompt || entry.author)}" loading="lazy">
+        </button>
+        <div class="card__body">
+          <p class="card__author"><span>${esc(entry.author)}</span><span class="card__meta mono">${formatTime(entry.sharedAt)}</span></p>
+          ${entry.note ? `<p class="card__note">${esc(entry.note)}</p>` : ''}
+          <p class="card__meta mono">${esc([sizeLabel(entry.size), entry.styleLabel, entry.model].filter(Boolean).join(' · '))}</p>
+          <div class="card__actions">
+            <button class="like" type="button" data-act="like" aria-pressed="${entry.liked ? 'true' : 'false'}" title="点一下点赞，再点一下取消">
+              ♥ <span>${entry.likes}</span>
+            </button>
+            <button class="btn btn--tiny btn--ghost" type="button" data-act="remix" ${entry.hidePrompt || !entry.prompt ? 'disabled title="作者没公开提示词"' : ''}>拿来改</button>
+            <button class="btn btn--tiny btn--danger" type="button" data-act="unshare" title="从社区撤下来">撤下</button>
+          </div>
+        </div>`;
+      list.appendChild(card);
+    });
+    $('#community-empty').hidden = state.community.items.length > 0;
+  }
+
+  function openCommunity() {
+    state.lastFocus = document.activeElement;
+    $('#community-drawer').hidden = false;
+    loadCommunity(state.community.sort);
+  }
+
+  function closeCommunity() {
+    $('#community-drawer').hidden = true;
+    if (state.lastFocus && state.lastFocus.focus) state.lastFocus.focus();
+  }
+
+  async function toggleLike(entryId) {
+    try {
+      const out = await Api.community.like(entryId);
+      const entry = state.community.items.find((e) => e.id === entryId);
+      if (entry) {
+        entry.likes = out.likes;
+        entry.liked = out.liked;
+      }
+      renderCommunity();
+    } catch (err) {
+      toast(err.message || '点赞失败', 'error', 5000);
+    }
+  }
+
+  async function unshare(entryId) {
+    if (!window.confirm('把这张从社区撤下来？（图片本身还在历史里）')) return;
+    try {
+      await Api.community.unshare(entryId);
+      await loadCommunity(state.community.sort);
+      toast('已撤下', 'ok', 2600);
+    } catch (err) {
+      toast(err.message || '撤不下来', 'error', 5000);
+    }
+  }
+
+  /** 拿来改：把别人的提示词和风格带进曝光台 */
+  function remix(entry) {
+    if (!entry || !entry.prompt) return;
+    $('#prompt').value = entry.prompt;
+    updatePromptCount();
+    if (entry.styleId && state.presets && state.presets.styles.some((s) => s.id === entry.styleId)) {
+      state.styleId = entry.styleId;
+    }
+    syncSelectionUi();
+    syncFinalPrompt();
+    closeCommunity();
+    $('#prompt').scrollIntoView({ block: 'center', behavior: 'smooth' });
+    toast('提示词已带进来，改完按曝光', 'ok', 4200);
+  }
+
+  /** 社区卡片 → 看大图（用条目本身拼一个临时 record） */
+  function viewShared(entry) {
+    if (!entry) return;
+    openViewer({
+      id: entry.recordId,
+      file: entry.file,
+      prompt: entry.prompt || '（作者没有公开提示词）',
+      size: { actual: entry.size },
+      style: { label: entry.styleLabel },
+      model: entry.model,
+      createdAt: entry.sharedAt,
+      engine: 'live',
+    });
   }
 
   /* ── 动作：下载 / 复制 ───────────────────────────────── */
@@ -777,6 +1350,33 @@
       toast('描述已复制', 'ok', 2400);
     } catch {
       toast('复制失败：浏览器不允许写剪贴板', 'error', 5000);
+    }
+  }
+
+  /** 从链接导入：把上游控制台里那张图的链接收进历史 */
+  async function importFromUrl() {
+    const input = $('#import-url');
+    const url = input.value.trim();
+    if (!url) {
+      input.focus();
+      toast('先贴一个图片链接', 'error');
+      return;
+    }
+    const btn = $('#import-submit');
+    btn.disabled = true;
+    btn.textContent = '取图中…';
+    try {
+      const out = await Api.importUrl({ url });
+      absorbRecords([out.record]);
+      input.value = '';
+      $('#import-row').hidden = true;
+      await renderHistoryList($('#history-search').value.trim());
+      toast('已导入，收进相纸和历史里了', 'ok', 6000);
+    } catch (err) {
+      toast(err.message || '导入失败', 'error', 10000);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '导入';
     }
   }
 
@@ -813,17 +1413,77 @@
       'input',
       debounce((event) => renderHistoryList(event.target.value.trim()), 260)
     );
+    $('#history-import').addEventListener('click', () => {
+      const row = $('#import-row');
+      row.hidden = !row.hidden;
+      if (!row.hidden) $('#import-url').focus();
+    });
+    $('#import-submit').addEventListener('click', importFromUrl);
+    $('#import-url').addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        importFromUrl();
+      }
+    });
+
+    // 印相配方
+    $('#save-preset').addEventListener('click', saveCurrentPreset);
+    $('#preset-group').addEventListener('click', (event) => {
+      const remove = event.target.closest('[data-preset-remove]');
+      if (remove) {
+        event.stopPropagation();
+        removePreset(remove.dataset.presetRemove);
+        return;
+      }
+      const chip = event.target.closest('[data-preset-id]');
+      if (!chip) return;
+      const id = chip.dataset.presetId;
+      const preset = (state.recipes.builtin || []).concat(state.recipes.saved || []).find((p) => p.id === id);
+      applyPreset(preset);
+    });
+
+    // 改图：从本地图片进来 / 取消
+    $('#pick-source').addEventListener('click', () => $('#source-file').click());
+    $('#source-file').addEventListener('change', (event) => {
+      const file = event.target.files && event.target.files[0];
+      editLocalFile(file);
+      event.target.value = '';
+    });
+    $('#edit-cancel').addEventListener('click', () => {
+      exitEditMode();
+      toast('已退出改图，回到新出图', 'ok', 2600);
+    });
+
+    // 社区
+    $('#open-community').addEventListener('click', openCommunity);
+    $('#share-form').addEventListener('submit', submitShare);
+    $('#community-list').addEventListener('click', (event) => {
+      const card = event.target.closest('.card');
+      if (!card) return;
+      const entry = state.community.items.find((e) => e.id === card.dataset.entryId);
+      if (!entry) return;
+      const act = event.target.closest('[data-act]');
+      if (!act) return;
+      const kind = act.dataset.act;
+      if (kind === 'like') toggleLike(entry.id);
+      else if (kind === 'remix') remix(entry);
+      else if (kind === 'unshare') unshare(entry.id);
+      else if (kind === 'view-share') viewShared(entry);
+    });
 
     // 点相纸 / 历史里的操作按钮（事件委托：相纸会一直加新卡片）
     document.addEventListener('click', (event) => {
-      const act = event.target.closest('[data-act]');
       const close = event.target.closest('[data-close]');
       if (close) {
-        if (close.dataset.close === 'viewer') closeViewer();
-        if (close.dataset.close === 'drawer') closeDrawer();
+        const what = close.dataset.close;
+        if (what === 'viewer') closeViewer();
+        else if (what === 'drawer') closeDrawer();
+        else if (what === 'community') closeCommunity();
+        else if (what === 'share') closeShare();
         return;
       }
-      if (!act) return;
+      const act = event.target.closest('[data-act]');
+      if (!act || act.disabled) return;
       const holder = act.closest('.frame, .hist');
       if (!holder) return;
       const record = state.byId.get(holder.dataset.id);
@@ -833,18 +1493,57 @@
       else if (kind === 'download') download(record);
       else if (kind === 'copy') copyPrompt(record);
       else if (kind === 'delete') removeRecord(record.id);
+      else if (kind === 'edit') editRecord(record);
+      else if (kind === 'share') openShare(record);
     });
 
     $('#viewer-download').addEventListener('click', () => download(state.viewer));
     $('#viewer-copy').addEventListener('click', () => copyPrompt(state.viewer));
+    $('#viewer-edit').addEventListener('click', () => {
+      const record = state.viewer;
+      if (!record) return;
+      closeViewer();
+      editRecord(record);
+    });
+    $('#viewer-share').addEventListener('click', () => {
+      const record = state.viewer;
+      if (!record) return;
+      openShare(record);
+    });
+
+    bindZoom();
 
     document.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
+        if (!$('#share-dialog').hidden) {
+          closeShare();
+          return;
+        }
         if (!$('#viewer').hidden) {
           closeViewer();
           return;
         }
+        if (!$('#community-drawer').hidden) {
+          closeCommunity();
+          return;
+        }
         if (!$('#history-drawer').hidden) closeDrawer();
+        return;
+      }
+      // 看大图时用键盘放大：+ / - / 0
+      if (!$('#viewer').hidden && (event.key === '+' || event.key === '=')) {
+        event.preventDefault();
+        zoomBy(1.5);
+        return;
+      }
+      if (!$('#viewer').hidden && event.key === '-') {
+        event.preventDefault();
+        zoomBy(1 / 1.5);
+        return;
+      }
+      if (!$('#viewer').hidden && event.key === '0') {
+        event.preventDefault();
+        resetZoom();
         return;
       }
       const mod = event.ctrlKey || event.metaKey;
@@ -894,9 +1593,30 @@
 
     await refreshModels(false);
     await loadHistory();
+    await loadPresets();
+    await loadCommunity('new');
+
+    // 深链：#share=<社区条目 id> —— 别人把链接发过来，打开就直接看那一张
+    openShareFromHash();
 
     if (state.engine && state.engine.live && (state.models && state.models.source === 'known')) {
       toast('账号列表里没认出能出图的模型，先按平台文档列了几个；点「检测」确认哪个真的能用', 'error', 9000);
+    }
+  }
+
+  /** 处理 #share=<id>：打开社区抽屉并把那一张放大 */
+  async function openShareFromHash() {
+    const match = /^#share=(.+)$/.exec(window.location.hash || '');
+    if (!match) return;
+    const entryId = decodeURIComponent(match[1]);
+    try {
+      const out = await Api.community.get(entryId);
+      if (!out || !out.entry) return;
+      $('#community-drawer').hidden = false;
+      await loadCommunity(state.community.sort);
+      viewShared(out.entry);
+    } catch {
+      toast('这个分享链接已经失效了', 'error', 6000);
     }
   }
 

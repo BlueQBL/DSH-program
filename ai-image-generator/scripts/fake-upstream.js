@@ -34,6 +34,7 @@ const MODELS = [
   'dall-e-2',
   'gpt-image-1',
   'gpt-image-2',
+  'gpt-4o-image',
   'flux-schnell',
   'ideogram-v2',
   'gemini-2.5-flash-image',
@@ -43,6 +44,18 @@ const MODELS = [
 
 /** 这些模型出图会失败，用来验证「检测」和「已排除」那一组 */
 const BROKEN = new Set(['dall-e-2']);
+
+/**
+ * 「一次只出一张」的闸门。
+ *
+ * 这个项目已经去掉了批量出图：报文里不许出现 n>1。真实平台对 n 的支持乱七八糟
+ * （有的直接 400，有的收下 n 却只回一张），额度还是按 n 扣的。假上游在这里
+ * 直接 400 —— 万一以后有人把批量加回来，测试会立刻炸，而不是等用户花了钱才发现。
+ */
+function rejectBatch(body) {
+  const n = Number(body && body.n);
+  return Number.isFinite(n) && n > 1;
+}
 
 /** 这个模型不认 response_format：客户端应该去掉参数重试一次 */
 const NO_RESPONSE_FORMAT = new Set(['dall-e-3']);
@@ -73,6 +86,15 @@ function readBody(req) {
         resolve({});
       }
     });
+  });
+}
+
+/** 原样收下请求体（multipart 用） */
+function collect(req) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => resolve(chunks));
   });
 }
 
@@ -136,6 +158,13 @@ const server = http.createServer(async (req, res) => {
 
     const painted = paint(String(body.prompt || 'fake prompt'), body.size);
     const wantsUrl = URL_ONLY.has(model) || BAD_DOWNLOAD.has(model) || body.response_format === 'url';
+    const count = 1; // 一次一张：客户端不许要更多
+
+    if (rejectBatch(body)) {
+      return json(res, 400, {
+        error: { message: 'n must be 1: this client generates one image at a time', type: 'invalid_request_error' },
+      });
+    }
 
     if (BAD_DOWNLOAD.has(model)) {
       // 图生成了，地址也给得出来，但那个地址打不开（模拟图床过期 / 防盗链）
@@ -147,19 +176,74 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (wantsUrl) {
-      const name = `/files/${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}.png`;
-      files.set(name, { buffer: painted.buffer, mime: 'image/png' });
+      const entries = [];
+      for (let i = 0; i < count; i += 1) {
+        const name = `/files/${Date.now().toString(36)}-${i}-${Math.random().toString(36).slice(2, 7)}.png`;
+        files.set(name, { buffer: i === 0 ? painted.buffer : paint(`${body.prompt}#${i}`, body.size).buffer, mime: 'image/png' });
+        entries.push({ revised_prompt: body.prompt, url: `http://${host(req)}${name}` });
+      }
       return json(res, 200, {
         created: Math.floor(Date.now() / 1000),
-        data: [{ revised_prompt: body.prompt, url: `http://${host(req)}${name}` }],
-        usage: { input_tokens: 8, output_tokens: 260, total_tokens: 268 },
+        data: entries,
+        usage: { input_tokens: 8, output_tokens: 260 * count, total_tokens: 268 * count },
       });
     }
 
+    const entries = [];
+    for (let i = 0; i < count; i += 1) {
+      const one = i === 0 ? painted : paint(`${body.prompt}#${i}`, body.size);
+      entries.push({ revised_prompt: body.prompt, b64_json: `data:image/png;base64,${one.buffer.toString('base64')}` });
+    }
     return json(res, 200, {
       created: Math.floor(Date.now() / 1000),
-      data: [{ revised_prompt: body.prompt, b64_json: `data:image/png;base64,${painted.buffer.toString('base64')}` }],
-      usage: { input_tokens: 8, output_tokens: 260, total_tokens: 268 },
+      data: entries,
+      usage: { input_tokens: 8, output_tokens: 260 * count, total_tokens: 268 * count },
+    });
+  }
+
+  if (url.pathname === '/v1/images/edits' && req.method === 'POST') {
+    // multipart 不做完整解析，但「字段名对不对」必须验 —— 这里就在检查我们发出去的请求体
+    const text = Buffer.concat(await collect(req)).toString('latin1');
+    const missing = [];
+    if (!/name="model"/.test(text)) missing.push('model');
+    if (!/name="prompt"/.test(text)) missing.push('prompt');
+    if (!/name="image(\[\])?"/.test(text)) missing.push('image');
+    if (missing.length) {
+      return json(res, 400, {
+        error: { message: 'missing form fields: ' + missing.join(','), type: 'invalid_request_error' },
+      });
+    }
+
+    const model = String((text.match(/name="model"\r?\n\r?\n([^\r\n]+)/) || [])[1] || '').trim();
+    const prompt = String((text.match(/name="prompt"\r?\n\r?\n([^\r\n]+)/) || [])[1] || 'x').trim();
+    if (rejectBatch({ n: (text.match(/name="n"\r?\n\r?\n([^\r\n]+)/) || [])[1] })) {
+      return json(res, 400, {
+        error: { message: 'n must be 1: this client edits one image at a time', type: 'invalid_request_error' },
+      });
+    }
+    if (BROKEN.has(model)) {
+      return json(res, 404, { error: { message: `model ${model} not found in this group`, type: 'hk_api_error' } });
+    }
+    if (!MODELS.includes(model)) {
+      return json(res, 404, { error: { message: `unknown model ${model}`, type: 'hk_api_error' } });
+    }
+    if (NO_RESPONSE_FORMAT.has(model) && /name="response_format"/.test(text)) {
+      return json(res, 400, {
+        error: { message: 'response_format is not supported for this model', type: 'invalid_request_error' },
+      });
+    }
+
+    // 给一张「看起来被改过」的图：测试只关心「图有没有回来、我们能不能存下来」
+    const painted = paint('edited: ' + prompt, '512x512');
+    if (!/name="response_format"/.test(text)) {
+      const name = `/files/edit-${Date.now().toString(36)}.png`;
+      files.set(name, { buffer: painted.buffer, mime: 'image/png' });
+      return json(res, 200, { created: Math.floor(Date.now() / 1000), data: [{ url: `http://${host(req)}${name}` }] });
+    }
+    return json(res, 200, {
+      created: Math.floor(Date.now() / 1000),
+      data: [{ b64_json: `data:image/png;base64,${painted.buffer.toString('base64')}` }],
+      usage: { input_tokens: 20, output_tokens: 240, total_tokens: 260 },
     });
   }
 
@@ -192,7 +276,8 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`假上游已启动：http://${HOST}:${PORT}/v1`);
-  console.log('  能出图：gpt-image-2 / gpt-image-1 / dall-e-3 / flux-schnell / ideogram-v2 / gemini-2.5-flash-image / midjourney-v6-image');
+  console.log('  能出图：gpt-image-2 / gpt-image-1 / gpt-4o-image / dall-e-3 / flux-schnell / ideogram-v2 / gemini-2.5-flash-image / midjourney-v6-image');
+  console.log('  只接一张的：任何模型收到 n>1 都 400（本项目一次只出一张，这是回归闸门）');
   console.log('  故意坏的：dall-e-2（永远 404）、ideogram-v2（地址打不开，用来验证「取不回来也别丢图」）');
   console.log('  接上应用：$env:DEEPSEEK_API_KEY="sk-fake"; $env:AI_BASE_URL="http://127.0.0.1:' + PORT + '/v1"; node server.js');
 });

@@ -307,7 +307,6 @@ function createModelRegistry(config, options) {
               baseUrl: config.baseUrl,
               model: name,
               prompt: 'a plain light grey square, minimal, no text',
-              n: 1,
               size: '1024x1024',
               quality: 'low',
               responseFormat: 'b64_json',

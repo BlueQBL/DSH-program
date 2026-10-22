@@ -86,7 +86,6 @@ const Styles = require('../lib/styles.js');
     eq(out.size, '2048x1152', '尺寸原样');
     eq(out.quality, 'high', '画质原样');
     eq(out.style.id, 'watercolor', '风格 id');
-    eq(out.n, 1, '一次一张');
     has(out.finalPrompt, 'watercolor', '最终提示词带风格');
     eq(out.sizeNote, '', '没有替换说明');
 
@@ -121,6 +120,19 @@ const Styles = require('../lib/styles.js');
     eq(Styles.ratioLabel('不是尺寸'), '', '认不出就给空串');
     // 构图说明和比例标签是两件事，别混用
     has(Styles.ratioHintOf('1024x768'), 'framing', '构图说明是给模型看的一句英文');
+  });
+
+  await group('批量出图已经拆掉：没有张数概念、也没有上限表', () => {
+    // 这三个是「一次出多张」的遗产。留一条断言把它们钉住：
+    // 谁要是把批量加回来，这里先炸，而不是等用户花了 2 张的钱只看到 1 张
+    eq(typeof Styles.maxNOf, 'undefined', '不再有 maxNOf');
+    eq(typeof Styles.resolveN, 'undefined', '不再有 resolveN');
+    eq(Styles.LIMITS.nMax, undefined, '没有「最多几张」这回事');
+
+    const built = Styles.buildRequest({ prompt: '一只猫', styleId: 'photo', size: '1024x1024', model: 'gpt-image-2', n: 4 });
+    eq(built.n, undefined, 'buildRequest 不再产出 n（传了也不理）');
+    eq(Styles.LIMITS.n, 1, '恒定：一次一张');
+    eq(Styles.listPresets().nOptions, undefined, '界面上没有 1/2/4 这一组按钮了');
   });
 
   report('styles');
